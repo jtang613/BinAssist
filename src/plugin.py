@@ -1,7 +1,8 @@
+from binaryninja import *
 from binaryninja.settings import Settings
 from binaryninjaui import SidebarWidget, SidebarWidgetType, UIActionHandler, SidebarWidgetLocation, \
     SidebarContextSensitivity, ViewFrame, ViewType, UIContext
-from binaryninja import FunctionGraphType
+from binaryninja import FunctionGraphType, PythonScriptingProvider, PythonScriptingInstance
 from PySide6 import QtCore, QtGui, QtWidgets
 import markdown
 import sqlite3
@@ -170,27 +171,6 @@ class BinAssistWidget(SidebarWidget):
             func = self.LlmApi.HLILToText
         return func
 
-    def get_line_text(self):
-        """
-        Determines the appropriate function to convert binary view data into text based on the current 
-        intermediate language (IL) type set for the widget.
-
-        Returns:
-            callable: A function from LlmApi corresponding to the current IL type that converts binary data to text.
-        """
-        line = None
-        if self.il_type == FunctionGraphType.NormalFunctionGraph:
-            func = self.LlmApi.AsmLineToText
-        if self.il_type == FunctionGraphType.LowLevelILFunctionGraph:
-            func = self.LlmApi.LLILLineToText
-        if self.il_type == FunctionGraphType.MediumLevelILFunctionGraph:
-            func = self.LlmApi.MLILLineToText
-        if self.il_type == FunctionGraphType.HighLevelILFunctionGraph:
-            func = self.LlmApi.HLILLineToText
-        if self.il_type == FunctionGraphType.HighLevelLanguageRepresentationFunctionGraph:
-            func = self.LlmApi.HLILLineToText
-        return func
-
     def onExplainILClicked(self) -> None:
         """
         Handles the event when the 'Explain Function' button is clicked.
@@ -326,9 +306,14 @@ class BinAssistWidget(SidebarWidget):
             str: The processed query with placeholders replaced by actual binary data.
         """
         func = self.get_func_text()
-        line = self.get_line_text()
 
-        query = query.replace("#line", f'\n```\n{line(self.bv, self.offset_addr)}\n```\n')
+        for inst in PythonScriptingInstance._registered_instances:
+            break
+        inst.interpreter.update_locals()
+        inst.interpreter.update_magic_variables()
+        line = PythonScriptingProvider.magic_variables['current_il_instruction'].get_value(inst)
+
+        query = query.replace("#line", f'\n```\n{line}\n```\n')
         query = query.replace('#func', f'\n```\n{func(self.bv, self.offset_addr)}\n```\n')
         query = query.replace("#addr", hex(self.offset_addr) or "")
         return query
