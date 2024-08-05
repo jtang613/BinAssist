@@ -201,7 +201,7 @@ class LlmApi:
         for bb in function.basic_blocks:
             for dt in bb.disassembly_text:
                 s = str(dt)
-                asm_instructions += f"0x{dt.address}  {s}"
+                asm_instructions += f"\n0x{dt.address}  {s}"
         tokens = function.get_type_tokens()[0].tokens
         return f"{''.join(x.text for x in tokens)}\n{asm_instructions}\n"
 
