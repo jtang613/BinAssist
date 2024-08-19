@@ -1,8 +1,12 @@
+from binaryninja import BackgroundTaskThread
 from binaryninja.settings import Settings
 from openai import OpenAI
 from .threads import StreamingThread
+from .rag import RAG
+from typing import List
 import sqlite3
 import httpx
+
 http_client = httpx.Client(verify=False)
 
 SYSTEM_PROMPT = '''
@@ -28,6 +32,29 @@ class LlmApi:
         self.settings = Settings()
         self.threads = []  # Keep a list of active threads
         self.initialize_database()
+        self.rag = RAG(self.settings.get_string('binassist.rag_db_path'))
+
+    def rag_init(self, markdown_files: List[str]) -> None:
+        """
+        Initialize the RAG context database
+        """
+        class RAGInitTask(BackgroundTaskThread):
+            def __init__(self, rag, markdown_files):
+                BackgroundTaskThread.__init__(self, "Initializing RAG Database", can_cancel=True)
+                self.rag = rag
+                self.markdown_files = markdown_files
+
+            def run(self):
+                self.rag.rag_init(self.markdown_files)
+
+        RAGInitTask(self.rag, markdown_files).start()
+
+    def use_rag(self) -> bool:
+        """
+        Returns:
+            The current state of the 'use_rag' setting.
+        """
+        return self.settings.get_bool('binassist.use_rag')
 
     def _create_client(self) -> OpenAI:
         """
@@ -118,8 +145,46 @@ class LlmApi:
             str: The query sent to the LLM.
         """
         client = self._create_client()
-        self._start_thread(client, query, SYSTEM_PROMPT, None, signal)
-        return query
+        if self.use_rag():
+            context = self._get_rag_context(query)
+            augmented_query = f"Context:\n{context}\n\nQuery: {query}"
+            self._start_thread(client, augmented_query, SYSTEM_PROMPT, None, signal)
+            return augmented_query
+        else:
+            self._start_thread(client, query, SYSTEM_PROMPT, None, signal)
+            return query
+
+    def _get_rag_context(self, query: str) -> str:
+        """
+        Query the RAG database for query context.
+
+        Parameters:
+            query (str): The query text.
+
+        Returns:
+            str: The query context retrieved from the RAG DB.
+        """
+        results = self.rag.query(query)
+        context = "\n\n".join([f"Source: {result['metadata']['source']}\n{result['text']}" for result in results])
+        return context
+
+    def delete_rag_documents(self, document_ids: List[str]) -> None:
+        """
+        Delete documents from the RAG database.
+
+        Parameters:
+            document_ids (str): The list of documents.
+        """
+        self.rag.delete_documents(document_ids)
+
+    def get_rag_document_list(self) -> List[str]:
+        """
+        Retrieve the list of documents from the RAG database.
+
+        Returns:
+            List[str]: The list of documents.
+        """
+        return self.rag.get_document_list()
 
     def _start_thread(self, client, query, system, addr_to_text_func, signal) -> None:
         """

@@ -50,6 +50,9 @@ class BinAssistWidget(SidebarWidget):
         self.query_response_browser.setOpenLinks(False)
         self.query_response_browser.anchorClicked.connect(self.onAnchorClicked)
 
+        self.use_rag_checkbox = None
+        self.rag_init_button = None
+
         self._init_ui()
 
     def _init_ui(self) -> None:
@@ -63,10 +66,13 @@ class BinAssistWidget(SidebarWidget):
 
         explain_tab = self.createExplainTab()
         query_tab = self.createQueryTab()
+        rag_management_tab = self.createRAGManagementTab()
 
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.addTab(explain_tab, "Explain")
         self.tabs.addTab(query_tab, "Custom Query")
+        self.tabs.addTab(rag_management_tab, "RAG Management")
+
 
         layout = QtWidgets.QVBoxLayout()
         layout.addWidget(self.tabs)
@@ -95,15 +101,57 @@ class BinAssistWidget(SidebarWidget):
             QWidget: A widget configured with query functionalities.
         """
         layout = QtWidgets.QVBoxLayout()
+        
+        # Create and add the 'Use RAG' checkbox
+        self.use_rag_checkbox = QtWidgets.QCheckBox("Use RAG")
+        self.use_rag_checkbox.setChecked(self.settings.get_bool('binassist.use_rag'))
+        self.use_rag_checkbox.stateChanged.connect(self.onUseRAGChanged)
+        layout.addWidget(self.use_rag_checkbox)
+
         splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         splitter.addWidget(self.query_edit)
         splitter.addWidget(self.query_response_browser)
         splitter.setSizes([200, 300])
         layout.addWidget(splitter)
         layout.addLayout(self._create_query_buttons_layout())
+        
         query_widget = QtWidgets.QWidget()
         query_widget.setLayout(layout)
         return query_widget
+
+    def createRAGManagementTab(self) -> QtWidgets.QWidget:
+        """
+        Creates the tab for managing the RAG database.
+
+        Returns:
+            QWidget: A widget configured with RAG management functionalities.
+        """
+        layout = QtWidgets.QVBoxLayout()
+
+        # Initialize RAG button
+        self.rag_init_button = QtWidgets.QPushButton("Add Documents to RAG")
+        self.rag_init_button.clicked.connect(self.onRAGInitClicked)
+        layout.addWidget(self.rag_init_button)
+
+        # Document list
+        self.rag_document_list = QtWidgets.QListWidget()
+        self.rag_document_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        layout.addWidget(self.rag_document_list)
+
+        # Delete button
+        delete_button = QtWidgets.QPushButton("Delete Selected")
+        delete_button.clicked.connect(self.onDeleteRAGDocumentsClicked)
+        layout.addWidget(delete_button)
+
+        # Refresh button
+        refresh_button = QtWidgets.QPushButton("Refresh List")
+        refresh_button.clicked.connect(self.refreshRAGDocumentList)
+        layout.addWidget(refresh_button)
+
+        rag_management_widget = QtWidgets.QWidget()
+        rag_management_widget.setLayout(layout)
+        self.refreshRAGDocumentList()
+        return rag_management_widget
 
     def _create_offset_layout(self) -> QtWidgets.QHBoxLayout:
         """
@@ -170,6 +218,47 @@ class BinAssistWidget(SidebarWidget):
         if self.il_type == FunctionGraphType.HighLevelLanguageRepresentationFunctionGraph:
             func = self.LlmApi.HLILToText
         return func
+
+    def onUseRAGChanged(self, state):
+        self.settings.set_bool('binassist.use_rag', state == QtCore.Qt.Checked)
+
+    def onRAGInitClicked(self):
+        file_dialog = QtWidgets.QFileDialog()
+        markdown_files, _ = file_dialog.getOpenFileNames(self, "Select Markdown Files", "", "Markdown Files (*.md)")
+        if markdown_files:
+            self.LlmApi.rag_init(markdown_files)
+            QtWidgets.QMessageBox.information(self, "RAG Initialization", "RAG initialization complete.")
+            self.refreshRAGDocumentList()
+
+    def onDeleteRAGDocumentsClicked(self):
+        """
+        Handles the deletion of selected source documents from the RAG database.
+        """
+        selected_items = self.rag_document_list.selectedItems()
+        if not selected_items:
+            QtWidgets.QMessageBox.information(self, "Delete Documents", "No documents selected.")
+            return
+
+        reply = QtWidgets.QMessageBox.question(self, 'Delete Documents', 
+                                               f'Are you sure you want to delete {len(selected_items)} document(s) and all associated embeddings?',
+                                               QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, 
+                                               QtWidgets.QMessageBox.No)
+
+        if reply == QtWidgets.QMessageBox.Yes:
+            documents_to_delete = [item.text() for item in selected_items]
+            self.LlmApi.rag.delete_documents(documents_to_delete)
+            self.refreshRAGDocumentList()
+            QtWidgets.QMessageBox.information(self, "Delete Documents", f"{len(documents_to_delete)} document(s) and their associated embeddings deleted.")
+
+    def refreshRAGDocumentList(self):
+        """
+        Refreshes the list of source documents in the RAG database, sorted alphabetically.
+        """
+        self.rag_document_list.clear()
+        documents = self.LlmApi.rag.get_document_list()
+        documents.sort()  # Sort the list alphabetically
+        for doc in documents:
+            self.rag_document_list.addItem(doc)
 
     def onExplainILClicked(self) -> None:
         """

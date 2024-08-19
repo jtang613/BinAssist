@@ -33,7 +33,9 @@ class BinAssistSettings(Settings):
             ('binassist.api_key', 'API Key', 'The API key used to make requests.', 'string', None),
             ('binassist.model', 'LLM Model', 'The LLM model used to generate the response.', 'string', 'gpt-4-turbo'),
             ('binassist.rlhf_db', 'RLHF Database Path', 'The to store the RLHF database.', 'string', 'rlhf_feedback.db'),
-            ('binassist.max_tokens', 'Max Completion Tokens', 'The maximum number of tokens used for completion.', 'number', 8192, 1, 32768),
+            ('binassist.max_tokens', 'Max Completion Tokens', 'The maximum number of tokens used for completion.', 'number', 8192, 1, 128*1024),
+            ('binassist.rag_db_path', 'RAG Database Path', 'Path to store the RAG vector database.', 'string', 'binassist_rag_db'),
+            ('binassist.use_rag', 'Use RAG', 'Enable Retrieval Augmented Generation for queries.', 'boolean', False),
         ]
 
         for setting in settings_definitions:
