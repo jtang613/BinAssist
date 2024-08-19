@@ -1,0 +1,6 @@
+openai
+sqlite3
+markdown
+httpx
+chromadb
+sentence-transformers
