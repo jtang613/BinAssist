@@ -1,5 +1,5 @@
 openai
-sqlite3
+pysqlite3
 markdown
 httpx
 chromadb

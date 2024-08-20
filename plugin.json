@@ -30,8 +30,11 @@
   "dependencies": {
     "pip": [
       "openai",
-      "autogen",
-      "markdown"
+      "pysqlite3",
+      "markdown",
+      "httpx",
+      "chromadb",
+      "sentence-transformers"
     ]
   },
   "version": "0.1.0",
