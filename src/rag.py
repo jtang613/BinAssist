@@ -38,7 +38,7 @@ class RAG:
         for file_path in markdown_files:
             with open(file_path, 'r') as file:
                 content = file.read()
-                chunks = self._chunk_text(content)
+                chunks = self._chunk_text_md(content)
                 
                 self.collection.add(
                     documents=chunks,
@@ -62,7 +62,7 @@ class RAG:
         )
         return [{"text": doc, "metadata": meta} for doc, meta in zip(results['documents'][0], results['metadatas'][0])]
 
-    def _chunk_text(self, text: str, chunk_size: int = 1000) -> List[str]:
+    def _chunk_text(self, text: str, chunk_size: int = 4000) -> List[str]:
         """
         Split the input document into chunks. (Naive method)
 
@@ -73,6 +73,23 @@ class RAG:
             List[str]: Chunks.
         """
         return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+
+    def _chunk_text_md(self, text: str) -> List[str]:
+        """
+        Split the input document into chunks based on Markdown Heading level 1 (H1, '#').
+
+        Parameters:
+            text (str): Input document.
+        Returns:
+            List[str]: Chunks.
+        """
+        # Split the text based on H1 headings
+        chunks = re.split(r'(?m)^_class ', text)
+        
+        # Prepend the '#' to each chunk to maintain the heading
+        chunks = [f"# {chunk.strip()}" for chunk in chunks if chunk.strip()]
+
+        return chunks
 
     def delete_documents(self, source_documents: List[str]) -> None:
         """

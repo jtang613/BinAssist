@@ -174,12 +174,19 @@ class BinAssistWidget(SidebarWidget):
             QHBoxLayout: Layout containing buttons for explanation actions.
         """
         layout = QtWidgets.QHBoxLayout()
+        
         explain_il_bt = QtWidgets.QPushButton("Explain Function", self)
+        explain_line_bt = QtWidgets.QPushButton("Explain Line", self)
         clear_text_bt = QtWidgets.QPushButton("Clear", self)
+        
         explain_il_bt.clicked.connect(self.onExplainILClicked)
+        explain_line_bt.clicked.connect(self.onExplainLineClicked)
         clear_text_bt.clicked.connect(self.onClearTextClicked)
+        
         layout.addWidget(explain_il_bt)
+        layout.addWidget(explain_line_bt)
         layout.addWidget(clear_text_bt)
+        
         return layout
 
     def _create_query_buttons_layout(self) -> QtWidgets.QHBoxLayout:
@@ -218,6 +225,23 @@ class BinAssistWidget(SidebarWidget):
         if self.il_type == FunctionGraphType.HighLevelLanguageRepresentationFunctionGraph:
             func = self.LlmApi.HLILToText
         return func
+
+    def get_line_text(self, bv, addr) -> str:
+        """
+        Returns the text of the currently selected line regardless of IL level.
+
+        Returns:
+            str: The text of the currently selected line.
+        """
+        if self.il_type == FunctionGraphType.NormalFunctionGraph:
+            line = f"0x{addr:08x}  {bv.get_disassembly(addr)}"
+        else:
+            for inst in PythonScriptingInstance._registered_instances:
+                break
+            inst.interpreter.update_locals()
+            inst.interpreter.update_magic_variables()
+            line = PythonScriptingProvider.magic_variables['current_il_instruction'].get_value(inst)
+        return line
 
     def onUseRAGChanged(self, state):
         self.settings.set_bool('binassist.use_rag', state == QtCore.Qt.Checked)
@@ -269,6 +293,16 @@ class BinAssistWidget(SidebarWidget):
         func = self.get_func_text()
         self.text_box.clear()
         self.request = self.LlmApi.explain(self.bv, self.offset_addr, datatype, il_type, func, self.display_response)
+
+    def onExplainLineClicked(self) -> None:
+        """
+        Handles the event when the 'Explain Line' button is clicked.
+        """
+        datatype = self.datatype.split(':')[1]
+        il_type = self.il_type.name
+        self.text_box.clear()
+        self.request = self.LlmApi.explain(self.bv, self.offset_addr, datatype, il_type, self.get_line_text, self.display_response)
+
 
     def onClearTextClicked(self) -> None:
         """
@@ -396,11 +430,7 @@ class BinAssistWidget(SidebarWidget):
         """
         func = self.get_func_text()
 
-        for inst in PythonScriptingInstance._registered_instances:
-            break
-        inst.interpreter.update_locals()
-        inst.interpreter.update_magic_variables()
-        line = PythonScriptingProvider.magic_variables['current_il_instruction'].get_value(inst)
+        line = self.get_line_text(self.bv, self.offset_addr)
 
         query = query.replace("#line", f'\n```\n{line}\n```\n')
         query = query.replace('#func', f'\n```\n{func(self.bv, self.offset_addr)}\n```\n')
