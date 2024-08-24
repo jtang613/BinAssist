@@ -66,11 +66,13 @@ class BinAssistWidget(SidebarWidget):
 
         explain_tab = self.createExplainTab()
         query_tab = self.createQueryTab()
+        actions_tab = self.createActionsTab()
         rag_management_tab = self.createRAGManagementTab()
 
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.addTab(explain_tab, "Explain")
         self.tabs.addTab(query_tab, "Custom Query")
+        self.tabs.addTab(actions_tab, "Actions") 
         self.tabs.addTab(rag_management_tab, "RAG Management")
 
 
@@ -118,6 +120,32 @@ class BinAssistWidget(SidebarWidget):
         query_widget = QtWidgets.QWidget()
         query_widget.setLayout(layout)
         return query_widget
+
+    def createActionsTab(self) -> QtWidgets.QWidget:
+        layout = QtWidgets.QVBoxLayout()
+
+        # Create the 3-column table view
+        self.actions_table = QtWidgets.QTableWidget()
+        self.actions_table.setColumnCount(3)
+        self.actions_table.setHorizontalHeaderLabels(["Select", "Action", "Status"])
+        layout.addWidget(self.actions_table)
+
+        # Create the buttons
+        buttons_layout = QtWidgets.QHBoxLayout()
+        analyze_button = QtWidgets.QPushButton("Analyze Function")
+        apply_button = QtWidgets.QPushButton("Apply Actions")
+
+        analyze_button.clicked.connect(self.onAnalyzeFunctionClicked)  # Stub handler
+        apply_button.clicked.connect(self.onApplyActionsClicked)  # Stub handler
+
+        buttons_layout.addWidget(analyze_button)
+        buttons_layout.addWidget(apply_button)
+
+        layout.addLayout(buttons_layout)
+
+        actions_widget = QtWidgets.QWidget()
+        actions_widget.setLayout(layout)
+        return actions_widget
 
     def createRAGManagementTab(self) -> QtWidgets.QWidget:
         """
@@ -319,6 +347,18 @@ class BinAssistWidget(SidebarWidget):
         query = self.process_custom_query(query)
         self.query_response_browser.clear()
         self.request = self.LlmApi.query(query, self.display_custom_response)
+
+    def onAnalyzeFunctionClicked(self) -> None:
+        """
+        Stub for the 'Analyze Function' button click event.
+        """
+        print("Analyze Function clicked")
+
+    def onApplyActionsClicked(self) -> None:
+        """
+        Stub for the 'Apply Actions' button click event.
+        """
+        print("Apply Actions clicked")
 
     def display_response(self, response) -> None:
         """

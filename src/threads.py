@@ -12,7 +12,7 @@ class StreamingThread(QtCore.QThread):
 
     update_response = QtCore.Signal(str)
 
-    def __init__(self, client: OpenAI, query: str, system: str, addr_to_text_func) -> None:
+    def __init__(self, client: OpenAI, query: str, system: str, addr_to_text_func, tools=None) -> None:
         """
         Initializes the thread with the necessary parameters for making a streaming API call.
 
@@ -21,6 +21,7 @@ class StreamingThread(QtCore.QThread):
             query (str): The user's query to be processed.
             system (str): System-level instructions or context for the API call.
             addr_to_text_func (callable): A function that converts addresses to text, used in constructing queries.
+            tools (list): A list of tools that the LLM can call during the response.
         """
         super().__init__()
         self.settings = Settings()
@@ -28,6 +29,7 @@ class StreamingThread(QtCore.QThread):
         self.query = query
         self.addr_to_text_func = addr_to_text_func
         self.system = system
+        self.tools = tools or []
 
     def run(self) -> None:
         """
@@ -40,12 +42,18 @@ class StreamingThread(QtCore.QThread):
                 messages=[
                     {"role": "system", "content": self.system},
                     {"role": "user", "content": self.query}
-                    ],
+                ],
                 stream=True,
                 max_tokens=self.settings.get_integer('binassist.max_tokens'),
+                tools=self.tools,
+                function_call={"name": self.tools[0]['name']} if self.tools else None
             )
+
             response_buffer = ""
             for chunk in response:
+                if chunk.choices[0].finish_reason == 'tool_calls':
+                    self.update_response.emit(str(chunk.choices[0].message.tool_calls))
+                    return
                 message_chunk = chunk.choices[0].delta.content or ""
                 response_buffer += message_chunk
                 self.update_response.emit(response_buffer)

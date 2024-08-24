@@ -186,7 +186,7 @@ class LlmApi:
         """
         return self.rag.get_document_list()
 
-    def _start_thread(self, client, query, system, addr_to_text_func, signal) -> None:
+    def _start_thread(self, client, query, system, addr_to_text_func, signal, tools=None) -> None:
         """
         Starts a new thread to handle streaming responses from the LLM.
 
@@ -196,8 +196,9 @@ class LlmApi:
             system (str): System context for the query.
             addr_to_text_func (callable): Function to convert addresses to text.
             signal (Signal): Qt signal to update with the response.
+            tools (dict): A dictionary of available toold for the LLM to consdider.
         """
-        thread = StreamingThread(client, query, system, addr_to_text_func)
+        thread = StreamingThread(client, query, system, addr_to_text_func, tools)
         thread.update_response.connect(signal)
         self.threads.append(thread)  # Keep track of the thread
         thread.start()
