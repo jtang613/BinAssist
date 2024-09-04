@@ -35,23 +35,9 @@ class BinAssistWidget(SidebarWidget):
         self.il_type = None
         self.request = None
         self.response = None
+        self.session_log = []
 
         self.offset = QtWidgets.QLabel(hex(0))
-
-        self.text_box = QtWidgets.QTextBrowser()
-        self.text_box.setReadOnly(True)
-        self.text_box.setOpenLinks(False)
-        self.text_box.anchorClicked.connect(self.onAnchorClicked)
-
-        self.query_edit = QtWidgets.QTextEdit()
-        self.query_edit.setPlaceholderText("Enter your query here...")
-        self.query_response_browser = QtWidgets.QTextBrowser()
-        self.query_response_browser.setReadOnly(True)
-        self.query_response_browser.setOpenLinks(False)
-        self.query_response_browser.anchorClicked.connect(self.onAnchorClicked)
-
-        self.use_rag_checkbox = None
-        self.rag_init_button = None
 
         self._init_ui()
 
@@ -87,6 +73,11 @@ class BinAssistWidget(SidebarWidget):
         Returns:
             QWidget: A widget configured with explanation functionalities.
         """
+        self.text_box = QtWidgets.QTextBrowser()
+        self.text_box.setReadOnly(True)
+        self.text_box.setOpenLinks(False)
+        self.text_box.anchorClicked.connect(self.onAnchorClicked)
+
         layout = QtWidgets.QVBoxLayout()
         layout.addLayout(self._create_offset_layout())
         layout.addWidget(self.text_box)
@@ -102,6 +93,13 @@ class BinAssistWidget(SidebarWidget):
         Returns:
             QWidget: A widget configured with query functionalities.
         """
+        self.query_edit = QtWidgets.QTextEdit()
+        self.query_edit.setPlaceholderText("Enter your query here...")
+        self.query_response_browser = QtWidgets.QTextBrowser()
+        self.query_response_browser.setReadOnly(True)
+        self.query_response_browser.setOpenLinks(False)
+        self.query_response_browser.anchorClicked.connect(self.onAnchorClicked)
+
         layout = QtWidgets.QVBoxLayout()
         
         # Create and add the 'Use RAG' checkbox
@@ -111,9 +109,9 @@ class BinAssistWidget(SidebarWidget):
         layout.addWidget(self.use_rag_checkbox)
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        splitter.addWidget(self.query_edit)
         splitter.addWidget(self.query_response_browser)
-        splitter.setSizes([200, 300])
+        splitter.addWidget(self.query_edit)
+        splitter.setSizes([400, 100])
         layout.addWidget(splitter)
         layout.addLayout(self._create_query_buttons_layout())
         
@@ -336,6 +334,7 @@ class BinAssistWidget(SidebarWidget):
         """
         Clears all text boxes when the 'Clear' button is clicked.
         """
+        self.session_log.clear()  # Clear the session log
         self.text_box.clear()
         self.query_response_browser.clear()
 
@@ -345,8 +344,13 @@ class BinAssistWidget(SidebarWidget):
         """
         query = self.query_edit.toPlainText()
         query = self.process_custom_query(query)
+        self.session_log.append({"user": query, "assistant": "Awaiting response..."})
+
+        # Prepend the session log to the query for context
+        full_query = "\n\n".join([f"User: {entry['user']}\nAssistant: {entry['assistant']}" for entry in self.session_log]) + f"\n\nUser: {query}"
+
         self.query_response_browser.clear()
-        self.request = self.LlmApi.query(query, self.display_custom_response)
+        self.request = self.LlmApi.query(full_query, self.display_custom_response)
 
     def onAnalyzeFunctionClicked(self) -> None:
         """
@@ -386,7 +390,12 @@ class BinAssistWidget(SidebarWidget):
         Parameters:
             response (str): The custom response to be displayed.
         """
-        html_resp = markdown.markdown(response, extensions=['fenced_code'])
+        # Update session log with response
+        self.session_log[-1]["assistant"] = response
+        # Rebuild and display the full conversation history
+        full_conversation = "\n\n".join([f"User: {entry['user']}\n\nAssistant: {entry['assistant']}" for entry in self.session_log])
+
+        html_resp = markdown.markdown(full_conversation, extensions=['fenced_code'])
         html_resp += self._generate_feedback_buttons()
         self.response = response
         self.query_response_browser.setHtml(html_resp)
