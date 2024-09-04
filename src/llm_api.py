@@ -3,9 +3,11 @@ from binaryninja.settings import Settings
 from openai import OpenAI
 from .threads import StreamingThread
 from .rag import RAG
+from .tools import BATools
 from typing import List
 import sqlite3
 import httpx
+import json
 
 http_client = httpx.Client(verify=False)
 
@@ -16,6 +18,23 @@ You are an expert Python and Rust developer. You are familiar with common framew
 such as WinSock, OpenSSL, MFC, etc. You are an expert in TCP/IP network programming and packet analysis.
 You always respond to queries in a structured format using Markdown styling for headings and lists. 
 You format code blocks using back-tick code-fencing.
+'''
+
+FUNCTION_PROMPT = '''
+USE THE PROVIDED TOOLS WHEN NECESSARY.
+'''
+
+FORMAT_PROMPT = '''
+The output MUST strictly adhere to the following JSON format, and NO other text MUST be included.
+The example format is as follows. Please make sure the parameter type is correct. If no function call is needed, please make tool_calls an empty list '[]'.
+```
+{
+    "tool_calls": [
+    {"name": "rename_function", "arguments": {"addr": "function_address", "name": "new_name"}},
+    ... (more tool calls as required)
+    ]
+}
+```
 '''
 
 class LlmApi:
@@ -130,7 +149,7 @@ class LlmApi:
                 f"present. But only fallback to strings or log messages that are clearly function " +\
                 f"names for this function.\n```\n" +\
                 f"{addr_to_text_func(bv, addr)}\n```"
-        self._start_thread(client, query, SYSTEM_PROMPT, lambda x: addr_to_text_func(bv, x), signal)
+        self._start_thread(client, query, SYSTEM_PROMPT, signal)
         return query
 
     def query(self, query, signal) -> str:
@@ -148,11 +167,79 @@ class LlmApi:
         if self.use_rag():
             context = self._get_rag_context(query)
             augmented_query = f"Context:\n{context}\n\nQuery: {query}"
-            self._start_thread(client, augmented_query, SYSTEM_PROMPT, None, signal)
+            self._start_thread(client, augmented_query, SYSTEM_PROMPT, signal)
             return augmented_query
         else:
-            self._start_thread(client, query, SYSTEM_PROMPT, None, signal)
+            self._start_thread(client, query, SYSTEM_PROMPT, signal)
             return query
+
+    def analyze_fn_names(self, bv, addr, bin_type, il_type, addr_to_text_func, signal) -> str:
+        """
+        Analyze the function at a specific address and il_type using the LLM to produce a set of
+        recommended actions.
+
+        Parameters:
+            bv (BinaryView): The binary view containing the address.
+            addr (int): The address within the binary to describe.
+            bin_type (str): The type of binary view.
+            il_type (str): The intermediate language type used.
+            addr_to_text_func (callable): Function converting addresses to text.
+            signal (Signal): Qt signal to handle the response asynchronously.
+
+        Returns:
+            List[dict]: The array of proposed actionns
+        """
+        client = self._create_client()
+        query = f"Use the 'rename_function' tool:\n```\n" +\
+                f"{addr_to_text_func(bv, addr)}\n```\n" +\
+                f"Examine the code functionality and examine the strings and log parameters." +\
+                f"SUGGEST THREE POSSIBLE FUNCTION NAMES THAT ALIGN AS CLOSELY AS POSSIBLE TO WHAT " +\
+                f"THE CODE ABOVE DOES. Note that log messages sometimes contain the exact " +\
+                f"function name - if you detect the function name in a log message, suggest that exact name.\n" +\
+                f"RESPOND ONLY WITH THE RENAME_FUNCTION PARAMETERS. DO NOT INCLUDE ANY OTHER TEXT.\n" +\
+                f"ALL JSON VALUES MUST BE TEXT STRINGS, INCLUDING NUMBERS AND ADDRESSES. ie: \"0x1234abcd\"" +\
+                f"ALL JSON MUST BE PROPERLY FORMATTED WITH NO EMBEDDED COMMENTS."
+
+        print(f"\nQuery: {query}\n")
+        self._start_thread(client, query, f"{SYSTEM_PROMPT}{FUNCTION_PROMPT}{FORMAT_PROMPT}", signal, BATools.templates)
+        with open('query.txt', 'w') as f:
+            f.write(f"SYSTEM:\n{SYSTEM_PROMPT}{FUNCTION_PROMPT}{FORMAT_PROMPT}")
+            f.write(f"TOOLS:\n{BATools.templates}")
+            f.write(f"\n\nQUERY:\n{query}")
+        return query
+
+    def analyze_fn_vars(self, bv, addr, bin_type, il_type, addr_to_text_func, signal) -> str:
+        """
+        Analyze the function at a specific address and il_type using the LLM to produce a set of
+        recommended actions.
+
+        Parameters:
+            bv (BinaryView): The binary view containing the address.
+            addr (int): The address within the binary to describe.
+            bin_type (str): The type of binary view.
+            il_type (str): The intermediate language type used.
+            addr_to_text_func (callable): Function converting addresses to text.
+            signal (Signal): Qt signal to handle the response asynchronously.
+
+        Returns:
+            List[dict]: The array of proposed actionns
+        """
+        client = self._create_client()
+        query = f"Use the 'rename_variable' tool:\n```\n" +\
+                f"{addr_to_text_func(bv, addr)}\n```\n" +\
+                f"Examine the code functionality and examine the strings and log parameters.\n" +\
+                f"SUGGEST VARIABLE NAMES THAT BETTER ALIGN WITH THE CODE FUNCTIONALITY.\n" +\
+                f"RESPOND ONLY WITH THE RENAME_VARIABLE PARAMETERS (addr, var_name, new_name). DO NOT INCLUDE ANY OTHER TEXT.\n" +\
+                f"ALL JSON VALUES MUST BE TEXT STRINGS, INCLUDING NUMBERS AND ADDRESSES. ie: \"0x1234abcd\"" +\
+                f"ALL JSON MUST BE PROPERLY FORMATTED WITH NO EMBEDDED COMMENTS."
+
+        print(f"\nQuery: {query}\n")
+        self._start_thread(client, query, f"{SYSTEM_PROMPT}{FUNCTION_PROMPT}{FORMAT_PROMPT}", signal, BATools.templates)
+        with open('query.txt', 'w') as f:
+            f.write(f"SYSTEM:\n{SYSTEM_PROMPT}{FUNCTION_PROMPT}{FORMAT_PROMPT}")
+            f.write(f"TOOLS:\n{BATools.templates}")
+            f.write(f"\n\nQUERY:\n{query}")
+        return query
 
     def _get_rag_context(self, query: str) -> str:
         """
@@ -186,7 +273,7 @@ class LlmApi:
         """
         return self.rag.get_document_list()
 
-    def _start_thread(self, client, query, system, addr_to_text_func, signal, tools=None) -> None:
+    def _start_thread(self, client, query, system, signal, tools=None) -> None:
         """
         Starts a new thread to handle streaming responses from the LLM.
 
@@ -194,11 +281,10 @@ class LlmApi:
             client (OpenAI): The API client.
             query (str): The query text.
             system (str): System context for the query.
-            addr_to_text_func (callable): Function to convert addresses to text.
             signal (Signal): Qt signal to update with the response.
             tools (dict): A dictionary of available toold for the LLM to consdider.
         """
-        thread = StreamingThread(client, query, system, addr_to_text_func, tools)
+        thread = StreamingThread(client, query, system, tools)
         thread.update_response.connect(signal)
         self.threads.append(thread)  # Keep track of the thread
         thread.start()

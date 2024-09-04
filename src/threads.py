@@ -12,7 +12,7 @@ class StreamingThread(QtCore.QThread):
 
     update_response = QtCore.Signal(str)
 
-    def __init__(self, client: OpenAI, query: str, system: str, addr_to_text_func, tools=None) -> None:
+    def __init__(self, client: OpenAI, query: str, system: str, tools=None) -> None:
         """
         Initializes the thread with the necessary parameters for making a streaming API call.
 
@@ -20,14 +20,12 @@ class StreamingThread(QtCore.QThread):
             client (OpenAI): The OpenAI client used for making API calls.
             query (str): The user's query to be processed.
             system (str): System-level instructions or context for the API call.
-            addr_to_text_func (callable): A function that converts addresses to text, used in constructing queries.
             tools (list): A list of tools that the LLM can call during the response.
         """
         super().__init__()
         self.settings = Settings()
         self.client = client
         self.query = query
-        self.addr_to_text_func = addr_to_text_func
         self.system = system
         self.tools = tools or []
 
@@ -43,19 +41,25 @@ class StreamingThread(QtCore.QThread):
                     {"role": "system", "content": self.system},
                     {"role": "user", "content": self.query}
                 ],
-                stream=True,
+                stream=False if self.tools else True,
                 max_tokens=self.settings.get_integer('binassist.max_tokens'),
                 tools=self.tools,
-                function_call={"name": self.tools[0]['name']} if self.tools else None
             )
-
-            response_buffer = ""
-            for chunk in response:
-                if chunk.choices[0].finish_reason == 'tool_calls':
-                    self.update_response.emit(str(chunk.choices[0].message.tool_calls))
+            if self.tools:
+                print(f"finish_reason: {response.choices[0].finish_reason}")
+                print(f"{response.choices[0].message.content}")
+                if response.choices[0].finish_reason == 'tool_calls':
+                    self.update_response.emit(response.choices[0].message.tool_calls)
+                    print(f"{response.choices[0].message.tool_calls}")
                     return
-                message_chunk = chunk.choices[0].delta.content or ""
-                response_buffer += message_chunk
-                self.update_response.emit(response_buffer)
+                else:
+                    self.update_response.emit(response.choices[0].message.content)
+                    return
+            else:
+                response_buffer = ""
+                for chunk in response:
+                    message_chunk = chunk.choices[0].delta.content or ""
+                    response_buffer += message_chunk
+                    self.update_response.emit(response_buffer)
         except Exception as e:
             self.update_response.emit(f"Failed to get response: {e}")

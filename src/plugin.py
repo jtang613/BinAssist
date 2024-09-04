@@ -126,8 +126,8 @@ class BinAssistWidget(SidebarWidget):
 
         # Create the 3-column table view
         self.actions_table = QtWidgets.QTableWidget()
-        self.actions_table.setColumnCount(3)
-        self.actions_table.setHorizontalHeaderLabels(["Select", "Action", "Status"])
+        self.actions_table.setColumnCount(4)
+        self.actions_table.setHorizontalHeaderLabels(["Select", "Action", "Description", "Status"])
         layout.addWidget(self.actions_table)
 
         # Create the buttons
@@ -353,6 +353,13 @@ class BinAssistWidget(SidebarWidget):
         Stub for the 'Analyze Function' button click event.
         """
         print("Analyze Function clicked")
+        datatype = self.datatype.split(':')[1]
+        il_type = self.il_type.name
+        func = self.get_func_text()
+        self.actions_table.setRowCount(0)
+        self.request = self.LlmApi.analyze_fn_names(self.bv, self.offset_addr, datatype, il_type, func, self.display_analyze_response)
+        self.request = self.LlmApi.analyze_fn_names(self.bv, self.offset_addr, datatype, il_type, func, self.display_analyze_response)
+        self.request = self.LlmApi.analyze_fn_vars(self.bv, self.offset_addr, datatype, il_type, func, self.display_analyze_response)
 
     def onApplyActionsClicked(self) -> None:
         """
@@ -383,6 +390,57 @@ class BinAssistWidget(SidebarWidget):
         html_resp += self._generate_feedback_buttons()
         self.response = response
         self.query_response_browser.setHtml(html_resp)
+
+    def display_analyze_response(self, response) -> None:
+        """
+        Displays the custom formatted response from the language model in the actions table.
+
+        Parameters:
+            response (str): The JSON response to be displayed.
+        """
+        try:
+            # Parse the JSON response
+            actions = json.loads(response.replace('```json\n','').replace('```\n','').replace('\n```',''))
+            
+            # Populate the table with the parsed actions
+            for idx, action in enumerate(actions.get("tool_calls", [])):
+                self.actions_table.insertRow(idx)
+
+                # Create a checkbox and center it in the "Select" column
+                select_checkbox = QtWidgets.QCheckBox()
+                select_widget = QtWidgets.QWidget()
+                select_layout = QtWidgets.QHBoxLayout(select_widget)
+                select_layout.addWidget(select_checkbox)
+                select_layout.setAlignment(QtCore.Qt.AlignCenter)
+                select_layout.setContentsMargins(0, 0, 0, 0)
+                self.actions_table.setCellWidget(idx, 0, select_widget)
+
+                # Insert the action description in the "Action" column
+                action_item = QtWidgets.QTableWidgetItem(self._format_action(action))
+                self.actions_table.setItem(idx, 1, action_item)
+
+                # Insert the action description in the "Description" column
+                action_item = QtWidgets.QTableWidgetItem(self._format_description(action))
+                self.actions_table.setItem(idx, 2, action_item)
+
+                # Leave the "Status" column empty for now
+                status_item = QtWidgets.QTableWidgetItem("")
+                self.actions_table.setItem(idx, 3, status_item)
+
+            # Resize columns to fit the content
+            self.actions_table.resizeColumnsToContents()
+
+        except json.JSONDecodeError as e:
+            print(f"Failed to parse JSON response: {e}")
+
+    def _format_action(self, action: dict) -> str:
+        return f"{action['name'].replace('_',' ')}"
+
+    def _format_description(self, action: dict) -> str:
+        if action['name'] == 'rename_function':
+            return f"{action['arguments']['addr']} -> {action['arguments']['name']}"
+        if action['name'] == 'rename_variable':
+            return f"{action['arguments']['var_name']} -> {action['arguments']['new_name']}"
 
     def _generate_feedback_buttons(self) -> str:
         """

@@ -6,6 +6,57 @@ class BATools:
     """
 
     # Public class variable to hold the templates dictionary
+    templates_2 = [
+        {
+            "type": "function",
+            "function":
+            {
+                "name": "rename_function",
+                "description": "Rename a function at a specific address",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "addr": {
+                            "type": "integer",
+                            "description": "The address of the function to be renamed"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "The new name for the function"
+                        }
+                    },
+                    "required": ["addr", "name"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function":
+            {
+                "name": "rename_variable",
+                "description": "Rename a variable within a function",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "func_addr": {
+                            "type": "integer",
+                            "description": "The address of the function containing the variable"
+                        },
+                        "var_name": {
+                            "type": "string",
+                            "description": "The current name of the variable"
+                        },
+                        "new_name": {
+                            "type": "string",
+                            "description": "The new name for the variable"
+                        }
+                    },
+                    "required": ["func_addr", "var_name", "new_name"]
+                }
+            }
+        },
+    ]
+
     templates = [
         {
             "name": "rename_function",
@@ -14,7 +65,7 @@ class BATools:
                 "type": "object",
                 "properties": {
                     "addr": {
-                        "type": "integer",
+                        "type": "string",
                         "description": "The address of the function to be renamed"
                     },
                     "name": {
@@ -32,7 +83,7 @@ class BATools:
                 "type": "object",
                 "properties": {
                     "func_addr": {
-                        "type": "integer",
+                        "type": "string",
                         "description": "The address of the function containing the variable"
                     },
                     "var_name": {
