@@ -347,7 +347,7 @@ class BinAssistWidget(SidebarWidget):
         self.session_log.append({"user": query, "assistant": "Awaiting response..."})
 
         # Prepend the session log to the query for context
-        full_query = "\n\n".join([f"User: {entry['user']}\nAssistant: {entry['assistant']}" for entry in self.session_log]) + f"\n\nUser: {query}"
+        full_query = "\n".join([f"User: {entry['user']}\nAssistant: {entry['assistant']}" for entry in self.session_log]) + f"\nUser: {query}"
 
         self.query_response_browser.clear()
         self.request = self.LlmApi.query(full_query, self.display_custom_response)
@@ -393,7 +393,7 @@ class BinAssistWidget(SidebarWidget):
         # Update session log with response
         self.session_log[-1]["assistant"] = response
         # Rebuild and display the full conversation history
-        full_conversation = "\n\n".join([f"User: {entry['user']}\n\nAssistant: {entry['assistant']}" for entry in self.session_log])
+        full_conversation = "\n".join([f"---\n### User:\n{entry['user']}\n\n---\n### Assistant:\n{entry['assistant']}" for entry in self.session_log])
 
         html_resp = markdown.markdown(full_conversation, extensions=['fenced_code'])
         html_resp += self._generate_feedback_buttons()
