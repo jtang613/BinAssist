@@ -349,7 +349,6 @@ class BinAssistWidget(SidebarWidget):
         # Prepend the session log to the query for context
         full_query = "\n".join([f"User: {entry['user']}\nAssistant: {entry['assistant']}" for entry in self.session_log]) + f"\nUser: {query}"
 
-        self.query_response_browser.clear()
         self.request = self.LlmApi.query(full_query, self.display_custom_response)
 
     def onAnalyzeFunctionClicked(self) -> None:
