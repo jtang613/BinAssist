@@ -194,11 +194,11 @@ class LlmApi:
                 f"{addr_to_text_func(bv, addr)}\n```\n" +\
                 f"Examine the code functionality and examine the strings and log parameters." +\
                 f"SUGGEST THREE POSSIBLE FUNCTION NAMES THAT ALIGN AS CLOSELY AS POSSIBLE TO WHAT " +\
-                f"THE CODE ABOVE DOES. Note that log messages sometimes contain the exact " +\
-                f"function name - if you detect the function name in a log message, suggest that exact name.\n" +\
-                f"RESPOND ONLY WITH THE RENAME_FUNCTION PARAMETERS. DO NOT INCLUDE ANY OTHER TEXT.\n" +\
+                f"THE CODE ABOVE DOES.\n" +\
+                f"RESPOND ONLY WITH THE RENAME_FUNCTION PARAMETERS (addr, name). DO NOT INCLUDE ANY OTHER TEXT.\n" +\
                 f"ALL JSON VALUES MUST BE TEXT STRINGS, INCLUDING NUMBERS AND ADDRESSES. ie: \"0x1234abcd\"" +\
-                f"ALL JSON MUST BE PROPERLY FORMATTED WITH NO EMBEDDED COMMENTS."
+                f"ALL JSON MUST BE PROPERLY FORMATTED WITH NO EMBEDDED COMMENTS.\n" +\
+                "Example: {'name': 'rename_function', 'arguments': {'addr':'0x0011aabb', 'name':'new_function'}} "
 
         print(f"\nQuery: {query}\n")
         self._start_thread(client, query, f"{SYSTEM_PROMPT}{FUNCTION_PROMPT}{FORMAT_PROMPT}", signal, BATools.templates)
@@ -231,7 +231,8 @@ class LlmApi:
                 f"SUGGEST VARIABLE NAMES THAT BETTER ALIGN WITH THE CODE FUNCTIONALITY.\n" +\
                 f"RESPOND ONLY WITH THE RENAME_VARIABLE PARAMETERS (addr, var_name, new_name). DO NOT INCLUDE ANY OTHER TEXT.\n" +\
                 f"ALL JSON VALUES MUST BE TEXT STRINGS, INCLUDING NUMBERS AND ADDRESSES. ie: \"0x1234abcd\"" +\
-                f"ALL JSON MUST BE PROPERLY FORMATTED WITH NO EMBEDDED COMMENTS."
+                f"ALL JSON MUST BE PROPERLY FORMATTED WITH NO EMBEDDED COMMENTS.\n" +\
+                "Example: {'name': 'rename_variable', 'arguments': {'addr':'0x0011aabb', 'var_name':'rax', 'new_name':'index'}}"
 
         print(f"\nQuery: {query}\n")
         self._start_thread(client, query, f"{SYSTEM_PROMPT}{FUNCTION_PROMPT}{FORMAT_PROMPT}", signal, BATools.templates)
@@ -353,7 +354,7 @@ class LlmApi:
         for bb in function.basic_blocks:
             for dt in bb.disassembly_text:
                 s = str(dt)
-                asm_instructions += f"\n0x{dt.address}  {s}"
+                asm_instructions += f"\n0x{dt.address:08x}  {s}"
         tokens = function.get_type_tokens()[0].tokens
         return f"{''.join(x.text for x in tokens)}\n{asm_instructions}\n"
 

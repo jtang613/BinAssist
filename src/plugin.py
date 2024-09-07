@@ -377,7 +377,7 @@ class BinAssistWidget(SidebarWidget):
         Parameters:
             response (str): The response to be displayed.
         """
-        html_resp = markdown.markdown(response, extensions=['fenced_code'])
+        html_resp = markdown.markdown(response["response"], extensions=['fenced_code'])
         html_resp += self._generate_feedback_buttons()
         self.response = response
         self.text_box.setHtml(html_resp)
@@ -390,7 +390,7 @@ class BinAssistWidget(SidebarWidget):
             response (str): The custom response to be displayed.
         """
         # Update session log with response
-        self.session_log[-1]["assistant"] = response
+        self.session_log[-1]["assistant"] = response["response"]
         # Rebuild and display the full conversation history
         full_conversation = "\n".join([f"---\n### User:\n{entry['user']}\n\n---\n### Assistant:\n{entry['assistant']}" for entry in self.session_log])
 
@@ -406,40 +406,48 @@ class BinAssistWidget(SidebarWidget):
         Parameters:
             response (str): The JSON response to be displayed.
         """
-        try:
-            # Parse the JSON response
-            actions = json.loads(response.replace('```json\n','').replace('```\n','').replace('\n```',''))
+        actions = {'tool_calls':[]}
+        if isinstance(response["response"], List):
+            print(f"tool_calls: {response["response"]}")
+            for it in response["response"]:
+                print(f"{it.function.name} : {it.function.arguments}")
+                print(f"type : {type(it.function.arguments)}")
+                actions['tool_calls'].append({'name':it.function.name, 'arguments':json.loads(it.function.arguments)})
+        else:
+            try:
+                # Parse the JSON response
+                actions = json.loads(response["response"].replace('```json\n','').replace('```\n','').replace('\n```',''))
+            except json.JSONDecodeError as e:
+                print(f"Failed to parse JSON response: {e}")
             
-            # Populate the table with the parsed actions
-            for idx, action in enumerate(actions.get("tool_calls", [])):
-                self.actions_table.insertRow(idx)
+        # Populate the table with the parsed actions
+        for idx, action in enumerate(actions.get("tool_calls", [])):
+            self.actions_table.insertRow(idx)
 
-                # Create a checkbox and center it in the "Select" column
-                select_checkbox = QtWidgets.QCheckBox()
-                select_widget = QtWidgets.QWidget()
-                select_layout = QtWidgets.QHBoxLayout(select_widget)
-                select_layout.addWidget(select_checkbox)
-                select_layout.setAlignment(QtCore.Qt.AlignCenter)
-                select_layout.setContentsMargins(0, 0, 0, 0)
-                self.actions_table.setCellWidget(idx, 0, select_widget)
+            # Create a checkbox and center it in the "Select" column
+            select_checkbox = QtWidgets.QCheckBox()
+            select_widget = QtWidgets.QWidget()
+            select_layout = QtWidgets.QHBoxLayout(select_widget)
+            select_layout.addWidget(select_checkbox)
+            select_layout.setAlignment(QtCore.Qt.AlignCenter)
+            select_layout.setContentsMargins(0, 0, 0, 0)
+            self.actions_table.setCellWidget(idx, 0, select_widget)
 
-                # Insert the action description in the "Action" column
-                action_item = QtWidgets.QTableWidgetItem(self._format_action(action))
-                self.actions_table.setItem(idx, 1, action_item)
+            # Insert the action description in the "Action" column
+            action_item = QtWidgets.QTableWidgetItem(self._format_action(action))
+            self.actions_table.setItem(idx, 1, action_item)
 
-                # Insert the action description in the "Description" column
-                action_item = QtWidgets.QTableWidgetItem(self._format_description(action))
-                self.actions_table.setItem(idx, 2, action_item)
+            # Insert the action description in the "Description" column
+            action_item = QtWidgets.QTableWidgetItem(self._format_description(action))
+            self.actions_table.setItem(idx, 2, action_item)
 
-                # Leave the "Status" column empty for now
-                status_item = QtWidgets.QTableWidgetItem("")
-                self.actions_table.setItem(idx, 3, status_item)
+            # Leave the "Status" column empty for now
+            status_item = QtWidgets.QTableWidgetItem("")
+            self.actions_table.setItem(idx, 3, status_item)
 
-            # Resize columns to fit the content
-            self.actions_table.resizeColumnsToContents()
+        # Resize columns to fit the content
+        self.actions_table.resizeColumnsToContents()
 
-        except json.JSONDecodeError as e:
-            print(f"Failed to parse JSON response: {e}")
 
     def _format_action(self, action: dict) -> str:
         return f"{action['name'].replace('_',' ')}"

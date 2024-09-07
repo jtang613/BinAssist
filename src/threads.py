@@ -2,7 +2,6 @@ from binaryninja.settings import Settings
 from PySide6 import QtCore
 from openai import OpenAI
 
-
 class StreamingThread(QtCore.QThread):
     """
     A thread for managing streaming API calls to an OpenAI model, specifically designed to handle long-running 
@@ -10,7 +9,7 @@ class StreamingThread(QtCore.QThread):
     and signals the main application thread upon updates or completion.
     """
 
-    update_response = QtCore.Signal(str)
+    update_response = QtCore.Signal(dict)
 
     def __init__(self, client: OpenAI, query: str, system: str, tools=None) -> None:
         """
@@ -49,17 +48,17 @@ class StreamingThread(QtCore.QThread):
                 print(f"finish_reason: {response.choices[0].finish_reason}")
                 print(f"{response.choices[0].message.content}")
                 if response.choices[0].finish_reason == 'tool_calls':
-                    self.update_response.emit(response.choices[0].message.tool_calls)
-                    print(f"{response.choices[0].message.tool_calls}")
+                    self.update_response.emit({"response":response.choices[0].message.tool_calls})
+                    #print(f"type: {type(response.choices[0].message.tool_calls)}")
                     return
                 else:
-                    self.update_response.emit(response.choices[0].message.content)
+                    self.update_response.emit({"response":response.choices[0].message.content})
                     return
             else:
                 response_buffer = ""
                 for chunk in response:
                     message_chunk = chunk.choices[0].delta.content or ""
                     response_buffer += message_chunk
-                    self.update_response.emit(response_buffer)
+                    self.update_response.emit({"response":response_buffer})
         except Exception as e:
             self.update_response.emit(f"Failed to get response: {e}")
