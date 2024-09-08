@@ -3,7 +3,6 @@ from binaryninja.settings import Settings
 from openai import OpenAI
 from .threads import StreamingThread
 from .rag import RAG
-from .tools import BATools
 from typing import List
 import sqlite3
 import httpx
@@ -36,6 +35,51 @@ The example format is as follows. Please make sure the parameter type is correct
 }
 ```
 '''
+
+# The function templates dictionary
+FN_TEMPLATES = [
+    {
+        "name": "rename_function",
+        "description": "Rename a function at a specific address",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "addr": {
+                    "type": "string",
+                    "description": "The address of the function to be renamed"
+                },
+                "name": {
+                    "type": "string",
+                    "description": "The new name for the function"
+                }
+            },
+            "required": ["addr", "name"]
+        }
+    },
+    {
+        "name": "rename_variable",
+        "description": "Rename a variable within a function",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "func_addr": {
+                    "type": "string",
+                    "description": "The address of the function containing the variable"
+                },
+                "var_name": {
+                    "type": "string",
+                    "description": "The current name of the variable"
+                },
+                "new_name": {
+                    "type": "string",
+                    "description": "The new name for the variable"
+                }
+            },
+            "required": ["func_addr", "var_name", "new_name"]
+        }
+    },
+]
+
 
 class LlmApi:
     """
@@ -201,10 +245,10 @@ class LlmApi:
                 "Example: {'name': 'rename_function', 'arguments': {'addr':'0x0011aabb', 'name':'new_function'}} "
 
         print(f"\nQuery: {query}\n")
-        self._start_thread(client, query, f"{SYSTEM_PROMPT}{FUNCTION_PROMPT}{FORMAT_PROMPT}", signal, BATools.templates)
+        self._start_thread(client, query, f"{SYSTEM_PROMPT}{FUNCTION_PROMPT}{FORMAT_PROMPT}", signal, FN_TEMPLATES)
         with open('query.txt', 'w') as f:
             f.write(f"SYSTEM:\n{SYSTEM_PROMPT}{FUNCTION_PROMPT}{FORMAT_PROMPT}")
-            f.write(f"TOOLS:\n{BATools.templates}")
+            f.write(f"TOOLS:\n{FN_TEMPLATES}")
             f.write(f"\n\nQUERY:\n{query}")
         return query
 
@@ -235,10 +279,10 @@ class LlmApi:
                 "Example: {'name': 'rename_variable', 'arguments': {'addr':'0x0011aabb', 'var_name':'rax', 'new_name':'index'}}"
 
         print(f"\nQuery: {query}\n")
-        self._start_thread(client, query, f"{SYSTEM_PROMPT}{FUNCTION_PROMPT}{FORMAT_PROMPT}", signal, BATools.templates)
+        self._start_thread(client, query, f"{SYSTEM_PROMPT}{FUNCTION_PROMPT}{FORMAT_PROMPT}", signal, FN_TEMPLATES)
         with open('query.txt', 'w') as f:
             f.write(f"SYSTEM:\n{SYSTEM_PROMPT}{FUNCTION_PROMPT}{FORMAT_PROMPT}")
-            f.write(f"TOOLS:\n{BATools.templates}")
+            f.write(f"TOOLS:\n{FN_TEMPLATES}")
             f.write(f"\n\nQUERY:\n{query}")
         return query
 

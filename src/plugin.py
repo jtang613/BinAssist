@@ -131,12 +131,15 @@ class BinAssistWidget(SidebarWidget):
         # Create the buttons
         buttons_layout = QtWidgets.QHBoxLayout()
         analyze_button = QtWidgets.QPushButton("Analyze Function")
+        analyze_clear_button = QtWidgets.QPushButton("Clear")
         apply_button = QtWidgets.QPushButton("Apply Actions")
 
         analyze_button.clicked.connect(self.onAnalyzeFunctionClicked)  # Stub handler
+        analyze_clear_button.clicked.connect(self.onAnalyzeClearClicked)  # Stub handler
         apply_button.clicked.connect(self.onApplyActionsClicked)  # Stub handler
 
         buttons_layout.addWidget(analyze_button)
+        buttons_layout.addWidget(analyze_clear_button)
         buttons_layout.addWidget(apply_button)
 
         layout.addLayout(buttons_layout)
@@ -355,20 +358,60 @@ class BinAssistWidget(SidebarWidget):
         """
         Stub for the 'Analyze Function' button click event.
         """
-        print("Analyze Function clicked")
         datatype = self.datatype.split(':')[1]
         il_type = self.il_type.name
         func = self.get_func_text()
-        self.actions_table.setRowCount(0)
         self.request = self.LlmApi.analyze_fn_names(self.bv, self.offset_addr, datatype, il_type, func, self.display_analyze_response)
         self.request = self.LlmApi.analyze_fn_names(self.bv, self.offset_addr, datatype, il_type, func, self.display_analyze_response)
         self.request = self.LlmApi.analyze_fn_vars(self.bv, self.offset_addr, datatype, il_type, func, self.display_analyze_response)
 
+    def onAnalyzeClearClicked(self) -> None:
+        """
+        Stub for the 'Analyze Clear' button click event.
+        """
+        print("Analyze Clear clicked")
+        self.actions_table.setRowCount(0)
+
     def onApplyActionsClicked(self) -> None:
         """
-        Stub for the 'Apply Actions' button click event.
+        Applies the selected actions from the actions table.
         """
-        print("Apply Actions clicked")
+        for row in range(self.actions_table.rowCount()):
+            # Check if the action is selected
+            checkbox_widget = self.actions_table.cellWidget(row, 0)
+            checkbox = checkbox_widget.findChild(QtWidgets.QCheckBox)
+            if checkbox.isChecked():
+                action_item = self.actions_table.item(row, 1)
+                description_item = self.actions_table.item(row, 2)
+                
+                action = action_item.text()
+                description = description_item.text()
+                
+                if action == "rename function":
+                    # Parse the description to get address and new name
+                    addr, new_name = description.split(' -> ')
+                    addr = int(addr.replace('sub_',''), 16)  # Convert hex string to integer
+                    self.bv.get_functions_containing(addr)[0].name = new_name
+                    self.actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem("Applied"))
+                
+                elif action == "rename variable":
+                    # Parse the description to get old name and new name
+                    old_name, new_name = description.split(' -> ')
+                    current_function = self.bv.get_functions_containing(self.offset_addr)[0]
+                    if current_function:
+                        for var in current_function.vars:
+                            if var.name == old_name:
+                                var.name = new_name
+                                self.actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem("Applied"))
+                                break
+                        else:
+                            self.actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem("Failed: Variable not found"))
+                    else:
+                        self.actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem("Failed: Function not found"))
+        
+        # Update the analysis database
+        self.bv.update_analysis()
+
 
     def display_response(self, response) -> None:
         """
