@@ -5,7 +5,6 @@ from binaryninjaui import SidebarWidget, SidebarWidgetType, UIActionHandler, Sid
 from binaryninja import FunctionGraphType, PythonScriptingProvider, PythonScriptingInstance
 from PySide6 import QtCore, QtGui, QtWidgets
 import markdown
-import sqlite3
 from .llm_api import LlmApi
 
 
@@ -60,7 +59,6 @@ class BinAssistWidget(SidebarWidget):
         self.tabs.addTab(query_tab, "Custom Query")
         self.tabs.addTab(actions_tab, "Actions") 
         self.tabs.addTab(rag_management_tab, "RAG Management")
-
 
         layout = QtWidgets.QVBoxLayout()
         layout.addWidget(self.tabs)
@@ -122,7 +120,7 @@ class BinAssistWidget(SidebarWidget):
     def createActionsTab(self) -> QtWidgets.QWidget:
         layout = QtWidgets.QVBoxLayout()
 
-        # Create the 3-column table view
+        # Create the 4-column table view
         self.actions_table = QtWidgets.QTableWidget()
         self.actions_table.setColumnCount(4)
         self.actions_table.setHorizontalHeaderLabels(["Select", "Action", "Description", "Status"])
@@ -134,9 +132,9 @@ class BinAssistWidget(SidebarWidget):
         analyze_clear_button = QtWidgets.QPushButton("Clear")
         apply_button = QtWidgets.QPushButton("Apply Actions")
 
-        analyze_button.clicked.connect(self.onAnalyzeFunctionClicked)  # Stub handler
-        analyze_clear_button.clicked.connect(self.onAnalyzeClearClicked)  # Stub handler
-        apply_button.clicked.connect(self.onApplyActionsClicked)  # Stub handler
+        analyze_button.clicked.connect(self.onAnalyzeFunctionClicked)
+        analyze_clear_button.clicked.connect(self.onAnalyzeClearClicked)
+        apply_button.clicked.connect(self.onApplyActionsClicked)
 
         buttons_layout.addWidget(analyze_button)
         buttons_layout.addWidget(analyze_clear_button)
@@ -356,7 +354,7 @@ class BinAssistWidget(SidebarWidget):
 
     def onAnalyzeFunctionClicked(self) -> None:
         """
-        Stub for the 'Analyze Function' button click event.
+        Event for the 'Analyze Function' button.
         """
         datatype = self.datatype.split(':')[1]
         il_type = self.il_type.name
@@ -367,7 +365,7 @@ class BinAssistWidget(SidebarWidget):
 
     def onAnalyzeClearClicked(self) -> None:
         """
-        Stub for the 'Analyze Clear' button click event.
+        Event for the 'Analyze Clear' button.
         """
         print("Analyze Clear clicked")
         self.actions_table.setRowCount(0)

@@ -10,83 +10,82 @@ import json
 
 http_client = httpx.Client(verify=False)
 
-SYSTEM_PROMPT = '''
-You are a professional software reverse engineer specializing in cybersecurity. You are intimately 
-familiar with x86_64, ARM, PPC and MIPS architectures. You are an expert C and C++ developer.
-You are an expert Python and Rust developer. You are familiar with common frameworks and libraries 
-such as WinSock, OpenSSL, MFC, etc. You are an expert in TCP/IP network programming and packet analysis.
-You always respond to queries in a structured format using Markdown styling for headings and lists. 
-You format code blocks using back-tick code-fencing.
-'''
-
-FUNCTION_PROMPT = '''
-USE THE PROVIDED TOOLS WHEN NECESSARY.
-'''
-
-FORMAT_PROMPT = '''
-The output MUST strictly adhere to the following JSON format, and NO other text MUST be included.
-The example format is as follows. Please make sure the parameter type is correct. If no function call is needed, please make tool_calls an empty list '[]'.
-```
-{
-    "tool_calls": [
-    {"name": "rename_function", "arguments": {"addr": "function_address", "name": "new_name"}},
-    ... (more tool calls as required)
-    ]
-}
-```
-'''
-
-# The function templates dictionary
-FN_TEMPLATES = [
-    {
-        "name": "rename_function",
-        "description": "Rename a function at a specific address",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "addr": {
-                    "type": "string",
-                    "description": "The address of the function to be renamed"
-                },
-                "name": {
-                    "type": "string",
-                    "description": "The new name for the function"
-                }
-            },
-            "required": ["addr", "name"]
-        }
-    },
-    {
-        "name": "rename_variable",
-        "description": "Rename a variable within a function",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "func_addr": {
-                    "type": "string",
-                    "description": "The address of the function containing the variable"
-                },
-                "var_name": {
-                    "type": "string",
-                    "description": "The current name of the variable"
-                },
-                "new_name": {
-                    "type": "string",
-                    "description": "The new name for the variable"
-                }
-            },
-            "required": ["func_addr", "var_name", "new_name"]
-        }
-    },
-]
-
-
 class LlmApi:
     """
     Handles interactions with an LLM (Large Language Model) for providing automated responses 
     based on queries related to binary analysis. This class manages API client configuration, database 
     interactions for feedback, and spawning threads for asynchronous API requests.
     """
+
+    SYSTEM_PROMPT = '''
+    You are a professional software reverse engineer specializing in cybersecurity. You are intimately 
+    familiar with x86_64, ARM, PPC and MIPS architectures. You are an expert C and C++ developer.
+    You are an expert Python and Rust developer. You are familiar with common frameworks and libraries 
+    such as WinSock, OpenSSL, MFC, etc. You are an expert in TCP/IP network programming and packet analysis.
+    You always respond to queries in a structured format using Markdown styling for headings and lists. 
+    You format code blocks using back-tick code-fencing.
+    '''
+
+    FUNCTION_PROMPT = '''
+    USE THE PROVIDED TOOLS WHEN NECESSARY.
+    '''
+
+    FORMAT_PROMPT = '''
+    The output MUST strictly adhere to the following JSON format, and NO other text MUST be included.
+    The example format is as follows. Please make sure the parameter type is correct. If no function call is needed, please make tool_calls an empty list '[]'.
+    ```
+    {
+        "tool_calls": [
+        {"name": "rename_function", "arguments": {"addr": "function_address", "name": "new_name"}},
+        ... (more tool calls as required)
+        ]
+    }
+    ```
+    '''
+
+    # The function templates dictionary
+    FN_TEMPLATES = [
+        {
+            "name": "rename_function",
+            "description": "Rename a function at a specific address",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "addr": {
+                        "type": "string",
+                        "description": "The address of the function to be renamed"
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "The new name for the function"
+                    }
+                },
+                "required": ["addr", "name"]
+            }
+        },
+        {
+            "name": "rename_variable",
+            "description": "Rename a variable within a function",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "func_addr": {
+                        "type": "string",
+                        "description": "The address of the function containing the variable"
+                    },
+                    "var_name": {
+                        "type": "string",
+                        "description": "The current name of the variable"
+                    },
+                    "new_name": {
+                        "type": "string",
+                        "description": "The new name for the variable"
+                    }
+                },
+                "required": ["func_addr", "var_name", "new_name"]
+            }
+        },
+    ]
 
     def __init__(self):
         """
@@ -164,7 +163,7 @@ class LlmApi:
         c.execute('''
             INSERT INTO feedback (model_name, prompt_context, system_context, response, feedback)
             VALUES (?, ?, ?, ?, ?)
-        ''', (model_name, prompt_context, SYSTEM_PROMPT, response, feedback))
+        ''', (model_name, prompt_context, self.SYSTEM_PROMPT, response, feedback))
         conn.commit()
         conn.close()
 
@@ -193,7 +192,7 @@ class LlmApi:
                 f"present. But only fallback to strings or log messages that are clearly function " +\
                 f"names for this function.\n```\n" +\
                 f"{addr_to_text_func(bv, addr)}\n```"
-        self._start_thread(client, query, SYSTEM_PROMPT, signal)
+        self._start_thread(client, query, self.SYSTEM_PROMPT, signal)
         return query
 
     def query(self, query, signal) -> str:
@@ -211,10 +210,10 @@ class LlmApi:
         if self.use_rag():
             context = self._get_rag_context(query)
             augmented_query = f"Context:\n{context}\n\nQuery: {query}"
-            self._start_thread(client, augmented_query, SYSTEM_PROMPT, signal)
+            self._start_thread(client, augmented_query, self.SYSTEM_PROMPT, signal)
             return augmented_query
         else:
-            self._start_thread(client, query, SYSTEM_PROMPT, signal)
+            self._start_thread(client, query, self.SYSTEM_PROMPT, signal)
             return query
 
     def analyze_fn_names(self, bv, addr, bin_type, il_type, addr_to_text_func, signal) -> str:
@@ -245,10 +244,10 @@ class LlmApi:
                 "Example: {'name': 'rename_function', 'arguments': {'addr':'0x0011aabb', 'name':'new_function'}} "
 
         print(f"\nQuery: {query}\n")
-        self._start_thread(client, query, f"{SYSTEM_PROMPT}{FUNCTION_PROMPT}{FORMAT_PROMPT}", signal, FN_TEMPLATES)
+        self._start_thread(client, query, f"{self.SYSTEM_PROMPT}{self.FUNCTION_PROMPT}{self.FORMAT_PROMPT}", signal, self.FN_TEMPLATES)
         with open('query.txt', 'w') as f:
-            f.write(f"SYSTEM:\n{SYSTEM_PROMPT}{FUNCTION_PROMPT}{FORMAT_PROMPT}")
-            f.write(f"TOOLS:\n{FN_TEMPLATES}")
+            f.write(f"SYSTEM:\n{self.SYSTEM_PROMPT}{self.FUNCTION_PROMPT}{self.FORMAT_PROMPT}")
+            f.write(f"TOOLS:\n{self.FN_TEMPLATES}")
             f.write(f"\n\nQUERY:\n{query}")
         return query
 
@@ -279,10 +278,10 @@ class LlmApi:
                 "Example: {'name': 'rename_variable', 'arguments': {'addr':'0x0011aabb', 'var_name':'rax', 'new_name':'index'}}"
 
         print(f"\nQuery: {query}\n")
-        self._start_thread(client, query, f"{SYSTEM_PROMPT}{FUNCTION_PROMPT}{FORMAT_PROMPT}", signal, FN_TEMPLATES)
+        self._start_thread(client, query, f"{self.SYSTEM_PROMPT}{self.FUNCTION_PROMPT}{self.FORMAT_PROMPT}", signal, self.FN_TEMPLATES)
         with open('query.txt', 'w') as f:
-            f.write(f"SYSTEM:\n{SYSTEM_PROMPT}{FUNCTION_PROMPT}{FORMAT_PROMPT}")
-            f.write(f"TOOLS:\n{FN_TEMPLATES}")
+            f.write(f"SYSTEM:\n{self.SYSTEM_PROMPT}{self.FUNCTION_PROMPT}{self.FORMAT_PROMPT}")
+            f.write(f"TOOLS:\n{self.FN_TEMPLATES}")
             f.write(f"\n\nQUERY:\n{query}")
         return query
 
