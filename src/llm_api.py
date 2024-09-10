@@ -46,43 +46,51 @@ class LlmApi:
     # The function templates dictionary
     FN_TEMPLATES = [
         {
-            "name": "rename_function",
-            "description": "Rename a function at a specific address",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "addr": {
-                        "type": "string",
-                        "description": "The address of the function to be renamed"
+            "type": "function",
+            "function":
+            {
+                "name": "rename_function",
+                "description": "Rename a function at a specific address",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "addr": {
+                            "type": "string",
+                            "description": "The address of the function to be renamed"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "The new name for the function"
+                        }
                     },
-                    "name": {
-                        "type": "string",
-                        "description": "The new name for the function"
-                    }
-                },
-                "required": ["addr", "name"]
+                    "required": ["addr", "name"]
+                }
             }
         },
         {
-            "name": "rename_variable",
-            "description": "Rename a variable within a function",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "func_addr": {
-                        "type": "string",
-                        "description": "The address of the function containing the variable"
+            "type": "function",
+            "function":
+            {
+                "name": "rename_variable",
+                "description": "Rename a variable within a function",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "func_addr": {
+                            "type": "string",
+                            "description": "The address of the function containing the variable"
+                        },
+                        "var_name": {
+                            "type": "string",
+                            "description": "The current name of the variable"
+                        },
+                        "new_name": {
+                            "type": "string",
+                            "description": "The new name for the variable"
+                        }
                     },
-                    "var_name": {
-                        "type": "string",
-                        "description": "The current name of the variable"
-                    },
-                    "new_name": {
-                        "type": "string",
-                        "description": "The new name for the variable"
-                    }
-                },
-                "required": ["func_addr", "var_name", "new_name"]
+                    "required": ["func_addr", "var_name", "new_name"]
+                }
             }
         },
     ]
@@ -245,10 +253,10 @@ class LlmApi:
 
         print(f"\nQuery: {query}\n")
         self._start_thread(client, query, f"{self.SYSTEM_PROMPT}{self.FUNCTION_PROMPT}{self.FORMAT_PROMPT}", signal, self.FN_TEMPLATES)
-        with open('query.txt', 'w') as f:
-            f.write(f"SYSTEM:\n{self.SYSTEM_PROMPT}{self.FUNCTION_PROMPT}{self.FORMAT_PROMPT}")
-            f.write(f"TOOLS:\n{self.FN_TEMPLATES}")
-            f.write(f"\n\nQUERY:\n{query}")
+        # with open('query.txt', 'w') as f:
+        #     f.write(f"SYSTEM:\n{self.SYSTEM_PROMPT}{self.FUNCTION_PROMPT}{self.FORMAT_PROMPT}")
+        #     f.write(f"TOOLS:\n{self.FN_TEMPLATES}")
+        #     f.write(f"\n\nQUERY:\n{query}")
         return query
 
     def analyze_fn_vars(self, bv, addr, bin_type, il_type, addr_to_text_func, signal) -> str:
@@ -279,10 +287,10 @@ class LlmApi:
 
         print(f"\nQuery: {query}\n")
         self._start_thread(client, query, f"{self.SYSTEM_PROMPT}{self.FUNCTION_PROMPT}{self.FORMAT_PROMPT}", signal, self.FN_TEMPLATES)
-        with open('query.txt', 'w') as f:
-            f.write(f"SYSTEM:\n{self.SYSTEM_PROMPT}{self.FUNCTION_PROMPT}{self.FORMAT_PROMPT}")
-            f.write(f"TOOLS:\n{self.FN_TEMPLATES}")
-            f.write(f"\n\nQUERY:\n{query}")
+        # with open('query.txt', 'w') as f:
+        #     f.write(f"SYSTEM:\n{self.SYSTEM_PROMPT}{self.FUNCTION_PROMPT}{self.FORMAT_PROMPT}")
+        #     f.write(f"TOOLS:\n{self.FN_TEMPLATES}")
+        #     f.write(f"\n\nQUERY:\n{query}")
         return query
 
     def _get_rag_context(self, query: str) -> str:

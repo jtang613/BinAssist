@@ -410,6 +410,8 @@ class BinAssistWidget(SidebarWidget):
         # Update the analysis database
         self.bv.update_analysis()
 
+        # Resize columns to fit the content
+        self.actions_table.resizeColumnsToContents()
 
     def display_response(self, response) -> None:
         """
@@ -448,21 +450,16 @@ class BinAssistWidget(SidebarWidget):
             response (str): The JSON response to be displayed.
         """
         actions = {'tool_calls':[]}
-        if isinstance(response["response"], List):
-            print(f"tool_calls: {response["response"]}")
-            for it in response["response"]:
-                print(f"{it.function.name} : {it.function.arguments}")
-                print(f"type : {type(it.function.arguments)}")
-                actions['tool_calls'].append({'name':it.function.name, 'arguments':json.loads(it.function.arguments)})
-        else:
-            try:
-                # Parse the JSON response
-                actions = json.loads(response["response"].replace('```json\n','').replace('```\n','').replace('\n```',''))
-            except json.JSONDecodeError as e:
-                print(f"Failed to parse JSON response: {e}")
+        for it in response["response"]:
+            actions['tool_calls'].append({'name':it.function.name, 'arguments':json.loads(it.function.arguments)})
             
         # Populate the table with the parsed actions
         for idx, action in enumerate(actions.get("tool_calls", [])):
+
+            # Only populate tool calls we support.
+            function_names = [fn_dict["function"]["name"] for fn_dict in LlmApi.FN_TEMPLATES if fn_dict["type"] == "function"]
+            if action["name"] not in function_names: continue
+
             self.actions_table.insertRow(idx)
 
             # Create a checkbox and center it in the "Select" column
