@@ -21,6 +21,9 @@ Future Roadmap:
 * Agentic assistant - Use Autogen or similar framework for self-guided binary RE.
 * Model fine tuning - Leverage the RLHF dataset to fine tune the model.
 
+## Screenshot
+![Screenshot](https://github.com/jtang613/BinAssist/res/screenshots.gif)
+
 ## Homepage
 https://github.com/jtang613/BinAssist
 
