@@ -21,7 +21,7 @@ Future Roadmap:
 * Model fine tuning - Leverage the RLHF dataset to fine tune the model.
 
 ## Screenshot
-![Screenshot](res/screenshot.png)
+![Screenshot](res/screenshots.gif)
 
 ## License
 
