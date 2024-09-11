@@ -50,8 +50,8 @@ class StreamingThread(QtCore.QThread):
             tools=self.tools,
         )
         if self.tools:
-            print(f"finish_reason: {response.choices[0].finish_reason}")
-            print(f"{response.choices[0].message.content}")
+            #print(f"finish_reason: {response.choices[0].finish_reason}")
+            #print(f"{response.choices[0].message.content}")
             if response.choices[0].finish_reason == 'tool_calls':
                 self.update_response.emit({"response":response.choices[0].message.tool_calls})
                 return
