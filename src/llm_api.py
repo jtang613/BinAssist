@@ -1,5 +1,6 @@
 from binaryninja import BackgroundTaskThread
 from binaryninja.settings import Settings
+from PySide6 import QtWidgets
 from openai import OpenAI
 from .threads import StreamingThread
 from .rag import RAG
@@ -27,7 +28,7 @@ class LlmApi:
     '''
 
     FUNCTION_PROMPT = '''
-    USE THE PROVIDED TOOLS WHEN NECESSARY.
+    USE THE PROVIDED TOOLS WHEN NECESSARY. YOU ALWAYS RESPOND WITH TOOL CALLS WHEN POSSIBLE.
     '''
 
     FORMAT_PROMPT = '''
@@ -36,11 +37,12 @@ class LlmApi:
     ```
     {
         "tool_calls": [
-        {"name": "rename_function", "arguments": {"addr": "function_address", "name": "new_name"}},
+        {"name": "rename_function", "arguments": {"new_name": "new_name"}},
         ... (more tool calls as required)
         ]
     }
     ```
+    REMEMBER, YOU MUST ALWAYS PRODUCE A JSON LIST OF TOOL_CALLS!
     '''
 
     # The function templates dictionary
@@ -50,20 +52,16 @@ class LlmApi:
             "function":
             {
                 "name": "rename_function",
-                "description": "Rename a function at a specific address",
+                "description": "Rename a function",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "addr": {
+                        "new_name": {
                             "type": "string",
-                            "description": "The address of the function to be renamed"
-                        },
-                        "name": {
-                            "type": "string",
-                            "description": "The new name for the function"
+                            "description": "The new name for the function. (ie: recv_data)"
                         }
                     },
-                    "required": ["addr", "name"]
+                    "required": ["new_name"]
                 }
             }
         },
@@ -76,20 +74,46 @@ class LlmApi:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "func_addr": {
+                        "func_name": {
                             "type": "string",
-                            "description": "The address of the function containing the variable"
+                            "description": "The name of the function containing the variable. (ie: sub_40001234)"
                         },
                         "var_name": {
                             "type": "string",
-                            "description": "The current name of the variable"
+                            "description": "The current name of the variable. (ie: var_20)"
                         },
                         "new_name": {
                             "type": "string",
-                            "description": "The new name for the variable"
+                            "description": "The new name for the variable. (ie: recv_buf)"
                         }
                     },
-                    "required": ["func_addr", "var_name", "new_name"]
+                    "required": ["func_name", "var_name", "new_name"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function":
+            {
+                "name": "retype_variable",
+                "description": "Set a variable data type within a function",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "func_name": {
+                            "type": "string",
+                            "description": "The name of the function containing the variable. (ie: sub_40001234)"
+                        },
+                        "var_name": {
+                            "type": "string",
+                            "description": "The current name of the variable. (ie: rax_12)"
+                        },
+                        "new_type": {
+                            "type": "string",
+                            "description": "The new type for the variable. (ie: int32_t)"
+                        }
+                    },
+                    "required": ["func_name", "var_name", "new_type"]
                 }
             }
         },
@@ -224,7 +248,7 @@ class LlmApi:
             self._start_thread(client, query, self.SYSTEM_PROMPT, signal)
             return query
 
-    def analyze_fn_names(self, bv, addr, bin_type, il_type, addr_to_text_func, signal) -> str:
+    def analyze_fn_rename_function(self, bv, addr, bin_type, il_type, addr_to_text_func, signal) -> str:
         """
         Analyze the function at a specific address and il_type using the LLM to produce a set of
         recommended actions.
@@ -243,23 +267,19 @@ class LlmApi:
         client = self._create_client()
         query = f"Use the 'rename_function' tool:\n```\n" +\
                 f"{addr_to_text_func(bv, addr)}\n```\n" +\
-                f"Examine the code functionality and examine the strings and log parameters." +\
-                f"SUGGEST THREE POSSIBLE FUNCTION NAMES THAT ALIGN AS CLOSELY AS POSSIBLE TO WHAT " +\
-                f"THE CODE ABOVE DOES.\n" +\
-                f"RESPOND ONLY WITH THE RENAME_FUNCTION PARAMETERS (addr, name). DO NOT INCLUDE ANY OTHER TEXT.\n" +\
-                f"ALL JSON VALUES MUST BE TEXT STRINGS, INCLUDING NUMBERS AND ADDRESSES. ie: \"0x1234abcd\"" +\
+                f"Examine the code functionality, strings and log parameters.\n" +\
+                f"CREATE A JSON TOOL_CALL LIST WITH SUGGESTIONS FOR THREE POSSIBLE FUNCTION NAMES " +\
+                f"THAT ALIGN AS CLOSELY AS POSSIBLE TO WHAT THE CODE ABOVE DOES.\n" +\
+                f"RESPOND ONLY WITH THE RENAME_FUNCTION PARAMETER (new_name). DO NOT INCLUDE ANY OTHER TEXT.\n" +\
                 f"ALL JSON MUST BE PROPERLY FORMATTED WITH NO EMBEDDED COMMENTS.\n" +\
-                "Example: {'name': 'rename_function', 'arguments': {'addr':'0x0011aabb', 'name':'new_function'}} "
+                'YOU MUST FOLLOW THE FORMAT: {"name": "rename_function", "arguments": {"new_name": "new_function"}'
 
         print(f"\nQuery: {query}\n")
         self._start_thread(client, query, f"{self.SYSTEM_PROMPT}{self.FUNCTION_PROMPT}{self.FORMAT_PROMPT}", signal, self.FN_TEMPLATES)
-        # with open('query.txt', 'w') as f:
-        #     f.write(f"SYSTEM:\n{self.SYSTEM_PROMPT}{self.FUNCTION_PROMPT}{self.FORMAT_PROMPT}")
-        #     f.write(f"TOOLS:\n{self.FN_TEMPLATES}")
-        #     f.write(f"\n\nQUERY:\n{query}")
+
         return query
 
-    def analyze_fn_vars(self, bv, addr, bin_type, il_type, addr_to_text_func, signal) -> str:
+    def analyze_fn_rename_variable(self, bv, addr, bin_type, il_type, addr_to_text_func, signal) -> str:
         """
         Analyze the function at a specific address and il_type using the LLM to produce a set of
         recommended actions.
@@ -278,19 +298,47 @@ class LlmApi:
         client = self._create_client()
         query = f"Use the 'rename_variable' tool:\n```\n" +\
                 f"{addr_to_text_func(bv, addr)}\n```\n" +\
-                f"Examine the code functionality and examine the strings and log parameters.\n" +\
+                f"Examine the code functionality, strings and log parameters.\n" +\
                 f"SUGGEST VARIABLE NAMES THAT BETTER ALIGN WITH THE CODE FUNCTIONALITY.\n" +\
-                f"RESPOND ONLY WITH THE RENAME_VARIABLE PARAMETERS (addr, var_name, new_name). DO NOT INCLUDE ANY OTHER TEXT.\n" +\
+                f"RESPOND ONLY WITH THE RENAME_VARIABLE PARAMETERS (func_name, var_name, new_name). DO NOT INCLUDE ANY OTHER TEXT.\n" +\
                 f"ALL JSON VALUES MUST BE TEXT STRINGS, INCLUDING NUMBERS AND ADDRESSES. ie: \"0x1234abcd\"" +\
                 f"ALL JSON MUST BE PROPERLY FORMATTED WITH NO EMBEDDED COMMENTS.\n" +\
-                "Example: {'name': 'rename_variable', 'arguments': {'addr':'0x0011aabb', 'var_name':'rax', 'new_name':'index'}}"
+                "Example: {'name': 'rename_variable', 'arguments': {'func_name':'sub_0011aabb', 'var_name':'rax', 'new_name':'index'}}"
 
         print(f"\nQuery: {query}\n")
         self._start_thread(client, query, f"{self.SYSTEM_PROMPT}{self.FUNCTION_PROMPT}{self.FORMAT_PROMPT}", signal, self.FN_TEMPLATES)
-        # with open('query.txt', 'w') as f:
-        #     f.write(f"SYSTEM:\n{self.SYSTEM_PROMPT}{self.FUNCTION_PROMPT}{self.FORMAT_PROMPT}")
-        #     f.write(f"TOOLS:\n{self.FN_TEMPLATES}")
-        #     f.write(f"\n\nQUERY:\n{query}")
+
+        return query
+
+    def analyze_fn_retype_variable(self, bv, addr, bin_type, il_type, addr_to_text_func, signal) -> str:
+        """
+        Analyze the function at a specific address and il_type using the LLM to produce a set of
+        recommended actions.
+
+        Parameters:
+            bv (BinaryView): The binary view containing the address.
+            addr (int): The address within the binary to describe.
+            bin_type (str): The type of binary view.
+            il_type (str): The intermediate language type used.
+            addr_to_text_func (callable): Function converting addresses to text.
+            signal (Signal): Qt signal to handle the response asynchronously.
+
+        Returns:
+            List[dict]: The array of proposed actionns
+        """
+        client = self._create_client()
+        query = f"Use the 'retype_variable' tool:\n```\n" +\
+                f"{addr_to_text_func(bv, addr)}\n```\n" +\
+                f"Examine the code functionality, strings and log parameters.\n" +\
+                f"SUGGEST VARIABLE TYPES THAT BETTER ALIGN WITH THE CODE FUNCTIONALITY.\n" +\
+                f"RESPOND ONLY WITH THE RETYPE_VARIABLE PARAMETERS (func_name, var_name, new_type). DO NOT INCLUDE ANY OTHER TEXT.\n" +\
+                f"ALL JSON VALUES MUST BE TEXT STRINGS, INCLUDING NUMBERS AND ADDRESSES. ie: \"0x1234abcd\"" +\
+                f"ALL JSON MUST BE PROPERLY FORMATTED WITH NO EMBEDDED COMMENTS.\n" +\
+                "Example: {'name': 'retype_variable', 'arguments': {'func_name':'swub_0011aabb', 'var_name':'rax_12', 'new_type':'char *'}}"
+
+        print(f"\nQuery: {query}\n")
+        self._start_thread(client, query, f"{self.SYSTEM_PROMPT}{self.FUNCTION_PROMPT}{self.FORMAT_PROMPT}", signal, self.FN_TEMPLATES)
+
         return query
 
     def _get_rag_context(self, query: str) -> str:
@@ -417,3 +465,87 @@ class LlmApi:
         for thread in self.threads:
             thread.quit()
             thread.wait()
+
+class ActionHandlers:
+    """
+    A static class containing handler methods for various Binary Ninja actions.
+    Each method corresponds to a specific action that can be performed on the binary.
+    """
+
+    def handle_rename_function(bv, actions_table, offset_addr, description: str, row: int) -> None:
+        """
+        Handles the 'rename function' action.
+
+        Args:
+            bv (BinaryView): The Binary Ninja BinaryView object.
+            actions_table (QTableWidget): The table widget containing the actions.
+            offset_addr (int): The offset address (not used in this method, but included for consistency).
+            description (str): The description of the action, containing the address and new name.
+            row (int): The row index in the actions table.
+
+        Returns:
+            None
+        """
+        new_name = description.strip()
+        current_function = bv.get_functions_containing(offset_addr)[0].name = new_name
+        actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem("Applied"))
+
+
+    def handle_rename_variable(bv, actions_table, offset_addr, description: str, row: int) -> None:
+        """
+        Handles the 'rename variable' action.
+
+        Args:
+            bv (BinaryView): The Binary Ninja BinaryView object.
+            actions_table (QTableWidget): The table widget containing the actions.
+            offset_addr (int): The offset address used to locate the current function.
+            description (str): The description of the action, containing the old and new variable names.
+            row (int): The row index in the actions table.
+
+        Returns:
+            None
+        """
+        var_name, new_name = description.split(' -> ')
+        current_function = bv.get_functions_containing(offset_addr)[0]
+        if current_function:
+            for var in current_function.vars:
+                if var.name == var_name.replace('&',''):
+                    var.name = new_name
+                    actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem("Applied"))
+                    break
+            else:
+                actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem("Failed: Variable not found"))
+        else:
+            actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem("Failed: Function not found"))
+
+
+    def handle_retype_variable(bv, actions_table, offset_addr, description: str, row: int) -> None:
+        """
+        Handles the 'retype variable' action.
+
+        Args:
+            bv (BinaryView): The Binary Ninja BinaryView object.
+            actions_table (QTableWidget): The table widget containing the actions.
+            offset_addr (int): The offset address used to locate the current function.
+            description (str): The description of the action, containing the variable name and new type.
+            row (int): The row index in the actions table.
+
+        Returns:
+            None
+        """
+        var_name, new_type = description.split(' -> ')
+        current_function = bv.get_functions_containing(offset_addr)[0]
+        if current_function:
+            for var in current_function.vars:
+                if var.name == var_name:
+                    try:
+                        t = bv.parse_type_string(new_type)[0]
+                        var.type = t
+                        actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem("Applied"))
+                    except Exception as e:
+                        print(f"Failed to parse type: {new_type}: {e}")
+                    break
+            else:
+                actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem("Failed: Variable not found"))
+        else:
+            actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem("Failed: Function not found"))

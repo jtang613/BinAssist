@@ -6,7 +6,7 @@ from binaryninja import FunctionGraphType, PythonScriptingProvider, PythonScript
 from PySide6 import QtCore, QtGui, QtWidgets
 import markdown
 from .llm_api import LlmApi
-
+from .llm_api import ActionHandlers
 
 class BinAssistWidget(SidebarWidget):
     """
@@ -126,6 +126,29 @@ class BinAssistWidget(SidebarWidget):
         self.actions_table.setHorizontalHeaderLabels(["Select", "Action", "Description", "Status"])
         layout.addWidget(self.actions_table)
 
+        # Create the filter checkboxes
+        filter_label = QtWidgets.QLabel("Filters:")
+        layout.addWidget(filter_label)
+        
+        filter_scroll_area = QtWidgets.QScrollArea()
+        filter_scroll_area.setWidgetResizable(True)
+        filter_scroll_area.setFixedHeight(120)  # Set to 3 lines height (approximate)
+        
+        filter_widget = QtWidgets.QWidget()
+        filter_layout = QtWidgets.QVBoxLayout(filter_widget)
+        
+        self.filter_checkboxes = {}
+        for fn_dict in LlmApi.FN_TEMPLATES:
+            if fn_dict["type"] == "function":
+                fn_name = f"{fn_dict["function"]["name"].replace('_',' ')}: {fn_dict["function"]["description"]}"
+                checkbox = QtWidgets.QCheckBox(fn_name)
+                checkbox.setChecked(True)  # Set all checkboxes to checked by default
+                self.filter_checkboxes[fn_name] = checkbox
+                filter_layout.addWidget(checkbox)
+        
+        filter_scroll_area.setWidget(filter_widget)
+        layout.addWidget(filter_scroll_area)
+    
         # Create the buttons
         buttons_layout = QtWidgets.QHBoxLayout()
         analyze_button = QtWidgets.QPushButton("Analyze Function")
@@ -359,9 +382,14 @@ class BinAssistWidget(SidebarWidget):
         datatype = self.datatype.split(':')[1]
         il_type = self.il_type.name
         func = self.get_func_text()
-        self.request = self.LlmApi.analyze_fn_names(self.bv, self.offset_addr, datatype, il_type, func, self.display_analyze_response)
-        self.request = self.LlmApi.analyze_fn_names(self.bv, self.offset_addr, datatype, il_type, func, self.display_analyze_response)
-        self.request = self.LlmApi.analyze_fn_vars(self.bv, self.offset_addr, datatype, il_type, func, self.display_analyze_response)
+
+        for fn_name, checkbox in self.filter_checkboxes.items():
+            if checkbox.isChecked():
+                query_handler = getattr(self.LlmApi, f"analyze_fn_{fn_name.split(':')[0].replace(' ', '_')}", None)
+                if query_handler:
+                    self.request = query_handler(self.bv, self.offset_addr, datatype, il_type, func, self.display_analyze_response)
+                else:
+                    print(f"Warning: No query handler found for {fn_name}")
 
     def onAnalyzeClearClicked(self) -> None:
         """
@@ -375,7 +403,6 @@ class BinAssistWidget(SidebarWidget):
         Applies the selected actions from the actions table.
         """
         for row in range(self.actions_table.rowCount()):
-            # Check if the action is selected
             checkbox_widget = self.actions_table.cellWidget(row, 0)
             checkbox = checkbox_widget.findChild(QtWidgets.QCheckBox)
             if checkbox.isChecked():
@@ -385,28 +412,15 @@ class BinAssistWidget(SidebarWidget):
                 action = action_item.text()
                 description = description_item.text()
                 
-                if action == "rename function":
-                    # Parse the description to get address and new name
-                    addr, new_name = description.split(' -> ')
-                    addr = int(addr.replace('sub_',''), 16)  # Convert hex string to integer
-                    self.bv.get_functions_containing(addr)[0].name = new_name
-                    self.actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem("Applied"))
+                handler_name = f"handle_{action.replace(' ', '_')}"
+                handler = getattr(ActionHandlers, handler_name, None)
                 
-                elif action == "rename variable":
-                    # Parse the description to get old name and new name
-                    old_name, new_name = description.split(' -> ')
-                    current_function = self.bv.get_functions_containing(self.offset_addr)[0]
-                    if current_function:
-                        for var in current_function.vars:
-                            if var.name == old_name:
-                                var.name = new_name
-                                self.actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem("Applied"))
-                                break
-                        else:
-                            self.actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem("Failed: Variable not found"))
-                    else:
-                        self.actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem("Failed: Function not found"))
-        
+                if handler:
+                    handler(self.bv, self.actions_table, self.offset_addr, description, row)
+                else:
+                    print(f"Unknown action: {action}")
+                    self.actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem("Failed: Unknown action"))
+
         # Update the analysis database
         self.bv.update_analysis()
 
@@ -492,9 +506,11 @@ class BinAssistWidget(SidebarWidget):
 
     def _format_description(self, action: dict) -> str:
         if action['name'] == 'rename_function':
-            return f"{action['arguments']['addr']} -> {action['arguments']['name']}"
+            return f"{action['arguments']['new_name']}"
         if action['name'] == 'rename_variable':
             return f"{action['arguments']['var_name']} -> {action['arguments']['new_name']}"
+        if action['name'] == 'retype_variable':
+            return f"{action['arguments']['var_name']} -> {action['arguments']['new_type']}"
 
     def _generate_feedback_buttons(self) -> str:
         """

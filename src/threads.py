@@ -57,16 +57,21 @@ class StreamingThread(QtCore.QThread):
                 return
             else: # Not a 'tool_calls' response, try parsing tool calls from content.
                 tcjs = self._extract_json_objects(response.choices[0].message.content)
+                print(f"tcjs: {tcjs}")
                 tool_calls = []
                 for tcj in tcjs:
-                    if 'tool_calls' not in tcj: continue
+                    # Best effort normalize to expected dict format
+                    if 'tool_calls' not in tcj: tcj = {'tool_calls': [tcj]}
                     for it in tcj['tool_calls']:
-                        tool_calls.append(
-                            ChatCompletionMessageToolCall(
-                                id=f"call_{self._generate_random_string()}", 
-                                function={"name":it["name"], "arguments":json.dumps(it["arguments"])}, 
-                                type="function")
-                        )
+                        try:
+                            tool_calls.append(
+                                ChatCompletionMessageToolCall(
+                                    id=f"call_{self._generate_random_string()}", 
+                                    function={"name":it["name"], "arguments":json.dumps(it["arguments"])}, 
+                                    type="function")
+                            )
+                        except:
+                            pass
                 self.update_response.emit({"response":tool_calls})
                 return
         else: # Not self.tools
