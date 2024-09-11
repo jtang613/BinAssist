@@ -32,7 +32,7 @@ class StreamingThread(QtCore.QThread):
         self.client = client
         self.query = query
         self.system = system
-        self.tools = tools or []
+        self.tools = tools or None
 
     def run(self) -> None:
         """
