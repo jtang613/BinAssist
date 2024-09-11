@@ -45,80 +45,6 @@ class LlmApi:
     REMEMBER, YOU MUST ALWAYS PRODUCE A JSON LIST OF TOOL_CALLS!
     '''
 
-    # The function templates dictionary
-    FN_TEMPLATES = [
-        {
-            "type": "function",
-            "function":
-            {
-                "name": "rename_function",
-                "description": "Rename a function",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "new_name": {
-                            "type": "string",
-                            "description": "The new name for the function. (ie: recv_data)"
-                        }
-                    },
-                    "required": ["new_name"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function":
-            {
-                "name": "rename_variable",
-                "description": "Rename a variable within a function",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "func_name": {
-                            "type": "string",
-                            "description": "The name of the function containing the variable. (ie: sub_40001234)"
-                        },
-                        "var_name": {
-                            "type": "string",
-                            "description": "The current name of the variable. (ie: var_20)"
-                        },
-                        "new_name": {
-                            "type": "string",
-                            "description": "The new name for the variable. (ie: recv_buf)"
-                        }
-                    },
-                    "required": ["func_name", "var_name", "new_name"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function":
-            {
-                "name": "retype_variable",
-                "description": "Set a variable data type within a function",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "func_name": {
-                            "type": "string",
-                            "description": "The name of the function containing the variable. (ie: sub_40001234)"
-                        },
-                        "var_name": {
-                            "type": "string",
-                            "description": "The current name of the variable. (ie: rax_12)"
-                        },
-                        "new_type": {
-                            "type": "string",
-                            "description": "The new type for the variable. (ie: int32_t)"
-                        }
-                    },
-                    "required": ["func_name", "var_name", "new_type"]
-                }
-            }
-        },
-    ]
-
     def __init__(self):
         """
         Initializes the LlmApi instance, setting up settings and preparing the database for feedback storage.
@@ -506,7 +432,10 @@ class ToolCalling:
     def handle_rename_function(bv, actions_table, offset_addr, description: str, row: int) -> None:
         new_name = description.strip()
         current_function = bv.get_functions_containing(offset_addr)[0].name = new_name
-        actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem("Applied"))
+        if current_function:
+            actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem("Applied"))
+        else:
+            actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem("Failed: Function not found"))
 
     @staticmethod
     def handle_rename_variable(bv, actions_table, offset_addr, description: str, row: int) -> None:
