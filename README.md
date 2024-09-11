@@ -22,7 +22,7 @@ Future Roadmap:
 * Model fine tuning - Leverage the RLHF dataset to fine tune the model.
 
 ## Screenshot
-![Screenshot](https://github.com/jtang613/BinAssist/res/screenshots.gif)
+![Screenshot](/res/screenshots.gif)
 
 ## Homepage
 https://github.com/jtang613/BinAssist
