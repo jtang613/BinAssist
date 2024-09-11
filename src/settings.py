@@ -25,8 +25,7 @@ class BinAssistSettings(Settings):
             RegisterSettingsGroupException: If the settings group fails to be registered.
             RegisterSettingsKeyException: If an individual setting fails to be registered.
         """
-        if not self.register_group('binassist', 'BinAssist'):
-            raise RegisterSettingsGroupException('Failed to register BinAssist settings group.')
+        self.register_group('binassist', 'BinAssist')
 
         settings_definitions = [
             ('binassist.remote_host', 'Remote API Host', 'The API host endpoint used to make requests.', 'string', None),
@@ -56,5 +55,5 @@ class BinAssistSettings(Settings):
                 properties['minValue'] = min_value
                 properties['maxValue'] = max_value
                 properties['message'] = f"Min: {min_value}, Max: {max_value}"
-            if not self.register_setting(key, json.dumps(properties)):
-                raise RegisterSettingsKeyException(f'Failed to register {title.lower()} setting.')
+            self.register_setting(key, json.dumps(properties))
+            
