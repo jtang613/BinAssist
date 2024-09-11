@@ -1,4 +1,4 @@
-# BinAssist (v0.1.0)
+# BinAssist (v0.1.1)
 Author: **Jason Tang**
 
 _A plugin that provides LLM helpers to explain code and assist in RE._
