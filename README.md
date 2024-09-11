@@ -1,9 +1,12 @@
-# BinAssist
+# BinAssist (v0.1.0)
 Author: **Jason Tang**
 
-_A local LLM Assistant to aid in binary RE and exploration._
+_A plugin that provides LLM helpers to explain code and assist in RE._
 
 ## Description:
+
+## Homepage
+https://github.com/jtang613/BinAssist## Description:
 This is a LLM plugin aimed at enabling the use of local LLM's (ollama, text-generation-webui, lm-studio, etc) for assisting with binary exploration and reverse engineering. It supports any OpenAI v1-compatible API. Recommended models are LLaMA-based models such as llama3.1:8b, but others should work as well.
 
 Current features include:
@@ -20,9 +23,39 @@ Future Roadmap:
 * Agentic assistant - Use Autogen or similar framework for self-guided binary RE.
 * Model fine tuning - Leverage the RLHF dataset to fine tune the model.
 
-## Screenshot
-![Screenshot](res/screenshots.gif)
+
+## Installation Instructions
+
+### Darwin
+
+Untested but should work. Submit an Issue or Pull Request for support.
+
+### Linux
+
+An OpenAI compatible API is required. For local LLM support, use Ollama, LMStudio, Open-WebUI, Text-Generation-WebUI, etc.
+
+### Windows
+
+Untested but should work. Submit an Issue or Pull Request for support.
+
+## Minimum Version
+
+This plugin requires the following minimum version of Binary Ninja:
+
+* 3164
+
+
+
+## Required Dependencies
+
+The following dependencies are required for this plugin:
+
+ * pip - openai, pysqlite3, markdown, httpx, chromadb, sentence-transformers
+
 
 ## License
 
-This plugin is released under an [MIT license](./LICENSE).
+This plugin is released under a MIT license.
+## Metadata Version
+
+2
