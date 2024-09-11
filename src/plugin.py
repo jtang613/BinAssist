@@ -6,7 +6,7 @@ from binaryninja import FunctionGraphType, PythonScriptingProvider, PythonScript
 from PySide6 import QtCore, QtGui, QtWidgets
 import markdown
 from .llm_api import LlmApi
-from .llm_api import ActionHandlers
+from .llm_api import ToolCalling
 
 class BinAssistWidget(SidebarWidget):
     """
@@ -385,11 +385,10 @@ class BinAssistWidget(SidebarWidget):
 
         for fn_name, checkbox in self.filter_checkboxes.items():
             if checkbox.isChecked():
-                query_handler = getattr(self.LlmApi, f"analyze_fn_{fn_name.split(':')[0].replace(' ', '_')}", None)
-                if query_handler:
-                    self.request = query_handler(self.bv, self.offset_addr, datatype, il_type, func, self.display_analyze_response)
-                else:
-                    print(f"Warning: No query handler found for {fn_name}")
+                action = fn_name.split(':')[0].replace(' ', '_')
+                self.request = self.LlmApi.analyze_function(
+                    action, self.bv, self.offset_addr, datatype, il_type, func, self.display_analyze_response
+                )
 
     def onAnalyzeClearClicked(self) -> None:
         """
@@ -413,7 +412,7 @@ class BinAssistWidget(SidebarWidget):
                 description = description_item.text()
                 
                 handler_name = f"handle_{action.replace(' ', '_')}"
-                handler = getattr(ActionHandlers, handler_name, None)
+                handler = getattr(ToolCalling, handler_name, None)
                 
                 if handler:
                     handler(self.bv, self.actions_table, self.offset_addr, description, row)
