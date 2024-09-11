@@ -193,14 +193,12 @@ class LlmApi:
         """
         client = self._create_client()
         code = addr_to_text_func(bv, addr)
-        print(f"action: {action}")
         prompt = ToolCalling.ACTION_PROMPTS.get(action, "").format(code=code)
 
         if not prompt:
             raise ValueError(f"Unknown action type: {action}")
 
         query = f"{prompt}\n{self.FUNCTION_PROMPT}{self.FORMAT_PROMPT}"
-        print(f"\nQuery: {query}\n")
         self._start_thread(client, query, f"{self.SYSTEM_PROMPT}{self.FUNCTION_PROMPT}{self.FORMAT_PROMPT}", signal, ToolCalling.FN_TEMPLATES)
 
         return query

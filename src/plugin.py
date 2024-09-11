@@ -138,7 +138,7 @@ class BinAssistWidget(SidebarWidget):
         filter_layout = QtWidgets.QVBoxLayout(filter_widget)
         
         self.filter_checkboxes = {}
-        for fn_dict in LlmApi.FN_TEMPLATES:
+        for fn_dict in ToolCalling.FN_TEMPLATES:
             if fn_dict["type"] == "function":
                 fn_name = f"{fn_dict["function"]["name"].replace('_',' ')}: {fn_dict["function"]["description"]}"
                 checkbox = QtWidgets.QCheckBox(fn_name)
@@ -394,7 +394,6 @@ class BinAssistWidget(SidebarWidget):
         """
         Event for the 'Analyze Clear' button.
         """
-        print("Analyze Clear clicked")
         self.actions_table.setRowCount(0)
 
     def onApplyActionsClicked(self) -> None:
@@ -470,7 +469,7 @@ class BinAssistWidget(SidebarWidget):
         for idx, action in enumerate(actions.get("tool_calls", [])):
 
             # Only populate tool calls we support.
-            function_names = [fn_dict["function"]["name"] for fn_dict in LlmApi.FN_TEMPLATES if fn_dict["type"] == "function"]
+            function_names = [fn_dict["function"]["name"] for fn_dict in ToolCalling.FN_TEMPLATES if fn_dict["type"] == "function"]
             if action["name"] not in function_names: continue
 
             self.actions_table.insertRow(idx)
