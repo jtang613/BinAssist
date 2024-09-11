@@ -367,7 +367,7 @@ class BinAssistWidget(SidebarWidget):
         Submits the custom query entered by the user when the 'Submit' button is clicked.
         """
         query = self.query_edit.toPlainText()
-        query = self.process_custom_query(query)
+        query = self._process_custom_query(query)
         self.session_log.append({"user": query, "assistant": "Awaiting response..."})
 
         # Prepend the session log to the query for context
@@ -512,6 +512,27 @@ class BinAssistWidget(SidebarWidget):
         if action['name'] == 'retype_variable':
             return f"{action['arguments']['var_name']} -> {action['arguments']['new_type']}"
 
+    def _process_custom_query(self, query) -> str:
+        """
+        Processes the custom query by replacing placeholders with specific data such as the current line of 
+        disassembly, the current function's name, or the current address, enhancing the query with contextual 
+        information from the binary view.
+
+        Parameters:
+            query (str): The user's query with placeholders for dynamic data.
+
+        Returns:
+            str: The processed query with placeholders replaced by actual binary data.
+        """
+        func = self.get_func_text()
+
+        line = self.get_line_text(self.bv, self.offset_addr)
+
+        query = query.replace("#line", f'\n```\n{line}\n```\n')
+        query = query.replace('#func', f'\n```\n{func(self.bv, self.offset_addr)}\n```\n')
+        query = query.replace("#addr", hex(self.offset_addr) or "")
+        return query
+
     def _generate_feedback_buttons(self) -> str:
         """
         Generates HTML content for feedback buttons.
@@ -583,27 +604,6 @@ class BinAssistWidget(SidebarWidget):
                 "#func to include current function disassembly.\n" + \
                 "#addr to include the current hex address."
                 )
-
-    def process_custom_query(self, query) -> str:
-        """
-        Processes the custom query by replacing placeholders with specific data such as the current line of 
-        disassembly, the current function's name, or the current address, enhancing the query with contextual 
-        information from the binary view.
-
-        Parameters:
-            query (str): The user's query with placeholders for dynamic data.
-
-        Returns:
-            str: The processed query with placeholders replaced by actual binary data.
-        """
-        func = self.get_func_text()
-
-        line = self.get_line_text(self.bv, self.offset_addr)
-
-        query = query.replace("#line", f'\n```\n{line}\n```\n')
-        query = query.replace('#func', f'\n```\n{func(self.bv, self.offset_addr)}\n```\n')
-        query = query.replace("#addr", hex(self.offset_addr) or "")
-        return query
 
     def contextMenuEvent(self, event) -> None:
         self.m_contextMenuManager.show(self.m_menu, self.actionHandler)

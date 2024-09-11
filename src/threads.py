@@ -57,7 +57,6 @@ class StreamingThread(QtCore.QThread):
                 return
             else: # Not a 'tool_calls' response, try parsing tool calls from content.
                 tcjs = self._extract_json_objects(response.choices[0].message.content)
-                print(f"tcjs: {tcjs}")
                 tool_calls = []
                 for tcj in tcjs:
                     # Best effort normalize to expected dict format
