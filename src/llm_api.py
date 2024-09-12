@@ -1,5 +1,8 @@
 from binaryninja import BackgroundTaskThread
 from binaryninja.settings import Settings
+from binaryninja.function import Function, DisassemblySettings
+from binaryninja.enums import DisassemblyOption
+from binaryninja.lineardisassembly import LinearViewObject, LinearViewCursor, LinearDisassemblyLine
 from PySide6 import QtWidgets
 from openai import OpenAI
 from .threads import StreamingThread
@@ -250,6 +253,39 @@ class LlmApi:
         thread.update_response.connect(signal)
         self.threads.append(thread)  # Keep track of the thread
         thread.start()
+
+    def PseudoCToText(self, bv, addr) -> str:
+        """
+        Converts Pseudo-C instructions at a specific address to text.
+
+        Parameters:
+            bv (BinaryView): The binary view containing the address.
+            addr (int): The address to convert.
+
+        Returns:
+            str: Text representation of Pseudo-C.
+        """
+        function = bv.get_functions_containing(addr)[0]
+
+        lines = []
+        settings = DisassemblySettings()
+        settings.set_option(DisassemblyOption.ShowAddress, False)
+        obj = LinearViewObject.language_representation(bv, settings)
+        cursor_end = LinearViewCursor(obj)
+        cursor_end.seek_to_address(function.highest_address)
+        body = bv.get_next_linear_disassembly_lines(cursor_end)
+        cursor_end.seek_to_address(function.highest_address)
+        header = bv.get_previous_linear_disassembly_lines(cursor_end)
+
+        for line in header:
+            lines.append(f'{str(line)}\n')
+
+        for line in body:
+            lines.append(f'{str(line)}\n')
+
+        c_instructions = ''.join(lines)
+
+        return f"{c_instructions}"
 
     def HLILToText(self, bv, addr) -> str:
         """

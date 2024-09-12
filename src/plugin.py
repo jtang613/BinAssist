@@ -273,7 +273,7 @@ class BinAssistWidget(SidebarWidget):
         if self.il_type == FunctionGraphType.HighLevelILFunctionGraph:
             func = self.LlmApi.HLILToText
         if self.il_type == FunctionGraphType.HighLevelLanguageRepresentationFunctionGraph:
-            func = self.LlmApi.HLILToText
+            func = self.LlmApi.PseudoCToText
         return func
 
     def get_line_text(self, bv, addr) -> str:
@@ -434,7 +434,7 @@ class BinAssistWidget(SidebarWidget):
         """
         html_resp = markdown.markdown(response["response"], extensions=['fenced_code'])
         html_resp += self._generate_feedback_buttons()
-        self.response = response
+        self.response = response["response"]
         self.text_box.setHtml(html_resp)
 
     def display_custom_response(self, response) -> None:
@@ -451,7 +451,7 @@ class BinAssistWidget(SidebarWidget):
 
         html_resp = markdown.markdown(full_conversation, extensions=['fenced_code'])
         html_resp += self._generate_feedback_buttons()
-        self.response = response
+        self.response = response["response"]
         self.query_response_browser.setHtml(html_resp)
 
     def display_analyze_response(self, response) -> None:
