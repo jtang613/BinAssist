@@ -17,12 +17,14 @@ class StreamingThread(QtCore.QThread):
 
     update_response = QtCore.Signal(dict)
 
-    def __init__(self, client: OpenAI, query: str, system: str, tools=None) -> None:
+    def __init__(self, client: OpenAI, model: str, max_tokens: int, query: str, system: str, tools=None) -> None:
         """
         Initializes the thread with the necessary parameters for making a streaming API call.
 
         Parameters:
             client (OpenAI): The OpenAI client used for making API calls.
+            model (str): The model to use.
+            max_tokens (int): The max number of context tokens.
             query (str): The user's query to be processed.
             system (str): System-level instructions or context for the API call.
             tools (list): A list of tools that the LLM can call during the response.
@@ -30,6 +32,8 @@ class StreamingThread(QtCore.QThread):
         super().__init__()
         self.settings = Settings()
         self.client = client
+        self.model = model
+        self.max_tokens = max_tokens
         self.query = query
         self.system = system
         self.tools = tools or None
@@ -40,13 +44,13 @@ class StreamingThread(QtCore.QThread):
         signaling the main thread upon updates or when an error occurs.
         """
         response = self.client.chat.completions.create(
-            model=self.settings.get_string('binassist.model'),
+            model=self.model,
             messages=[
                 {"role": "system", "content": self.system},
                 {"role": "user", "content": self.query}
             ],
             stream=False if self.tools else True,
-            max_tokens=self.settings.get_integer('binassist.max_tokens'),
+            max_tokens=self.max_tokens,
             tools=self.tools,
         )
         if self.tools:

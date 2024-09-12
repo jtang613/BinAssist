@@ -56,6 +56,15 @@ class LlmApi:
         self.threads = []  # Keep a list of active threads
         self.initialize_database()
         self.rag = RAG(self.settings.get_string('binassist.rag_db_path'))
+        self.api_provider = self.get_active_provider()
+
+    def get_active_provider(self):
+        """
+        Returns the currently active API provider.
+        """
+        active_name = self.settings.get_string('binassist.active_provider')
+        providers = json.loads(self.settings.get_json('binassist.api_providers'))
+        return next((p for p in providers if p['api___name'] == active_name), None)
 
     def rag_init(self, markdown_files: List[str]) -> None:
         """
@@ -86,8 +95,9 @@ class LlmApi:
         Returns:
             OpenAI: Configured API client instance.
         """
-        base_url = self.settings.get_string('binassist.remote_host')
-        api_key = self.settings.get_string('binassist.api_key')
+        self.api_provider = self.get_active_provider()
+        base_url = self.api_provider['api__host']
+        api_key = self.api_provider['api_key']
         return OpenAI(base_url=base_url, api_key=api_key, http_client=http_client)
 
     def initialize_database(self) -> None:
@@ -145,6 +155,8 @@ class LlmApi:
             str: The query sent to the LLM.
         """
         client = self._create_client()
+        model = self.api_provider['api__model']
+        max_tokens = self.api_provider['api__max_tokens']
         query = f"Describe the functionality of the decompiled {bv.platform.name} {bin_type} code " +\
                 f"below (represented as {il_type}). Provide a summary paragraph section followed by " +\
                 f"an analysis section that lists the functionality of each line of code. The analysis " +\
@@ -153,7 +165,7 @@ class LlmApi:
                 f"present. But only fallback to strings or log messages that are clearly function " +\
                 f"names for this function.\n```\n" +\
                 f"{addr_to_text_func(bv, addr)}\n```"
-        self._start_thread(client, query, self.SYSTEM_PROMPT, signal)
+        self._start_thread(client, model, max_tokens, query, self.SYSTEM_PROMPT, signal)
         return query
 
     def query(self, query, signal) -> str:
@@ -168,13 +180,15 @@ class LlmApi:
             str: The query sent to the LLM.
         """
         client = self._create_client()
+        model = self.api_provider['api__model']
+        max_tokens = self.api_provider['api__max_tokens']
         if self.use_rag():
             context = self._get_rag_context(query)
             augmented_query = f"Context:\n{context}\n\nQuery: {query}"
-            self._start_thread(client, augmented_query, self.SYSTEM_PROMPT, signal)
+            self._start_thread(client, model, max_tokens, augmented_query, self.SYSTEM_PROMPT, signal)
             return augmented_query
         else:
-            self._start_thread(client, query, self.SYSTEM_PROMPT, signal)
+            self._start_thread(client, model, max_tokens, query, self.SYSTEM_PROMPT, signal)
             return query
 
     def analyze_function(self, action: str, bv, addr, bin_type, il_type, addr_to_text_func, signal) -> str:
@@ -195,6 +209,8 @@ class LlmApi:
             str: The query sent to the LLM.
         """
         client = self._create_client()
+        model = self.api_provider['api__model']
+        max_tokens = self.api_provider['api__max_tokens']
         code = addr_to_text_func(bv, addr)
         prompt = ToolCalling.ACTION_PROMPTS.get(action, "").format(code=code)
 
@@ -202,7 +218,7 @@ class LlmApi:
             raise ValueError(f"Unknown action type: {action}")
 
         query = f"{prompt}\n{self.FUNCTION_PROMPT}{self.FORMAT_PROMPT}"
-        self._start_thread(client, query, f"{self.SYSTEM_PROMPT}{self.FUNCTION_PROMPT}{self.FORMAT_PROMPT}", signal, ToolCalling.FN_TEMPLATES)
+        self._start_thread(client, model, max_tokens, query, f"{self.SYSTEM_PROMPT}{self.FUNCTION_PROMPT}{self.FORMAT_PROMPT}", signal, ToolCalling.FN_TEMPLATES)
 
         return query
 
@@ -238,7 +254,7 @@ class LlmApi:
         """
         return self.rag.get_document_list()
 
-    def _start_thread(self, client, query, system, signal, tools=None) -> None:
+    def _start_thread(self, client, model, max_tokens, query, system, signal, tools=None) -> None:
         """
         Starts a new thread to handle streaming responses from the LLM.
 
@@ -249,7 +265,7 @@ class LlmApi:
             signal (Signal): Qt signal to update with the response.
             tools (dict): A dictionary of available toold for the LLM to consdider.
         """
-        thread = StreamingThread(client, query, system, tools)
+        thread = StreamingThread(client, model, max_tokens, query, system, tools)
         thread.update_response.connect(signal)
         self.threads.append(thread)  # Keep track of the thread
         thread.start()

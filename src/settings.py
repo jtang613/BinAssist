@@ -4,7 +4,7 @@ from .exceptions import RegisterSettingsGroupException, RegisterSettingsKeyExcep
 
 class BinAssistSettings(Settings):
     """
-    Manages the configuration settings for the BinAssist plugin, including API keys, model settings, 
+    Manages the configuration settings for the BinAssist plugin, including API providers, RAG settings,
     and other preferences that need to be stored and retrieved across sessions.
     """
 
@@ -28,25 +28,36 @@ class BinAssistSettings(Settings):
         self.register_group('binassist', 'BinAssist')
 
         settings_definitions = {
-            'binassist.remote_host': {
-                'title': 'Remote API Host',
-                'description': 'The API host endpoint used to make requests.',
-                'type': 'string',
-                'default': 'https://api.openai.com/v1'
+            # API Provider fields have odd underscores so the sort sanely in the Settings view.
+            'binassist.api_providers': {
+                'title': 'API Providers',
+                'description': 'List of API providers for BinAssist',
+                'type': 'array',
+                'elementType': 'object',
+                'default': [
+                    {
+                        'api___name': 'GPT-4o-Mini',
+                        'api__host': 'https://api.openai.com/v1',
+                        'api_key': '',
+                        'api__model': 'gpt-4o-mini',
+                        'api__max_tokens': 16384
+                    }
+                ],
+                'properties': {
+                    'api___name': {'type': 'string', 'title': 'Provider Name'},
+                    'api__host': {'type': 'string', 'title': 'Remote API Host'},
+                    'api_key': {'type': 'string', 'title': 'API Key', 'hidden': True, "ignore" : ["SettingsProjectScope", "SettingsResourceScope"]},
+                    'api__model': {'type': 'string', 'title': 'LLM Model'},
+                    'api__max_tokens': {'type': 'number', 'title': 'Max Completion Tokens', 'minValue': 1, 'maxValue': 128*1024}
+                }
             },
-            'binassist.api_key': {
-                'title': 'API Key',
-                'description': 'The API key used to make requests.',
+            'binassist.active_provider': {
+                'title': 'Active API Provider',
+                'description': 'The currently selected API provider',
                 'type': 'string',
-                'default': None,
-                'ignore': ["SettingsProjectScope", "SettingsResourceScope"],
-                'hidden': True
-            },
-            'binassist.model': {
-                'title': 'LLM Model',
-                'description': 'The LLM model used to generate the response.',
-                'type': 'string',
-                'default': 'gpt-4o-mini'
+                'default': 'GPT-4o-Mini',
+#                'enum': ['GPT-4o-Mini'],  # This will be dynamically updated
+#                'uiSelectionAction': 'binassist_refresh_providers'
             },
             'binassist.rlhf_db': {
                 'title': 'RLHF Database Path',
@@ -54,14 +65,6 @@ class BinAssistSettings(Settings):
                 'type': 'string',
                 'default': 'rlhf_feedback.db',
                 'uiSelectionAction': 'file'
-            },
-            'binassist.max_tokens': {
-                'title': 'Max Completion Tokens',
-                'description': 'The maximum number of tokens used for completion.',
-                'type': 'number',
-                'default': 8192,
-                'minValue': 1,
-                'maxValue': 128*1024
             },
             'binassist.rag_db_path': {
                 'title': 'RAG Database Path',
@@ -79,7 +82,4 @@ class BinAssistSettings(Settings):
         }
 
         for key, properties in settings_definitions.items():
-            if 'minValue' in properties and 'maxValue' in properties:
-                properties['message'] = f"Min: {properties['minValue']}, Max: {properties['maxValue']}"
             self.register_setting(key, json.dumps(properties))
-            
