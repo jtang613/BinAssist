@@ -140,7 +140,7 @@ class BinAssistWidget(SidebarWidget):
         self.filter_checkboxes = {}
         for fn_dict in ToolCalling.FN_TEMPLATES:
             if fn_dict["type"] == "function":
-                fn_name = f"{fn_dict["function"]["name"].replace('_',' ')}: {fn_dict["function"]["description"]}"
+                fn_name = f"{fn_dict['function']['name'].replace('_',' ')}: {fn_dict['function']['description']}"
                 checkbox = QtWidgets.QCheckBox(fn_name)
                 checkbox.setChecked(True)  # Set all checkboxes to checked by default
                 self.filter_checkboxes[fn_name] = checkbox

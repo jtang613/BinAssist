@@ -27,33 +27,59 @@ class BinAssistSettings(Settings):
         """
         self.register_group('binassist', 'BinAssist')
 
-        settings_definitions = [
-            ('binassist.remote_host', 'Remote API Host', 'The API host endpoint used to make requests.', 'string', None),
-            ('binassist.api_key', 'API Key', 'The API key used to make requests.', 'string', None),
-            ('binassist.model', 'LLM Model', 'The LLM model used to generate the response.', 'string', 'gpt-4-turbo'),
-            ('binassist.rlhf_db', 'RLHF Database Path', 'The to store the RLHF database.', 'string', 'rlhf_feedback.db'),
-            ('binassist.max_tokens', 'Max Completion Tokens', 'The maximum number of tokens used for completion.', 'number', 8192, 1, 128*1024),
-            ('binassist.rag_db_path', 'RAG Database Path', 'Path to store the RAG vector database.', 'string', 'binassist_rag_db'),
-            ('binassist.use_rag', 'Use RAG', 'Enable Retrieval Augmented Generation for queries.', 'boolean', False),
-        ]
-
-        for setting in settings_definitions:
-            if len(setting) == 5:
-                key, title, description, setting_type, default = setting
-                min_value, max_value = None, None
-            elif len(setting) == 7:
-                key, title, description, setting_type, default, min_value, max_value = setting
-
-            properties = {
-                'title': title,
-                'type': setting_type,
-                'description': description
+        settings_definitions = {
+            'binassist.remote_host': {
+                'title': 'Remote API Host',
+                'description': 'The API host endpoint used to make requests.',
+                'type': 'string',
+                'default': 'https://api.openai.com/v1'
+            },
+            'binassist.api_key': {
+                'title': 'API Key',
+                'description': 'The API key used to make requests.',
+                'type': 'string',
+                'default': None,
+                'ignore': ["SettingsProjectScope", "SettingsResourceScope"],
+                'hidden': True
+            },
+            'binassist.model': {
+                'title': 'LLM Model',
+                'description': 'The LLM model used to generate the response.',
+                'type': 'string',
+                'default': 'gpt-4o-mini'
+            },
+            'binassist.rlhf_db': {
+                'title': 'RLHF Database Path',
+                'description': 'The path to store the RLHF database.',
+                'type': 'string',
+                'default': 'rlhf_feedback.db',
+                'uiSelectionAction': 'file'
+            },
+            'binassist.max_tokens': {
+                'title': 'Max Completion Tokens',
+                'description': 'The maximum number of tokens used for completion.',
+                'type': 'number',
+                'default': 8192,
+                'minValue': 1,
+                'maxValue': 128*1024
+            },
+            'binassist.rag_db_path': {
+                'title': 'RAG Database Path',
+                'description': 'Path to store the RAG vector database.',
+                'type': 'string',
+                'default': 'binassist_rag_db',
+                'uiSelectionAction': 'directory'
+            },
+            'binassist.use_rag': {
+                'title': 'Use RAG',
+                'description': 'Enable Retrieval Augmented Generation for queries.',
+                'type': 'boolean',
+                'default': False
             }
-            if default is not None:
-                properties['default'] = default
-            if min_value is not None and max_value is not None:
-                properties['minValue'] = min_value
-                properties['maxValue'] = max_value
-                properties['message'] = f"Min: {min_value}, Max: {max_value}"
+        }
+
+        for key, properties in settings_definitions.items():
+            if 'minValue' in properties and 'maxValue' in properties:
+                properties['message'] = f"Min: {properties['minValue']}, Max: {properties['maxValue']}"
             self.register_setting(key, json.dumps(properties))
             

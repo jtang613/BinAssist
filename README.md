@@ -21,6 +21,15 @@ Future Roadmap:
 * Agentic assistant - Use Autogen or similar framework for self-guided binary RE.
 * Model fine tuning - Leverage the RLHF dataset to fine tune the model.
 
+## Quickstart
+
+* If necessary, `pip install -r requirements.txt` from the plugin directory.
+* Open Settings -> BinAssist.
+* Ensure the RLHF and RAG database paths are appropriate for your environment.
+* Point the API host to your prefered API provider and set the API key. 
+* Load a binary.
+* Open BinAssist with the 'BA' sidebar icon and start exploring.
+
 ## Screenshot
 ![Screenshot](/res/screenshots.gif)
 
@@ -33,6 +42,8 @@ https://github.com/jtang613/BinAssist
 ### Linux
 
 An OpenAI compatible API is required. For local LLM support, use Ollama, LMStudio, Open-WebUI, Text-Generation-WebUI, etc.
+
+`pip install -r requirements.txt`
 
 ### Windows
 
