@@ -28,7 +28,7 @@ class BinAssistSettings(Settings):
         self.register_group('binassist', 'BinAssist')
 
         settings_definitions = {
-            # API Provider fields have odd underscores so the sort sanely in the Settings view.
+            # API Provider fields have odd underscores so they sort sanely in the Settings view.
             'binassist.api_providers': {
                 'title': 'API Providers',
                 'description': 'List of API providers for BinAssist',
