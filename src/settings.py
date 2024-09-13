@@ -1,6 +1,7 @@
 import json
-from binaryninja.settings import Settings
-from .exceptions import RegisterSettingsGroupException, RegisterSettingsKeyException
+from binaryninja import Settings, SettingsScope
+from binaryninjaui import UIAction, UIActionHandler
+from PySide6.QtWidgets import QInputDialog, QWidget
 
 class BinAssistSettings(Settings):
     """
@@ -14,21 +15,16 @@ class BinAssistSettings(Settings):
         """
         super().__init__(instance_id='default')
         self._register_settings()
+        self._register_ui_actions()
 
     def _register_settings(self) -> None:
         """
         Registers all settings groups and individual settings for the BinAssist plugin with the Binary Ninja 
-        settings system. It ensures that all required settings are available in the settings UI and can be 
-        modified by the user.
-        
-        Raises:
-            RegisterSettingsGroupException: If the settings group fails to be registered.
-            RegisterSettingsKeyException: If an individual setting fails to be registered.
+        settings system.
         """
         self.register_group('binassist', 'BinAssist')
 
         settings_definitions = {
-            # API Provider fields have odd underscores so they sort sanely in the Settings view.
             'binassist.api_providers': {
                 'title': 'API Providers',
                 'description': 'List of API providers for BinAssist',
@@ -56,8 +52,8 @@ class BinAssistSettings(Settings):
                 'description': 'The currently selected API provider',
                 'type': 'string',
                 'default': 'GPT-4o-Mini',
-#                'enum': ['GPT-4o-Mini'],  # This will be dynamically updated
-#                'uiSelectionAction': 'binassist_refresh_providers'
+                'readOnly': True,
+                'uiSelectionAction': 'binassist_update_active_provider'
             },
             'binassist.rlhf_db': {
                 'title': 'RLHF Database Path',
@@ -83,3 +79,36 @@ class BinAssistSettings(Settings):
 
         for key, properties in settings_definitions.items():
             self.register_setting(key, json.dumps(properties))
+
+    def _register_ui_actions(self):
+        """
+        Registers custom UI actions for the BinAssist plugin.
+        """
+        UIAction.registerAction("binassist_update_active_provider")
+        UIActionHandler.globalActions().bindAction("binassist_update_active_provider", UIAction(self._update_active_provider_enum))
+
+    def _update_active_provider_enum(self, context):
+        """
+        Displays a PySide selection dialog populated with the list of API providers.
+        Updates the active_provider field with the selected API provider name.
+        """
+        # Get the current list of API providers
+        providers = json.loads(self.get_json('binassist.api_providers'))
+        provider_names = [provider['api___name'] for provider in providers]
+
+        # Create a parent widget (can be None if you don't have a specific parent)
+        parent = QWidget()
+
+        # Show the selection dialog
+        selected_provider, ok = QInputDialog.getItem(
+            parent,
+            "Select API Provider",
+            "Choose an API provider:",
+            provider_names,
+            0,  # Current index (0 for the first item)
+            False  # Non-editable
+        )
+
+        # If the user made a selection and clicked OK, update the active provider
+        if ok and selected_provider:
+            self.set_string('binassist.active_provider', selected_provider)
