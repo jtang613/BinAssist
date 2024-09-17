@@ -35,7 +35,8 @@ Future Roadmap:
 * Open BinAssist with the 'BA' sidebar icon and start exploring.
 
 ## Screenshot
-![Screenshot](/res/screenshots.gif)
+![Screenshot](/res/screenshot1.png)
+![Screenshots](/res/screenshots.gif)
 
 ## Homepage
 https://github.com/jtang613/BinAssist
@@ -61,7 +62,7 @@ Untested but should work. Submit an Issue or Pull Request for support.
 
 This plugin requires the following minimum version of Binary Ninja:
 
-* 3164
+* 4000
 
 
 

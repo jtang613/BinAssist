@@ -1,4 +1,4 @@
-from binaryninja import BackgroundTaskThread
+from binaryninja import BackgroundTaskThread, BinaryView
 from binaryninja.settings import Settings
 from binaryninja.function import Function, DisassemblySettings
 from binaryninja.enums import DisassemblyOption
@@ -270,7 +270,33 @@ class LlmApi:
         self.threads.append(thread)  # Keep track of the thread
         thread.start()
 
-    def PseudoCToText(self, bv, addr) -> str:
+    def DataToText(self, bv: BinaryView, start_addr: int, end_addr: int) -> str:
+        """
+        Converts Data range (ie: rdata, data) at a specific address range to text.
+
+        Parameters:
+            bv (BinaryView): The binary view containing the address.
+            start_addr (int): The start address of the range.
+            end_addr (int): The end address.
+
+        Returns:
+            str: Text representation of Data.
+        """
+        lines = []
+        settings = DisassemblySettings()
+        settings.set_option(DisassemblyOption.ShowAddress, True)
+        obj = LinearViewObject.language_representation(bv, settings)
+        cursor = LinearViewCursor(obj)
+        cursor.seek_to_address(start_addr)
+        while cursor.current_object.start <= end_addr:
+            lines.extend([str(line) for line in cursor.lines])
+            cursor.next()
+
+        data = "\n".join(lines)
+
+        return f"{data}"
+
+    def PseudoCToText(self, bv: BinaryView, addr: int) -> str:
         """
         Converts Pseudo-C instructions at a specific address to text.
 
@@ -281,7 +307,11 @@ class LlmApi:
         Returns:
             str: Text representation of Pseudo-C.
         """
-        function = bv.get_functions_containing(addr)[0]
+        function = bv.get_functions_containing(addr)
+        if len(function) > 0:
+            function = function[0]
+        else:
+            return None
 
         lines = []
         settings = DisassemblySettings()
@@ -303,7 +333,7 @@ class LlmApi:
 
         return f"{c_instructions}"
 
-    def HLILToText(self, bv, addr) -> str:
+    def HLILToText(self, bv: BinaryView, addr: int) -> str:
         """
         Converts High Level Intermediate Language (HLIL) instructions at a specific address to text.
 
@@ -314,12 +344,17 @@ class LlmApi:
         Returns:
             str: Text representation of HLIL.
         """
-        function = bv.get_functions_containing(addr)[0]
+        function = bv.get_functions_containing(addr)
+        if len(function) > 0:
+            function = function[0]
+        else:
+            return None
+
         tokens = function.get_type_tokens()[0].tokens
         hlil_instructions = '\n'.join(f'  {instr};' for instr in function.high_level_il.instructions)
         return f"{''.join(x.text for x in tokens)}\n{{\n{hlil_instructions}\n}}\n"
 
-    def MLILToText(self, bv, addr) -> str:
+    def MLILToText(self, bv: BinaryView, addr: int) -> str:
         """
         Converts Medium Level Intermediate Language (MLIL) instructions at a specific address to text.
 
@@ -330,12 +365,17 @@ class LlmApi:
         Returns:
             str: Text representation of MLIL.
         """
-        function = bv.get_functions_containing(addr)[0]
+        function = bv.get_functions_containing(addr)
+        if len(function) > 0:
+            function = function[0]
+        else:
+            return None
+
         tokens = function.get_type_tokens()[0].tokens
         mlil_instructions = '\n'.join(f'0x{instr.address:08x}  {instr}' for instr in function.medium_level_il.instructions)
         return f"{''.join(x.text for x in tokens)}\n{{\n{mlil_instructions}\n}}\n"
 
-    def LLILToText(self, bv, addr) -> str:
+    def LLILToText(self, bv: BinaryView, addr: int) -> str:
         """
         Converts Low Level Intermediate Language (LLIL) instructions at a specific address to text.
 
@@ -346,12 +386,17 @@ class LlmApi:
         Returns:
             str: Text representation of LLIL.
         """
-        function = bv.get_functions_containing(addr)[0]
+        function = bv.get_functions_containing(addr)
+        if len(function) > 0:
+            function = function[0]
+        else:
+            return None
+
         tokens = function.get_type_tokens()[0].tokens
         llil_instructions = '\n'.join(f'0x{instr.address:08x}  {instr}' for instr in function.low_level_il.instructions)
         return f"{''.join(x.text for x in tokens)}\n{llil_instructions}\n"
 
-    def AsmToText(self, bv, addr) -> str:
+    def AsmToText(self, bv: BinaryView, addr: int) -> str:
         """
         Converts assembly instructions at a specific address to text.
 
@@ -363,7 +408,12 @@ class LlmApi:
             str: Text representation of assembly instructions.
         """
         asm_instructions = ""
-        function = bv.get_functions_containing(addr)[0]
+        function = bv.get_functions_containing(addr)
+        if len(function) > 0:
+            function = function[0]
+        else:
+            return None
+
         for bb in function.basic_blocks:
             for dt in bb.disassembly_text:
                 s = str(dt)

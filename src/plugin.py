@@ -526,6 +526,15 @@ class BinAssistWidget(SidebarWidget):
 
         line = self.get_line_text(self.bv, self.offset_addr)
 
+        match = re.search(r'#range\(0x([0-9a-fA-F]+), 0x([0-9a-fA-F]+)\)', query)
+        if match:
+            range_start = int(match.group(1), 16)  # Convert hex to int
+            range_end = int(match.group(2), 16)   # Convert hex to int
+            range_end_offset = match.end()
+            print(f"range_start: {range_start}, range_end: {range_end}, range_end_offset: {range_end_offset}")
+            range_text = self.LlmApi.DataToText(self.bv, range_start, range_end)
+            query = query[:range_end_offset] + f"\n```\n{range_text}\n```\n" + query[range_end_offset:]
+
         query = query.replace("#line", f'\n```\n{line}\n```\n')
         query = query.replace('#func', f'\n```\n{func(self.bv, self.offset_addr)}\n```\n')
         query = query.replace("#addr", hex(self.offset_addr) or "")
@@ -600,7 +609,8 @@ class BinAssistWidget(SidebarWidget):
                 f"{self.datatype} - {self.il_type.name}\n" + \
                 "#line to include the current disassembly line.\n" + \
                 "#func to include current function disassembly.\n" + \
-                "#addr to include the current hex address."
+                "#addr to include the current hex address." + \
+                "#range(start, end) to include the linearview data in a given range."
                 )
 
     def contextMenuEvent(self, event) -> None:
