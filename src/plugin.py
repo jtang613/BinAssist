@@ -609,7 +609,7 @@ class BinAssistWidget(SidebarWidget):
                 f"{self.datatype} - {self.il_type.name}\n" + \
                 "#line to include the current disassembly line.\n" + \
                 "#func to include current function disassembly.\n" + \
-                "#addr to include the current hex address." + \
+                "#addr to include the current hex address.\n" + \
                 "#range(start, end) to include the linearview data in a given range."
                 )
 
