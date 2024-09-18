@@ -75,6 +75,7 @@ class StreamingThread(QtCore.QThread):
                             )
                         except:
                             pass
+                #print(f"tool_calls: {tool_calls}")
                 self.update_response.emit({"response":tool_calls})
                 return
         else: # Not self.tools

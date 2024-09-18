@@ -509,6 +509,8 @@ class BinAssistWidget(SidebarWidget):
             return f"{action['arguments']['var_name']} -> {action['arguments']['new_name']}"
         if action['name'] == 'retype_variable':
             return f"{action['arguments']['var_name']} -> {action['arguments']['new_type']}"
+        if action['name'] == 'auto_create_struct':
+            return f"{action['arguments']['var_name']}"
 
     def _process_custom_query(self, query) -> str:
         """
