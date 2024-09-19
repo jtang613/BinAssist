@@ -553,7 +553,7 @@ class ToolCalling:
 
         "auto_create_struct": "Use the 'auto_create_struct' tool:\n```\n{code}\n```\n" +
                            "Examine the code functionality, parameters and variables being used.\n" +
-                           "IF YOU DETECT A VARIABLE THAT USES OFFSET ACCESS SUCH AS `*(arg1 + 0c)` OR VARIABLES THAT MIGHT BE STRUCTURES OR CLASSES,\n" +
+                           "IF YOU DETECT A VARIABLE THAT USES OFFSET ACCESS SUCH AS `*(arg1 + 0c)` OR VARIABLES LIKELY TO BE STRUCTURES OR CLASSES,\n" +
                            "RESPOND ONLY WITH THE AUT_CREATE_SRTUCT PARAMETERS (func_name, var_name). DO NOT INCLUDE ANY OTHER TEXT.\n" +
                            "ALL JSON VALUES MUST BE TEXT STRINGS, INCLUDING NUMBERS AND ADDRESSES. ie: \"0x1234abcd\"\n" +
                            "ALL JSON MUST BE PROPERLY FORMATTED WITH NO EMBEDDED COMMENTS.\n",
@@ -705,7 +705,7 @@ class ToolCalling:
                 # Field already exists at this offset; skip or handle as needed
                 pass
         struct_type = Type.structure_type(struct_builder)
-        struct_name = f"struct_{variable_name}"
+        struct_name = f"{function.name}_struct_{variable_name}"
         bv.define_user_type(struct_name, struct_type)
         named_struct_type = Type.named_type_from_type(struct_name, struct_type)
         if var.type.type_class == TypeClass.PointerTypeClass:
