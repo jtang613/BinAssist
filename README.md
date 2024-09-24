@@ -35,7 +35,7 @@ Future Roadmap:
 * Open BinAssist with the 'BA' sidebar icon and start exploring.
 
 ## Screenshot
-![Screenshot](https://github.com/jtang613/BinAssist/blob/master/res/screenshot1.png)
+![Screenshot](https://raw.githubusercontent.com/jtang613/BinAssist/refs/heads/master/res/screenshot1.png)
 ![Screenshots](/res/screenshots.gif)
 
 ## Homepage
