@@ -60,6 +60,9 @@ class BinAssistWidget(SidebarWidget):
         self.tabs.addTab(actions_tab, "Actions") 
         self.tabs.addTab(rag_management_tab, "RAG Management")
 
+        self.submit_button = None
+        self.submit_label = None
+
         layout = QtWidgets.QVBoxLayout()
         layout.addWidget(self.tabs)
         self.setLayout(layout)
@@ -337,22 +340,55 @@ class BinAssistWidget(SidebarWidget):
     def onExplainILClicked(self) -> None:
         """
         Handles the event when the 'Explain Function' button is clicked.
+        Toggles the button between 'Explain' and 'Stop'.
         """
-        datatype = self.datatype.split(':')[1]
-        il_type = self.il_type.name
-        func = self.get_func_text()
-        self.text_box.clear()
-        self.request = self.LlmApi.explain(self.bv, self.offset_addr, datatype, il_type, func, self.display_response)
+        self.submit_button = self.sender()
+        
+        if self.submit_button.text() == "Explain Function":
+            self.submit_label = self.submit_button.text()
+            # Start explanation
+            datatype = self.datatype.split(':')[1]
+            il_type = self.il_type.name
+            func = self.get_func_text()
+            self.text_box.clear()
+
+            # Trigger LLM query and store request
+            self.request = self.LlmApi.explain(self.bv, self.offset_addr, datatype, il_type, func, self.display_response)
+            
+            # Change the button text to "Stop"
+            self.submit_button.setText("Stop")
+        else:
+            # Stop the running query
+            self.LlmApi.stop_threads()
+            
+            # Revert the button back to "Explain"
+            self.submit_button.setText(self.submit_label)
 
     def onExplainLineClicked(self) -> None:
         """
         Handles the event when the 'Explain Line' button is clicked.
+        Toggles the button between 'Explain' and 'Stop'.
         """
-        datatype = self.datatype.split(':')[1]
-        il_type = self.il_type.name
-        self.text_box.clear()
-        self.request = self.LlmApi.explain(self.bv, self.offset_addr, datatype, il_type, self.get_line_text, self.display_response)
-
+        self.submit_button = self.sender()
+        
+        if self.submit_button.text() == "Explain Line":
+            self.submit_label = self.submit_button.text()
+            # Start explanation
+            datatype = self.datatype.split(':')[1]
+            il_type = self.il_type.name
+            self.text_box.clear()
+            
+            # Trigger LLM query and store request
+            self.request = self.LlmApi.explain(self.bv, self.offset_addr, datatype, il_type, self.get_line_text, self.display_response)
+            
+            # Change the button text to "Stop"
+            self.submit_button.setText("Stop")
+        else:
+            # Stop the running query
+            self.LlmApi.stop_threads()
+            
+            # Revert the button back to "Explain"
+            self.submit_button.setText(self.submit_label)
 
     def onClearTextClicked(self) -> None:
         """
@@ -364,31 +400,64 @@ class BinAssistWidget(SidebarWidget):
 
     def onSubmitQueryClicked(self) -> None:
         """
-        Submits the custom query entered by the user when the 'Submit' button is clicked.
+        Submits the custom query or stops a running query based on the button state.
         """
-        query = self.query_edit.toPlainText()
-        query = self._process_custom_query(query)
-        self.session_log.append({"user": query, "assistant": "Awaiting response..."})
+        # Toggle functionality between Submit and Stop
+        self.submit_button = self.sender()
 
-        # Prepend the session log to the query for context
-        full_query = "\n".join([f"User: {entry['user']}\nAssistant: {entry['assistant']}" for entry in self.session_log]) + f"\nUser: {query}"
+        if self.submit_button.text() == "Submit":
+            self.submit_label = self.submit_button.text()
+            # Start a new query
+            query = self.query_edit.toPlainText()
+            query = self._process_custom_query(query)
+            self.session_log.append({"user": query, "assistant": "Awaiting response..."})
 
-        self.request = self.LlmApi.query(full_query, self.display_custom_response)
+            # Prepend the session log to the query for context
+            full_query = "\n".join([f"User: {entry['user']}\nAssistant: {entry['assistant']}" for entry in self.session_log]) + f"\nUser: {query}"
+
+            # Store the running request
+            self.request = self.LlmApi.query(full_query, self.display_custom_response)
+
+            # Update button to Stop
+            self.submit_button.setText("Stop")
+        else:
+            # Stop the running query
+            self.LlmApi.stop_threads()
+            # Revert button back to Submit
+            self.submit_button.setText(self.submit_label)
+
 
     def onAnalyzeFunctionClicked(self) -> None:
         """
         Event for the 'Analyze Function' button.
+        Toggles the button between 'Analyze Function' and 'Stop'.
         """
-        datatype = self.datatype.split(':')[1]
-        il_type = self.il_type.name
-        func = self.get_func_text()
+        self.submit_button = self.sender()
 
-        for fn_name, checkbox in self.filter_checkboxes.items():
-            if checkbox.isChecked():
-                action = fn_name.split(':')[0].replace(' ', '_')
-                self.request = self.LlmApi.analyze_function(
-                    action, self.bv, self.offset_addr, datatype, il_type, func, self.display_analyze_response
-                )
+        if self.submit_button.text() == "Analyze Function":
+            self.submit_label = self.submit_button.text()
+            # Start analysis
+            datatype = self.datatype.split(':')[1]
+            il_type = self.il_type.name
+            func = self.get_func_text()
+
+            for fn_name, checkbox in self.filter_checkboxes.items():
+                if checkbox.isChecked():
+                    action = fn_name.split(':')[0].replace(' ', '_')
+                    
+                    # Trigger LLM query and store request
+                    self.request = self.LlmApi.analyze_function(
+                        action, self.bv, self.offset_addr, datatype, il_type, func, self.display_analyze_response
+                    )
+
+            # Change the button text to "Stop"
+            self.submit_button.setText("Stop")
+        else:
+            # Stop the running query
+            self.LlmApi.stop_threads()
+            
+            # Revert the button back to "Analyze Function"
+            self.submit_button.setText(self.submit_label)
 
     def onAnalyzeClearClicked(self) -> None:
         """
@@ -436,6 +505,10 @@ class BinAssistWidget(SidebarWidget):
         html_resp += self._generate_feedback_buttons()
         self.response = response["response"]
         self.text_box.setHtml(html_resp)
+        if(not self.LlmApi.isRunning()):
+            # Revert the button back to "Explain"
+            self.submit_button.setText(self.submit_label)
+
 
     def display_custom_response(self, response) -> None:
         """
@@ -453,6 +526,9 @@ class BinAssistWidget(SidebarWidget):
         html_resp += self._generate_feedback_buttons()
         self.response = response["response"]
         self.query_response_browser.setHtml(html_resp)
+        if(not self.LlmApi.isRunning()):
+            # Revert the button back to "Explain"
+            self.submit_button.setText(self.submit_label)
 
     def display_analyze_response(self, response) -> None:
         """
@@ -497,6 +573,10 @@ class BinAssistWidget(SidebarWidget):
 
         # Resize columns to fit the content
         self.actions_table.resizeColumnsToContents()
+        if(not self.LlmApi.isRunning()):
+            # Revert the button back to "Explain"
+            self.submit_button.setText(self.submit_label)
+
 
 
     def _format_action(self, action: dict) -> str:

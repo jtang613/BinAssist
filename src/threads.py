@@ -37,6 +37,7 @@ class StreamingThread(QtCore.QThread):
         self.query = query
         self.system = system
         self.tools = tools or None
+        self.running = True
 
     def run(self) -> None:
         """
@@ -53,6 +54,10 @@ class StreamingThread(QtCore.QThread):
             max_tokens=self.max_tokens,
             tools=self.tools,
         )
+
+        if not self.running:  # Check before processing response
+            return
+
         if self.tools:
             #print(f"finish_reason: {response.choices[0].finish_reason}")
             #print(f"{response.choices[0].message.content}")
@@ -81,9 +86,20 @@ class StreamingThread(QtCore.QThread):
         else: # Not self.tools
             response_buffer = ""
             for chunk in response:
+                if not self.running:  # Stop consuming stream if interrupted
+                    return
                 message_chunk = chunk.choices[0].delta.content or ""
                 response_buffer += message_chunk
                 self.update_response.emit({"response":response_buffer})
+
+    def stop(self):
+        """
+        Stops the thread by setting the running flag to False and calling the built-in quit and terminate methods.
+        """
+        self.running = False  # Signal to stop processing the API response
+        self.quit()  # Graceful stop (it allows the thread to clean up)
+        self.terminate()  # Forcefully kill the thread if it doesn't stop immediately
+        self.wait()  # Ensure the thread has completely stopped
 
 
     def _generate_random_string(self, length=8):

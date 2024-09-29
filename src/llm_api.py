@@ -29,15 +29,15 @@ class LlmApi:
     You are an expert Python and Rust developer. You are familiar with common frameworks and libraries 
     such as WinSock, OpenSSL, MFC, etc. You are an expert in TCP/IP network programming and packet analysis.
     You always respond to queries in a structured format using Markdown styling for headings and lists. 
-    You format code blocks using back-tick code-fencing.
+    You format code blocks using back-tick code-fencing.\n
     '''
 
     FUNCTION_PROMPT = '''
-    USE THE PROVIDED TOOLS WHEN NECESSARY. YOU ALWAYS RESPOND WITH TOOL CALLS WHEN POSSIBLE.
+    USE THE PROVIDED TOOLS WHEN NECESSARY. YOU ALWAYS RESPOND WITH TOOL CALLS WHEN POSSIBLE.\n
     '''
 
     FORMAT_PROMPT = '''
-    The output MUST strictly adhere to the following JSON format, and NO other text MUST be included.
+    The output MUST strictly adhere to the following JSON format, do not include any other text.
     The example format is as follows. Please make sure the parameter type is correct. If no function call is needed, please make tool_calls an empty list '[]'.
     ```
     {
@@ -47,7 +47,7 @@ class LlmApi:
         ]
     }
     ```
-    REMEMBER, YOU MUST ALWAYS PRODUCE A JSON LIST OF TOOL_CALLS!
+    REMEMBER, YOU MUST ALWAYS PRODUCE A JSON LIST OF TOOL_CALLS!\n
     '''
 
     def __init__(self):
@@ -56,6 +56,7 @@ class LlmApi:
         """
         self.settings = Settings()
         self.threads = []  # Keep a list of active threads
+        self.thread = None
         self.initialize_database()
         self.rag = RAG(self.settings.get_string('binassist.rag_db_path'))
         self.api_provider = self.get_active_provider()
@@ -167,7 +168,7 @@ class LlmApi:
                 f"present. But only fallback to strings or log messages that are clearly function " +\
                 f"names for this function.\n```\n" +\
                 f"{addr_to_text_func(bv, addr)}\n```"
-        self._start_thread(client, model, max_tokens, query, self.SYSTEM_PROMPT, signal)
+        self.thread = self._start_thread(client, model, max_tokens, query, self.SYSTEM_PROMPT, signal)
         return query
 
     def query(self, query, signal) -> str:
@@ -187,10 +188,10 @@ class LlmApi:
         if self.use_rag():
             context = self._get_rag_context(query)
             augmented_query = f"Context:\n{context}\n\nQuery: {query}"
-            self._start_thread(client, model, max_tokens, augmented_query, self.SYSTEM_PROMPT, signal)
+            self.thread = self._start_thread(client, model, max_tokens, augmented_query, self.SYSTEM_PROMPT, signal)
             return augmented_query
         else:
-            self._start_thread(client, model, max_tokens, query, self.SYSTEM_PROMPT, signal)
+            self.thread = self._start_thread(client, model, max_tokens, query, self.SYSTEM_PROMPT, signal)
             return query
 
     def analyze_function(self, action: str, bv, addr, bin_type, il_type, addr_to_text_func, signal) -> str:
@@ -220,9 +221,12 @@ class LlmApi:
             raise ValueError(f"Unknown action type: {action}")
 
         query = f"{prompt}\n{self.FUNCTION_PROMPT}{self.FORMAT_PROMPT}"
-        self._start_thread(client, model, max_tokens, query, f"{self.SYSTEM_PROMPT}{self.FUNCTION_PROMPT}{self.FORMAT_PROMPT}", signal, ToolCalling.FN_TEMPLATES)
+        self.thread = self._start_thread(client, model, max_tokens, query, f"{self.SYSTEM_PROMPT}{self.FUNCTION_PROMPT}{self.FORMAT_PROMPT}", signal, ToolCalling.FN_TEMPLATES)
 
         return query
+
+    def isRunning(self):
+        return self.thread.isRunning()
 
     def _get_rag_context(self, query: str) -> str:
         """
@@ -271,6 +275,7 @@ class LlmApi:
         thread.update_response.connect(signal)
         self.threads.append(thread)  # Keep track of the thread
         thread.start()
+        return thread
 
     def DataToText(self, bv: BinaryView, start_addr: int, end_addr: int) -> str:
         """
@@ -429,8 +434,9 @@ class LlmApi:
         Stops all active threads used for handling LLM queries.
         """
         for thread in self.threads:
-            thread.quit()
-            thread.wait()
+            thread.stop()
+        self.threads.clear()  # Clear the list after stopping all threads
+
 
 class ToolCalling:
     """
