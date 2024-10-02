@@ -6,7 +6,7 @@ from binaryninja import FunctionGraphType, PythonScriptingProvider, PythonScript
 from PySide6 import QtCore, QtGui, QtWidgets
 import markdown
 from .llm_api import LlmApi
-from .llm_api import ToolCalling
+from .toolcalling import ToolCalling
 
 class BinAssistWidget(SidebarWidget):
     """
