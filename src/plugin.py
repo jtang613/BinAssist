@@ -6,7 +6,7 @@ from binaryninja import FunctionGraphType, PythonScriptingProvider, PythonScript
 from PySide6 import QtCore, QtGui, QtWidgets
 import markdown
 from .llm_api import LlmApi
-from .toolcalling import ToolCalling
+from .llm_api import ToolCalling
 
 class BinAssistWidget(SidebarWidget):
     """
@@ -267,15 +267,15 @@ class BinAssistWidget(SidebarWidget):
             callable: A function from LlmApi corresponding to the current IL type that converts binary data to text.
         """
         func = None
-        if self.il_type == FunctionGraphType.NormalFunctionGraph:
+        if self.il_type.view_type == FunctionGraphType.NormalFunctionGraph:
             func = self.LlmApi.AsmToText
-        if self.il_type == FunctionGraphType.LowLevelILFunctionGraph:
+        if self.il_type.view_type == FunctionGraphType.LowLevelILFunctionGraph:
             func = self.LlmApi.LLILToText
-        if self.il_type == FunctionGraphType.MediumLevelILFunctionGraph:
+        if self.il_type.view_type == FunctionGraphType.MediumLevelILFunctionGraph:
             func = self.LlmApi.MLILToText
-        if self.il_type == FunctionGraphType.HighLevelILFunctionGraph:
+        if self.il_type.view_type == FunctionGraphType.HighLevelILFunctionGraph:
             func = self.LlmApi.HLILToText
-        if self.il_type == FunctionGraphType.HighLevelLanguageRepresentationFunctionGraph:
+        if self.il_type.view_type == FunctionGraphType.HighLevelLanguageRepresentationFunctionGraph:
             func = self.LlmApi.PseudoCToText
         return func
 
