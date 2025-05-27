@@ -14,6 +14,7 @@ from typing import List
 import sqlite3
 import httpx
 import json
+import logging
 
 http_client = httpx.Client(verify=False)
 
@@ -55,20 +56,68 @@ class LlmApi:
         """
         Initializes the LlmApi instance, setting up settings and preparing the database for feedback storage.
         """
-        self.settings = Settings()
-        self.threads = []  # Keep a list of active threads
-        self.thread = None
-        self.initialize_database()
-        self.rag = RAG(self.settings.get_string('binassist.rag_db_path'))
-        self.api_provider = self.get_active_provider()
+        self.logger = logging.getLogger("binassist.llm_api")
+        self.logger.info("Initializing LlmApi")
+        
+        try:
+            self.settings = Settings()
+            self.logger.debug("Settings initialized")
+            
+            self.threads = []  # Keep a list of active threads
+            self.thread = None
+            self.logger.debug("Thread management initialized")
+            
+            self.initialize_database()
+            self.logger.debug("Database initialized")
+            
+            self.rag = RAG(self.settings.get_string('binassist.rag_db_path'))
+            self.logger.debug("RAG system initialized")
+            
+            self.api_provider = self.get_active_provider()
+            self.logger.debug(f"Active provider: {self.api_provider.get('provider_name', 'unknown')}")
+            
+            self.logger.info("LlmApi initialization completed successfully")
+        except Exception as e:
+            self.logger.error(f"Error during LlmApi initialization: {type(e).__name__}: {e}")
+            self.logger.exception("Full traceback:")
+            raise
 
     def get_active_provider(self):
         """
-        Returns the currently active API provider.
+        Returns the currently active API provider using simple settings.
         """
-        active_name = self.settings.get_string('binassist.active_provider')
-        providers = json.loads(self.settings.get_json('binassist.api_providers'))
-        return next((p for p in providers if p['api___name'] == active_name), None)
+        try:
+            active_name = self.settings.get_string('binassist.active_provider')
+            
+            # Map provider names to their setting prefixes  
+            provider_map = {
+                'GPT-4o-Mini': 'provider1',
+                'Claude-3.5-Sonnet': 'provider2',
+                'o4-mini': 'provider3'
+            }
+            
+            prefix = provider_map.get(active_name, 'provider1')
+            
+            return {
+                'api___name': self.settings.get_string(f'binassist.{prefix}_name'),
+                'provider_type': self.settings.get_string(f'binassist.{prefix}_type'),
+                'api__host': self.settings.get_string(f'binassist.{prefix}_host'),
+                'api_key': self.settings.get_string(f'binassist.{prefix}_key'),
+                'api__model': self.settings.get_string(f'binassist.{prefix}_model'),
+                'api__max_tokens': self.settings.get_integer(f'binassist.{prefix}_max_tokens')
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error getting active provider: {e}")
+            # Return a default provider as fallback
+            return {
+                'api___name': 'GPT-4o-Mini',
+                'provider_type': 'openai',
+                'api__host': 'https://api.openai.com/v1',
+                'api_key': '',
+                'api__model': 'gpt-4o-mini',
+                'api__max_tokens': 16384
+            }
 
     def rag_init(self, markdown_files: List[str]) -> None:
         """
@@ -183,17 +232,38 @@ class LlmApi:
         Returns:
             str: The query sent to the LLM.
         """
-        client = self._create_client()
-        model = self.api_provider['api__model']
-        max_tokens = self.api_provider['api__max_tokens']
-        if self.use_rag():
-            context = self._get_rag_context(query)
-            augmented_query = f"Context:\n{context}\n\nQuery: {query}"
-            self.thread = self._start_thread(client, model, max_tokens, augmented_query, self.SYSTEM_PROMPT, signal)
-            return augmented_query
-        else:
-            self.thread = self._start_thread(client, model, max_tokens, query, self.SYSTEM_PROMPT, signal)
-            return query
+        self.logger.info(f"Starting query with length: {len(query)}")
+        self.logger.debug(f"Query preview: {query[:200]}...")
+        
+        try:
+            self.logger.debug("Creating OpenAI client")
+            client = self._create_client()
+            self.logger.debug("Client created successfully")
+            
+            model = self.api_provider['api__model']
+            max_tokens = self.api_provider['api__max_tokens']
+            self.logger.debug(f"Using model: {model}, max_tokens: {max_tokens}")
+            
+            if self.use_rag():
+                self.logger.debug("Using RAG - getting context")
+                context = self._get_rag_context(query)
+                augmented_query = f"Context:\n{context}\n\nQuery: {query}"
+                self.logger.debug(f"RAG context length: {len(context)}, augmented query length: {len(augmented_query)}")
+                
+                self.logger.debug("Starting thread with RAG-augmented query")
+                self.thread = self._start_thread(client, model, max_tokens, augmented_query, self.SYSTEM_PROMPT, signal)
+                self.logger.debug("Thread started successfully with RAG")
+                return augmented_query
+            else:
+                self.logger.debug("Starting thread without RAG")
+                self.thread = self._start_thread(client, model, max_tokens, query, self.SYSTEM_PROMPT, signal)
+                self.logger.debug("Thread started successfully without RAG")
+                return query
+                
+        except Exception as e:
+            self.logger.error(f"Error in query method: {type(e).__name__}: {e}")
+            self.logger.exception("Full traceback:")
+            raise
 
     def analyze_function(self, action: str, bv, addr, bin_type, il_type, addr_to_text_func, signal) -> str:
         """
@@ -272,11 +342,32 @@ class LlmApi:
             signal (Signal): Qt signal to update with the response.
             tools (dict): A dictionary of available toold for the LLM to consdider.
         """
-        thread = StreamingThread(client, model, max_tokens, query, system, tools)
-        thread.update_response.connect(signal)
-        self.threads.append(thread)  # Keep track of the thread
-        thread.start()
-        return thread
+        try:
+            self.logger.info(f"Starting new thread for model: {model}")
+            self.logger.debug(f"Thread parameters - max_tokens: {max_tokens}, query_length: {len(query)}, system_length: {len(system)}, tools: {tools is not None}")
+            
+            self.logger.debug("Creating StreamingThread instance")
+            thread = StreamingThread(client, model, max_tokens, query, system, tools)
+            self.logger.debug("StreamingThread instance created")
+            
+            self.logger.debug("Connecting signal")
+            thread.update_response.connect(signal)
+            self.logger.debug("Signal connected")
+            
+            self.logger.debug("Adding thread to tracking list")
+            self.threads.append(thread)  # Keep track of the thread
+            self.logger.debug(f"Thread added to list. Total active threads: {len(self.threads)}")
+            
+            self.logger.debug("Starting thread execution")
+            thread.start()
+            self.logger.info("Thread started successfully")
+            
+            return thread
+            
+        except Exception as e:
+            self.logger.error(f"Error in _start_thread: {type(e).__name__}: {e}")
+            self.logger.exception("Full traceback:")
+            raise
 
     def DataToText(self, bv: BinaryView, start_addr: int, end_addr: int) -> str:
         """

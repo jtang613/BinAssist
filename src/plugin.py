@@ -5,6 +5,16 @@ from binaryninjaui import SidebarWidget, SidebarWidgetType, UIActionHandler, Sid
 from binaryninja import FunctionGraphType, PythonScriptingProvider, PythonScriptingInstance
 from PySide6 import QtCore, QtGui, QtWidgets
 import markdown
+import logging
+
+# Enable debug logging for BinAssist
+try:
+    from .core.debug_logger import setup_debug_logging
+    debug_logger = setup_debug_logging(level=logging.DEBUG, log_to_file=True)
+    debug_logger.info("BinAssist plugin loading with debug logging enabled")
+except Exception as e:
+    print(f"Failed to setup debug logging: {e}")
+
 from .llm_api import LlmApi
 from .llm_api import ToolCalling
 
@@ -23,22 +33,45 @@ class BinAssistWidget(SidebarWidget):
             frame (ViewFrame): The frame context in which the widget is used.
             data: Additional data or configurations required for the widget initialization.
         """
-        super().__init__(name)
-        self.settings = Settings()
-        self.LlmApi = LlmApi()
-        self.offset_addr = 0
-        self.actionHandler = UIActionHandler()
-        self.actionHandler.setupActionHandler(self)
-        self.bv = None
-        self.datatype = None
-        self.il_type = None
-        self.request = None
-        self.response = None
-        self.session_log = []
+        try:
+            super().__init__(name)
+            
+            # Setup logging for this widget
+            self.logger = logging.getLogger(f"binassist.widget.{name}")
+            self.logger.info(f"Initializing BinAssistWidget: {name}")
+            
+            self.settings = Settings()
+            self.logger.debug("Settings initialized")
+            
+            self.LlmApi = LlmApi()
+            self.logger.debug("LlmApi initialized")
+            
+            self.offset_addr = 0
+            self.actionHandler = UIActionHandler()
+            self.actionHandler.setupActionHandler(self)
+            self.logger.debug("Action handler setup completed")
+            
+            self.bv = None
+            self.datatype = None
+            self.il_type = None
+            self.request = None
+            self.response = None
+            self.session_log = []
 
-        self.offset = QtWidgets.QLabel(hex(0))
+            self.offset = QtWidgets.QLabel(hex(0))
 
-        self._init_ui()
+            self._init_ui()
+            self.logger.info("BinAssistWidget initialization completed successfully")
+            
+        except Exception as e:
+            error_msg = f"Critical error during BinAssistWidget initialization: {type(e).__name__}: {e}"
+            print(error_msg)  # Ensure it gets to console even if logging fails
+            try:
+                self.logger.error(error_msg)
+                self.logger.exception("Full traceback:")
+            except:
+                pass
+            raise
 
     def _init_ui(self) -> None:
         """
@@ -52,12 +85,14 @@ class BinAssistWidget(SidebarWidget):
         explain_tab = self.createExplainTab()
         query_tab = self.createQueryTab()
         actions_tab = self.createActionsTab()
+        settings_tab = self.createSettingsTab()
         rag_management_tab = self.createRAGManagementTab()
 
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.addTab(explain_tab, "Explain")
         self.tabs.addTab(query_tab, "Custom Query")
-        self.tabs.addTab(actions_tab, "Actions") 
+        self.tabs.addTab(actions_tab, "Actions")
+        self.tabs.addTab(settings_tab, "Settings")
         self.tabs.addTab(rag_management_tab, "RAG Management")
 
         self.submit_button = None
@@ -94,6 +129,8 @@ class BinAssistWidget(SidebarWidget):
         Returns:
             QWidget: A widget configured with query functionalities.
         """
+        layout = QtWidgets.QVBoxLayout()
+        
         self.query_edit = QtWidgets.QTextEdit()
         self.query_edit.setPlaceholderText("Enter your query here...")
         self.query_response_browser = QtWidgets.QTextBrowser()
@@ -101,8 +138,6 @@ class BinAssistWidget(SidebarWidget):
         self.query_response_browser.setOpenLinks(False)
         self.query_response_browser.anchorClicked.connect(self.onAnchorClicked)
 
-        layout = QtWidgets.QVBoxLayout()
-        
         # Create and add the 'Use RAG' checkbox
         self.use_rag_checkbox = QtWidgets.QCheckBox("Use RAG")
         self.use_rag_checkbox.setChecked(self.settings.get_bool('binassist.use_rag'))
@@ -171,6 +206,282 @@ class BinAssistWidget(SidebarWidget):
         actions_widget = QtWidgets.QWidget()
         actions_widget.setLayout(layout)
         return actions_widget
+
+    def createSettingsTab(self) -> QtWidgets.QWidget:
+        """
+        Creates the comprehensive Settings tab with all BinAssist configuration options.
+
+        Returns:
+            QWidget: A widget configured with all settings.
+        """
+        # Create scrollable area for all settings
+        scroll_area = QtWidgets.QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        
+        settings_widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout()
+
+        # API Providers Section
+        providers_group = QtWidgets.QGroupBox("API Providers")
+        providers_layout = QtWidgets.QVBoxLayout()
+        
+        # Providers management
+        providers_mgmt_layout = QtWidgets.QHBoxLayout()
+        
+        self.providers_list = QtWidgets.QListWidget()
+        self.providers_list.setMaximumHeight(120)
+        self.providers_list.currentRowChanged.connect(self.onProviderSelected)
+        providers_mgmt_layout.addWidget(self.providers_list)
+        
+        # Provider management buttons
+        provider_buttons_layout = QtWidgets.QVBoxLayout()
+        
+        self.add_provider_btn = QtWidgets.QPushButton("Add")
+        self.add_provider_btn.clicked.connect(self.addProvider)
+        provider_buttons_layout.addWidget(self.add_provider_btn)
+        
+        self.remove_provider_btn = QtWidgets.QPushButton("Remove")
+        self.remove_provider_btn.clicked.connect(self.removeProvider)
+        provider_buttons_layout.addWidget(self.remove_provider_btn)
+        
+        self.duplicate_provider_btn = QtWidgets.QPushButton("Duplicate")
+        self.duplicate_provider_btn.clicked.connect(self.duplicateProvider)
+        provider_buttons_layout.addWidget(self.duplicate_provider_btn)
+        
+        provider_buttons_layout.addStretch()
+        providers_mgmt_layout.addLayout(provider_buttons_layout)
+        
+        providers_layout.addLayout(providers_mgmt_layout)
+        
+        # Provider configuration form
+        self.provider_config_group = QtWidgets.QGroupBox("Provider Configuration")
+        self.provider_config_layout = QtWidgets.QFormLayout()
+        
+        # Initialize provider config widgets
+        self.provider_name_edit = QtWidgets.QLineEdit()
+        self.provider_type_combo = QtWidgets.QComboBox()
+        self.provider_type_combo.addItems(['openai', 'anthropic', 'ollama', 'lm_studio', 'text_generation_webui', 'custom'])
+        self.provider_url_edit = QtWidgets.QLineEdit()
+        self.provider_key_edit = QtWidgets.QLineEdit()
+        self.provider_key_edit.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.provider_model_edit = QtWidgets.QLineEdit()
+        self.provider_tokens_spin = QtWidgets.QSpinBox()
+        self.provider_tokens_spin.setRange(1, 128*1024)
+        self.provider_tokens_spin.setValue(16384)
+        
+        self.provider_config_layout.addRow("Name:", self.provider_name_edit)
+        self.provider_config_layout.addRow("Type:", self.provider_type_combo)
+        self.provider_config_layout.addRow("Base URL:", self.provider_url_edit)
+        self.provider_config_layout.addRow("API Key:", self.provider_key_edit)
+        self.provider_config_layout.addRow("Model:", self.provider_model_edit)
+        self.provider_config_layout.addRow("Max Tokens:", self.provider_tokens_spin)
+        
+        # Save provider button
+        save_provider_layout = QtWidgets.QHBoxLayout()
+        save_provider_layout.addStretch()
+        self.save_provider_btn = QtWidgets.QPushButton("Save Provider")
+        self.save_provider_btn.clicked.connect(self.saveCurrentProvider)
+        save_provider_layout.addWidget(self.save_provider_btn)
+        
+        self.provider_config_group.setLayout(self.provider_config_layout)
+        providers_layout.addWidget(self.provider_config_group)
+        providers_layout.addLayout(save_provider_layout)
+        
+        # Active provider selection
+        active_provider_layout = QtWidgets.QHBoxLayout()
+        active_provider_layout.addWidget(QtWidgets.QLabel("Active Provider:"))
+        self.active_provider_combo = QtWidgets.QComboBox()
+        self.active_provider_combo.currentTextChanged.connect(self.onActiveProviderChanged)
+        active_provider_layout.addWidget(self.active_provider_combo)
+        active_provider_layout.addStretch()
+        providers_layout.addLayout(active_provider_layout)
+        
+        providers_group.setLayout(providers_layout)
+        layout.addWidget(providers_group)
+
+        # System Context Section
+        system_context_group = QtWidgets.QGroupBox("System Context")
+        system_context_layout = QtWidgets.QVBoxLayout()
+        
+        context_label = QtWidgets.QLabel("System instructions for the LLM:")
+        system_context_layout.addWidget(context_label)
+        
+        self.system_context_edit = QtWidgets.QTextEdit()
+        self.system_context_edit.setPlaceholderText("Enter system context/instructions for the LLM...")
+        self.system_context_edit.setMaximumHeight(120)
+        
+        # Load default system prompt from LlmApi
+        try:
+            default_prompt = self.LlmApi.SYSTEM_PROMPT.strip()
+            self.system_context_edit.setPlainText(default_prompt)
+            self.original_system_context = default_prompt  # Store for revert
+        except:
+            self.original_system_context = ""
+        
+        system_context_layout.addWidget(self.system_context_edit)
+        
+        # Save and Revert buttons
+        context_buttons_layout = QtWidgets.QHBoxLayout()
+        context_buttons_layout.addStretch()
+        
+        save_context_button = QtWidgets.QPushButton("Save")
+        save_context_button.clicked.connect(self.onSaveSystemContext)
+        save_context_button.setMaximumWidth(80)
+        
+        revert_context_button = QtWidgets.QPushButton("Revert")
+        revert_context_button.clicked.connect(self.onRevertSystemContext)
+        revert_context_button.setMaximumWidth(80)
+        
+        context_buttons_layout.addWidget(save_context_button)
+        context_buttons_layout.addWidget(revert_context_button)
+        
+        system_context_layout.addLayout(context_buttons_layout)
+        system_context_group.setLayout(system_context_layout)
+        layout.addWidget(system_context_group)
+
+        # Analysis Options Section
+        analysis_group = QtWidgets.QGroupBox("Analysis Options")
+        analysis_layout = QtWidgets.QVBoxLayout()
+
+        # Default IL Level
+        il_level_layout = QtWidgets.QHBoxLayout()
+        il_level_label = QtWidgets.QLabel("Default IL Level:")
+        self.il_level_combo = QtWidgets.QComboBox()
+        self.il_level_combo.addItems([
+            "Assembly (ASM)",
+            "Low Level IL (LLIL)", 
+            "Medium Level IL (MLIL)",
+            "High Level IL (HLIL)",
+            "Pseudo-C"
+        ])
+        self.il_level_combo.setCurrentIndex(3)  # Default to HLIL
+        il_level_layout.addWidget(il_level_label)
+        il_level_layout.addWidget(self.il_level_combo)
+        il_level_layout.addStretch()
+        analysis_layout.addLayout(il_level_layout)
+
+        # Context Extraction Settings
+        context_layout = QtWidgets.QHBoxLayout()
+        context_label = QtWidgets.QLabel("Context Lines:")
+        self.context_spin = QtWidgets.QSpinBox()
+        self.context_spin.setRange(0, 100)
+        self.context_spin.setValue(10)
+        self.context_spin.setToolTip("Number of surrounding lines to include for context")
+        context_layout.addWidget(context_label)
+        context_layout.addWidget(self.context_spin)
+        context_layout.addStretch()
+        analysis_layout.addLayout(context_layout)
+
+        # Analysis Mode
+        mode_layout = QtWidgets.QHBoxLayout()
+        mode_label = QtWidgets.QLabel("Analysis Mode:")
+        self.analysis_mode_combo = QtWidgets.QComboBox()
+        self.analysis_mode_combo.addItems([
+            "Conservative", 
+            "Balanced", 
+            "Aggressive"
+        ])
+        self.analysis_mode_combo.setCurrentIndex(1)  # Default to Balanced
+        mode_layout.addWidget(mode_label)
+        mode_layout.addWidget(self.analysis_mode_combo)
+        mode_layout.addStretch()
+        analysis_layout.addLayout(mode_layout)
+
+        # Response Verbosity
+        verbosity_layout = QtWidgets.QHBoxLayout()
+        verbosity_label = QtWidgets.QLabel("Response Verbosity:")
+        self.verbosity_combo = QtWidgets.QComboBox()
+        self.verbosity_combo.addItems(["Concise", "Detailed", "Comprehensive"])
+        self.verbosity_combo.setCurrentIndex(1)  # Default to Detailed
+        verbosity_layout.addWidget(verbosity_label)
+        verbosity_layout.addWidget(self.verbosity_combo)
+        verbosity_layout.addStretch()
+        analysis_layout.addLayout(verbosity_layout)
+
+        # Checkboxes
+        self.include_comments_check = QtWidgets.QCheckBox("Include existing comments in analysis")
+        self.include_comments_check.setChecked(True)
+        analysis_layout.addWidget(self.include_comments_check)
+
+        self.include_imports_check = QtWidgets.QCheckBox("Include import/library information")
+        self.include_imports_check.setChecked(True)
+        analysis_layout.addWidget(self.include_imports_check)
+
+        self.auto_apply_check = QtWidgets.QCheckBox("Auto-apply high-confidence suggestions")
+        self.auto_apply_check.setChecked(False)
+        analysis_layout.addWidget(self.auto_apply_check)
+
+        self.syntax_highlight_check = QtWidgets.QCheckBox("Enable syntax highlighting in responses")
+        self.syntax_highlight_check.setChecked(True)
+        analysis_layout.addWidget(self.syntax_highlight_check)
+
+        self.show_addresses_check = QtWidgets.QCheckBox("Show addresses in code snippets")
+        self.show_addresses_check.setChecked(True)
+        analysis_layout.addWidget(self.show_addresses_check)
+
+        analysis_group.setLayout(analysis_layout)
+        layout.addWidget(analysis_group)
+
+        # General Settings Section
+        general_group = QtWidgets.QGroupBox("General Settings")
+        general_layout = QtWidgets.QVBoxLayout()
+
+        # RAG Settings
+        self.use_rag_check = QtWidgets.QCheckBox("Enable RAG (Retrieval Augmented Generation)")
+        self.use_rag_check.setChecked(self.settings.get_bool('binassist.use_rag'))
+        self.use_rag_check.stateChanged.connect(self.onUseRAGChanged)
+        general_layout.addWidget(self.use_rag_check)
+
+        # RAG Database Path
+        rag_path_layout = QtWidgets.QHBoxLayout()
+        rag_path_layout.addWidget(QtWidgets.QLabel("RAG Database Path:"))
+        
+        self.rag_path_edit = QtWidgets.QLineEdit()
+        self.rag_path_edit.setText(self.settings.get_string('binassist.rag_db_path'))
+        rag_path_layout.addWidget(self.rag_path_edit)
+        
+        rag_browse_btn = QtWidgets.QPushButton("Browse")
+        rag_browse_btn.clicked.connect(self.browseRagPath)
+        rag_browse_btn.setMaximumWidth(80)
+        rag_path_layout.addWidget(rag_browse_btn)
+        
+        general_layout.addLayout(rag_path_layout)
+
+        # RLHF Database Path
+        rlhf_path_layout = QtWidgets.QHBoxLayout()
+        rlhf_path_layout.addWidget(QtWidgets.QLabel("RLHF Database Path:"))
+        
+        self.rlhf_path_edit = QtWidgets.QLineEdit()
+        self.rlhf_path_edit.setText(self.settings.get_string('binassist.rlhf_db'))
+        rlhf_path_layout.addWidget(self.rlhf_path_edit)
+        
+        rlhf_browse_btn = QtWidgets.QPushButton("Browse")
+        rlhf_browse_btn.clicked.connect(self.browseRlhfPath)
+        rlhf_browse_btn.setMaximumWidth(80)
+        rlhf_path_layout.addWidget(rlhf_browse_btn)
+        
+        general_layout.addLayout(rlhf_path_layout)
+
+        general_group.setLayout(general_layout)
+        layout.addWidget(general_group)
+
+        # Initialize providers data
+        self.providers = []
+        self.current_provider_index = -1
+        self.loadProvidersFromSettings()
+
+        settings_widget.setLayout(layout)
+        scroll_area.setWidget(settings_widget)
+        
+        # Create container widget
+        container = QtWidgets.QWidget()
+        container_layout = QtWidgets.QVBoxLayout()
+        container_layout.addWidget(scroll_area)
+        container.setLayout(container_layout)
+        
+        return container
 
     def createRAGManagementTab(self) -> QtWidgets.QWidget:
         """
@@ -402,29 +713,83 @@ class BinAssistWidget(SidebarWidget):
         """
         Submits the custom query or stops a running query based on the button state.
         """
-        # Toggle functionality between Submit and Stop
-        self.submit_button = self.sender()
+        self.logger.info("onSubmitQueryClicked triggered")
+        
+        try:
+            # Toggle functionality between Submit and Stop
+            self.submit_button = self.sender()
+            self.logger.debug(f"Submit button text: {self.submit_button.text()}")
 
-        if self.submit_button.text() == "Submit":
-            self.submit_label = self.submit_button.text()
-            # Start a new query
-            query = self.query_edit.toPlainText()
-            query = self._process_custom_query(query)
-            self.session_log.append({"user": query, "assistant": "Awaiting response..."})
+            if self.submit_button.text() == "Submit":
+                self.submit_label = self.submit_button.text()
+                
+                # Start a new query
+                query = self.query_edit.toPlainText()
+                self.logger.debug(f"Original query length: {len(query)}")
+                
+                query = self._process_custom_query(query)
+                self.logger.debug(f"Processed query length: {len(query)}")
+                
+                self.session_log.append({"user": query, "assistant": "Awaiting response..."})
 
-            # Prepend the session log to the query for context
-            full_query = "\n".join([f"User: {entry['user']}\nAssistant: {entry['assistant']}" for entry in self.session_log]) + f"\nUser: {query}"
+                # Prepend the session log to the query for context
+                full_query = "\n".join([f"User: {entry['user']}\nAssistant: {entry['assistant']}" for entry in self.session_log]) + f"\nUser: {query}"
+                self.logger.debug(f"Full query length: {len(full_query)}")
 
-            # Store the running request
-            self.request = self.LlmApi.query(full_query, self.display_custom_response)
+                # Update system context if modified
+                if hasattr(self, 'system_context_edit'):
+                    current_context = self.system_context_edit.toPlainText().strip()
+                    if current_context and current_context != self.LlmApi.SYSTEM_PROMPT:
+                        self.logger.debug("Using custom system context for this query")
+                        original_prompt = self.LlmApi.SYSTEM_PROMPT
+                        self.LlmApi.SYSTEM_PROMPT = current_context
+                        
+                        # Store the running request
+                        self.logger.debug("Calling LlmApi.query with custom context")
+                        self.request = self.LlmApi.query(full_query, self.display_custom_response)
+                        
+                        # Restore original prompt
+                        self.LlmApi.SYSTEM_PROMPT = original_prompt
+                        self.logger.debug("LlmApi.query call completed with custom context")
+                    else:
+                        # Store the running request
+                        self.logger.debug("Calling LlmApi.query")
+                        self.request = self.LlmApi.query(full_query, self.display_custom_response)
+                        self.logger.debug("LlmApi.query call completed")
+                else:
+                    # Store the running request
+                    self.logger.debug("Calling LlmApi.query")
+                    self.request = self.LlmApi.query(full_query, self.display_custom_response)
+                    self.logger.debug("LlmApi.query call completed")
 
-            # Update button to Stop
-            self.submit_button.setText("Stop")
-        else:
-            # Stop the running query
-            self.LlmApi.stop_threads()
-            # Revert button back to Submit
-            self.submit_button.setText(self.submit_label)
+                # Update button to Stop
+                self.submit_button.setText("Stop")
+                self.logger.debug("Button text changed to Stop")
+            else:
+                self.logger.debug("Stopping running query")
+                # Stop the running query
+                self.LlmApi.stop_threads()
+                # Revert button back to Submit
+                self.submit_button.setText(self.submit_label)
+                self.logger.debug("Query stopped and button reverted")
+                
+        except Exception as e:
+            error_msg = f"Error in onSubmitQueryClicked: {type(e).__name__}: {e}"
+            self.logger.error(error_msg)
+            self.logger.exception("Full traceback:")
+            
+            # Show error to user
+            try:
+                QtWidgets.QMessageBox.critical(self, "Query Error", f"An error occurred: {str(e)}")
+            except:
+                pass  # Don't let error dialog crash us too
+                
+            # Reset button state
+            try:
+                if hasattr(self, 'submit_button') and hasattr(self, 'submit_label'):
+                    self.submit_button.setText(self.submit_label)
+            except:
+                pass
 
 
     def onAnalyzeFunctionClicked(self) -> None:
@@ -464,6 +829,275 @@ class BinAssistWidget(SidebarWidget):
         Event for the 'Analyze Clear' button.
         """
         self.actions_table.setRowCount(0)
+
+    def loadProvidersFromSettings(self) -> None:
+        """
+        Load providers from Binary Ninja settings.
+        """
+        try:
+            self.providers = []
+            provider_names = []
+            
+            for i in range(1, 4):  # provider1, provider2, provider3
+                try:
+                    name = self.settings.get_string(f'binassist.provider{i}_name')
+                    if name:
+                        provider_data = {
+                            'name': name,
+                            'provider_type': self.settings.get_string(f'binassist.provider{i}_type'),
+                            'base_url': self.settings.get_string(f'binassist.provider{i}_host'),
+                            'api_key': self.settings.get_string(f'binassist.provider{i}_key'),
+                            'model': self.settings.get_string(f'binassist.provider{i}_model'),
+                            'max_tokens': self.settings.get_integer(f'binassist.provider{i}_max_tokens')
+                        }
+                        self.providers.append(provider_data)
+                        provider_names.append(name)
+                except:
+                    continue
+            
+            # Update UI
+            self.updateProvidersList()
+            self.updateActiveProviderCombo()
+            
+            # Select first provider if available
+            if self.providers:
+                self.providers_list.setCurrentRow(0)
+                
+        except Exception as e:
+            self.logger.error(f"Error loading providers from settings: {e}")
+
+    def updateProvidersList(self) -> None:
+        """
+        Update the providers list widget.
+        """
+        self.providers_list.clear()
+        for provider in self.providers:
+            self.providers_list.addItem(f"{provider['name']} ({provider['provider_type']})")
+
+    def updateActiveProviderCombo(self) -> None:
+        """
+        Update the active provider combo box.
+        """
+        current_text = self.active_provider_combo.currentText()
+        self.active_provider_combo.clear()
+        
+        provider_names = [p['name'] for p in self.providers]
+        self.active_provider_combo.addItems(provider_names)
+        
+        # Restore selection if possible
+        if current_text in provider_names:
+            index = provider_names.index(current_text)
+            self.active_provider_combo.setCurrentIndex(index)
+        elif provider_names:
+            # Default to current active provider from settings
+            active_provider = self.settings.get_string('binassist.active_provider')
+            if active_provider in provider_names:
+                index = provider_names.index(active_provider)
+                self.active_provider_combo.setCurrentIndex(index)
+
+    def onProviderSelected(self, row: int) -> None:
+        """
+        Handle provider selection in the list.
+        """
+        if 0 <= row < len(self.providers):
+            self.current_provider_index = row
+            provider = self.providers[row]
+            
+            # Load provider data into form
+            self.provider_name_edit.setText(provider['name'])
+            
+            provider_type = provider['provider_type']
+            index = self.provider_type_combo.findText(provider_type)
+            if index >= 0:
+                self.provider_type_combo.setCurrentIndex(index)
+            
+            self.provider_url_edit.setText(provider['base_url'])
+            self.provider_key_edit.setText(provider['api_key'])
+            self.provider_model_edit.setText(provider['model'])
+            self.provider_tokens_spin.setValue(provider['max_tokens'])
+
+    def addProvider(self) -> None:
+        """
+        Add a new provider.
+        """
+        new_provider = {
+            'name': f'New Provider {len(self.providers) + 1}',
+            'provider_type': 'openai',
+            'base_url': 'https://api.openai.com/v1',
+            'api_key': '',
+            'model': 'gpt-4o-mini',
+            'max_tokens': 16384
+        }
+        
+        self.providers.append(new_provider)
+        self.updateProvidersList()
+        self.updateActiveProviderCombo()
+        self.providers_list.setCurrentRow(len(self.providers) - 1)
+
+    def removeProvider(self) -> None:
+        """
+        Remove the selected provider.
+        """
+        row = self.providers_list.currentRow()
+        if 0 <= row < len(self.providers):
+            # Confirm deletion
+            provider_name = self.providers[row]['name']
+            reply = QtWidgets.QMessageBox.question(
+                self, 'Remove Provider', 
+                f'Are you sure you want to remove "{provider_name}"?',
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, 
+                QtWidgets.QMessageBox.No
+            )
+            
+            if reply == QtWidgets.QMessageBox.Yes:
+                self.providers.pop(row)
+                self.updateProvidersList()
+                self.updateActiveProviderCombo()
+                
+                # Select previous provider if possible
+                if self.providers:
+                    new_row = min(row, len(self.providers) - 1)
+                    self.providers_list.setCurrentRow(new_row)
+                else:
+                    # Clear form if no providers left
+                    self.clearProviderForm()
+
+    def duplicateProvider(self) -> None:
+        """
+        Duplicate the selected provider.
+        """
+        row = self.providers_list.currentRow()
+        if 0 <= row < len(self.providers):
+            original = self.providers[row].copy()
+            original['name'] = f"{original['name']} (Copy)"
+            self.providers.append(original)
+            self.updateProvidersList()
+            self.updateActiveProviderCombo()
+            self.providers_list.setCurrentRow(len(self.providers) - 1)
+
+    def saveCurrentProvider(self) -> None:
+        """
+        Save the current provider configuration.
+        """
+        try:
+            # Update current provider if one is selected
+            if self.current_provider_index >= 0 and self.current_provider_index < len(self.providers):
+                self.providers[self.current_provider_index] = {
+                    'name': self.provider_name_edit.text(),
+                    'provider_type': self.provider_type_combo.currentText(),
+                    'base_url': self.provider_url_edit.text(),
+                    'api_key': self.provider_key_edit.text(),
+                    'model': self.provider_model_edit.text(),
+                    'max_tokens': self.provider_tokens_spin.value()
+                }
+            
+            # Save all providers to settings
+            self.saveProvidersToSettings()
+            self.updateProvidersList()
+            self.updateActiveProviderCombo()
+            
+            # Refresh API provider
+            self.LlmApi.api_provider = self.LlmApi.get_active_provider()
+            
+            QtWidgets.QMessageBox.information(self, "Success", "Provider saved successfully!")
+            
+        except Exception as e:
+            self.logger.error(f"Error saving provider: {e}")
+            QtWidgets.QMessageBox.critical(self, "Error", f"Failed to save provider: {str(e)}")
+
+    def saveProvidersToSettings(self) -> None:
+        """
+        Save providers to Binary Ninja settings.
+        """
+        # Save up to 3 providers
+        for i in range(3):
+            if i < len(self.providers):
+                provider = self.providers[i]
+                self.settings.set_string(f'binassist.provider{i+1}_name', provider['name'])
+                self.settings.set_string(f'binassist.provider{i+1}_type', provider['provider_type'])
+                self.settings.set_string(f'binassist.provider{i+1}_host', provider['base_url'])
+                self.settings.set_string(f'binassist.provider{i+1}_key', provider['api_key'])
+                self.settings.set_string(f'binassist.provider{i+1}_model', provider['model'])
+                self.settings.set_integer(f'binassist.provider{i+1}_max_tokens', provider['max_tokens'])
+            else:
+                # Clear unused provider slots
+                self.settings.set_string(f'binassist.provider{i+1}_name', '')
+        
+        # Update active provider enum options in Binary Ninja settings
+        if hasattr(self.settings, 'set_enum_values'):
+            provider_names = [p['name'] for p in self.providers]
+            try:
+                self.settings.set_enum_values('binassist.active_provider', provider_names)
+            except:
+                pass  # Ignore if not supported
+
+    def onActiveProviderChanged(self, provider_name: str) -> None:
+        """
+        Handle active provider change.
+        """
+        if provider_name:
+            self.settings.set_string('binassist.active_provider', provider_name)
+            # Refresh API provider
+            self.LlmApi.api_provider = self.LlmApi.get_active_provider()
+            self.logger.info(f"Active provider changed to: {provider_name}")
+
+    def clearProviderForm(self) -> None:
+        """
+        Clear the provider configuration form.
+        """
+        self.provider_name_edit.clear()
+        self.provider_type_combo.setCurrentIndex(0)
+        self.provider_url_edit.clear()
+        self.provider_key_edit.clear()
+        self.provider_model_edit.clear()
+        self.provider_tokens_spin.setValue(16384)
+
+    def browseRagPath(self) -> None:
+        """
+        Browse for RAG database path.
+        """
+        path = QtWidgets.QFileDialog.getExistingDirectory(self, "Select RAG Database Directory")
+        if path:
+            self.rag_path_edit.setText(path)
+            self.settings.set_string('binassist.rag_db_path', path)
+
+    def browseRlhfPath(self) -> None:
+        """
+        Browse for RLHF database path.
+        """
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Select RLHF Database File", "", "Database Files (*.db)")
+        if path:
+            self.rlhf_path_edit.setText(path)
+            self.settings.set_string('binassist.rlhf_db', path)
+
+    def onSaveSystemContext(self) -> None:
+        """
+        Save the current system context to the LlmApi.
+        """
+        try:
+            new_context = self.system_context_edit.toPlainText()
+            # Update the LlmApi system prompt
+            self.LlmApi.SYSTEM_PROMPT = new_context
+            self.original_system_context = new_context
+            self.logger.info("System context saved successfully")
+            
+            # Show confirmation
+            QtWidgets.QMessageBox.information(self, "Success", "System context saved successfully!")
+            
+        except Exception as e:
+            self.logger.error(f"Error saving system context: {e}")
+            QtWidgets.QMessageBox.critical(self, "Error", f"Failed to save system context: {str(e)}")
+
+    def onRevertSystemContext(self) -> None:
+        """
+        Revert the system context to the original/saved version.
+        """
+        try:
+            self.system_context_edit.setPlainText(self.original_system_context)
+            self.logger.info("System context reverted")
+        except Exception as e:
+            self.logger.error(f"Error reverting system context: {e}")
+            QtWidgets.QMessageBox.critical(self, "Error", f"Failed to revert system context: {str(e)}")
 
     def onApplyActionsClicked(self) -> None:
         """

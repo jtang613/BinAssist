@@ -24,36 +24,137 @@ class BinAssistSettings(Settings):
         """
         self.register_group('binassist', 'BinAssist')
 
+        # Simple provider settings - no complex objects
         settings_definitions = {
-            'binassist.api_providers': {
-                'title': 'API Providers',
-                'description': 'List of API providers for BinAssist',
-                'type': 'array',
-                'elementType': 'object',
-                'default': [
-                    {
-                        'api___name': 'GPT-4o-Mini',
-                        'api__host': 'https://api.openai.com/v1',
-                        'api_key': '',
-                        'api__model': 'gpt-4o-mini',
-                        'api__max_tokens': 16384
-                    }
-                ],
-                'properties': {
-                    'api___name': {'type': 'string', 'title': 'Provider Name'},
-                    'api__host': {'type': 'string', 'title': 'Remote API Host'},
-                    'api_key': {'type': 'string', 'title': 'API Key', 'hidden': True, "ignore" : ["SettingsProjectScope", "SettingsResourceScope"]},
-                    'api__model': {'type': 'string', 'title': 'LLM Model'},
-                    'api__max_tokens': {'type': 'number', 'title': 'Max Completion Tokens', 'minValue': 1, 'maxValue': 128*1024}
-                }
+            'binassist.provider1_name': {
+                'title': 'Provider 1 Name',
+                'description': 'Name of the first API provider',
+                'type': 'string',
+                'default': 'GPT-4o-Mini'
+            },
+            'binassist.provider1_type': {
+                'title': 'Provider 1 Type',
+                'description': 'Type of the first API provider',
+                'type': 'string',
+                'enum': ['openai', 'anthropic', 'ollama', 'lm_studio', 'text_generation_webui', 'custom'],
+                'default': 'openai'
+            },
+            'binassist.provider1_host': {
+                'title': 'Provider 1 Host',
+                'description': 'Base URL for the first API provider',
+                'type': 'string',
+                'default': 'https://api.openai.com/v1'
+            },
+            'binassist.provider1_key': {
+                'title': 'Provider 1 API Key',
+                'description': 'API key for the first provider',
+                'type': 'string',
+                'default': '',
+                'hidden': True,
+                "ignore": ["SettingsProjectScope", "SettingsResourceScope"]
+            },
+            'binassist.provider1_model': {
+                'title': 'Provider 1 Model',
+                'description': 'Model name for the first provider',
+                'type': 'string',
+                'default': 'gpt-4o-mini'
+            },
+            'binassist.provider1_max_tokens': {
+                'title': 'Provider 1 Max Tokens',
+                'description': 'Maximum tokens for the first provider',
+                'type': 'number',
+                'default': 16384,
+                'minValue': 1,
+                'maxValue': 128*1024
+            },
+            'binassist.provider2_name': {
+                'title': 'Provider 2 Name',
+                'description': 'Name of the second API provider',
+                'type': 'string',
+                'default': 'Claude-3.5-Sonnet'
+            },
+            'binassist.provider2_type': {
+                'title': 'Provider 2 Type',
+                'description': 'Type of the second API provider',
+                'type': 'string',
+                'enum': ['openai', 'anthropic', 'ollama', 'lm_studio', 'text_generation_webui', 'custom'],
+                'default': 'anthropic'
+            },
+            'binassist.provider2_host': {
+                'title': 'Provider 2 Host',
+                'description': 'Base URL for the second API provider',
+                'type': 'string',
+                'default': 'https://api.anthropic.com'
+            },
+            'binassist.provider2_key': {
+                'title': 'Provider 2 API Key',
+                'description': 'API key for the second provider',
+                'type': 'string',
+                'default': '',
+                'hidden': True,
+                "ignore": ["SettingsProjectScope", "SettingsResourceScope"]
+            },
+            'binassist.provider2_model': {
+                'title': 'Provider 2 Model',
+                'description': 'Model name for the second provider',
+                'type': 'string',
+                'default': 'claude-3-5-sonnet-20241022'
+            },
+            'binassist.provider2_max_tokens': {
+                'title': 'Provider 2 Max Tokens',
+                'description': 'Maximum tokens for the second provider',
+                'type': 'number',
+                'default': 8192,
+                'minValue': 1,
+                'maxValue': 128*1024
+            },
+            'binassist.provider3_name': {
+                'title': 'Provider 3 Name',
+                'description': 'Name of the third API provider',
+                'type': 'string',
+                'default': 'o4-mini'
+            },
+            'binassist.provider3_type': {
+                'title': 'Provider 3 Type',
+                'description': 'Type of the third API provider',
+                'type': 'string',
+                'enum': ['openai', 'anthropic', 'ollama', 'lm_studio', 'text_generation_webui', 'custom'],
+                'default': 'openai'
+            },
+            'binassist.provider3_host': {
+                'title': 'Provider 3 Host',
+                'description': 'Base URL for the third API provider',
+                'type': 'string',
+                'default': 'https://api.openai.com/v1'
+            },
+            'binassist.provider3_key': {
+                'title': 'Provider 3 API Key',
+                'description': 'API key for the third provider',
+                'type': 'string',
+                'default': '',
+                'hidden': True,
+                "ignore": ["SettingsProjectScope", "SettingsResourceScope"]
+            },
+            'binassist.provider3_model': {
+                'title': 'Provider 3 Model',
+                'description': 'Model name for the third provider',
+                'type': 'string',
+                'default': 'o4-mini'
+            },
+            'binassist.provider3_max_tokens': {
+                'title': 'Provider 3 Max Tokens',
+                'description': 'Maximum tokens for the third provider',
+                'type': 'number',
+                'default': 65536,
+                'minValue': 1,
+                'maxValue': 128*1024
             },
             'binassist.active_provider': {
                 'title': 'Active API Provider',
                 'description': 'The currently selected API provider',
                 'type': 'string',
-                'default': 'GPT-4o-Mini',
-                'readOnly': True,
-                'uiSelectionAction': 'binassist_update_active_provider'
+                'enum': ['GPT-4o-Mini', 'Claude-3.5-Sonnet', 'o4-mini'],
+                'default': 'GPT-4o-Mini'
             },
             'binassist.rlhf_db': {
                 'title': 'RLHF Database Path',
@@ -84,31 +185,27 @@ class BinAssistSettings(Settings):
         """
         Registers custom UI actions for the BinAssist plugin.
         """
-        UIAction.registerAction("binassist_update_active_provider")
-        UIActionHandler.globalActions().bindAction("binassist_update_active_provider", UIAction(self._update_active_provider_enum))
+        # No need for custom UI actions since we're using simple enums
+        pass
 
-    def _update_active_provider_enum(self, context):
+    def get_provider_config(self, provider_name: str):
         """
-        Displays a PySide selection dialog populated with the list of API providers.
-        Updates the active_provider field with the selected API provider name.
+        Get configuration for a specific provider.
         """
-        # Get the current list of API providers
-        providers = json.loads(self.get_json('binassist.api_providers'))
-        provider_names = [provider['api___name'] for provider in providers]
-
-        # Create a parent widget (can be None if you don't have a specific parent)
-        parent = QWidget()
-
-        # Show the selection dialog
-        selected_provider, ok = QInputDialog.getItem(
-            parent,
-            "Select API Provider",
-            "Choose an API provider:",
-            provider_names,
-            0,  # Current index (0 for the first item)
-            False  # Non-editable
-        )
-
-        # If the user made a selection and clicked OK, update the active provider
-        if ok and selected_provider:
-            self.set_string('binassist.active_provider', selected_provider)
+        # Map provider names to their setting prefixes
+        provider_map = {
+            'GPT-4o-Mini': 'provider1',
+            'Claude-3.5-Sonnet': 'provider2', 
+            'o4-mini': 'provider3'
+        }
+        
+        prefix = provider_map.get(provider_name, 'provider1')
+        
+        return {
+            'api___name': self.get_string(f'binassist.{prefix}_name'),
+            'provider_type': self.get_string(f'binassist.{prefix}_type'),
+            'api__host': self.get_string(f'binassist.{prefix}_host'),
+            'api_key': self.get_string(f'binassist.{prefix}_key'),
+            'api__model': self.get_string(f'binassist.{prefix}_model'),
+            'api__max_tokens': self.get_integer(f'binassist.{prefix}_max_tokens')
+        }
