@@ -5,3 +5,4 @@ markdown
 httpx
 chromadb
 sentence-transformers
+mcp

@@ -2,7 +2,7 @@
 Utility modules for BinAssist.
 """
 
-from .mcp_utils import MCPConfigHelper, MCPTester, setup_mcp_integration
+from .mcp_utils import MCPConfigHelper, MCPTester
 # from .rag_utils import RAGIntegrationHelper, RAGQueryEnhancer, RAGPerformanceMonitor
 # from .advanced_capabilities_utils import (
 #     AdvancedCapabilitiesTester, CapabilityRecommendationEngine, setup_advanced_capabilities_demo
@@ -10,8 +10,7 @@ from .mcp_utils import MCPConfigHelper, MCPTester, setup_mcp_integration
 
 __all__ = [
     'MCPConfigHelper',
-    'MCPTester', 
-    'setup_mcp_integration',
+    'MCPTester',
     # 'RAGIntegrationHelper',
     # 'RAGQueryEnhancer', 
     # 'RAGPerformanceMonitor',

@@ -7,7 +7,6 @@ the official OpenAI Python client library.
 
 from typing import List, Dict, Any, Callable, Optional
 import json
-import logging
 import threading
 
 try:
@@ -25,6 +24,7 @@ from ..config import APIProviderConfig, ProviderType
 from ..retry_handler import RetryHandler
 from ...models.chat_message import ChatMessage, MessageRole
 from ...models.tool_call import ToolCall
+from binaryninja import log
 
 
 class OpenAIProvider(APIProvider, ChatProvider, FunctionCallingProvider):
@@ -39,13 +39,12 @@ class OpenAIProvider(APIProvider, ChatProvider, FunctionCallingProvider):
     def __init__(self, config: APIProviderConfig):
         """Initialize OpenAI provider."""
         super().__init__(config)
-        self.logger = logging.getLogger(f"binassist.openai_provider.{config.name}")
         
-        self.logger.info(f"Initializing OpenAI provider: {config.name} with model {config.model}")
+        log.log_info(f"[BinAssist] Initializing OpenAI provider: {config.name} with model {config.model}")
         
         # Validate OpenAI-specific configuration
         if not config.api_key:
-            self.logger.error("API key is required for OpenAI provider")
+            log.log_error("[BinAssist] API key is required for OpenAI provider")
             raise ValueError("API key is required for OpenAI provider")
         
         # Initialize base provider functionality
@@ -59,7 +58,7 @@ class OpenAIProvider(APIProvider, ChatProvider, FunctionCallingProvider):
             if self._is_reasoning_model():
                 # Increase timeout for o* models - they can take 30+ seconds
                 timeout = max(timeout, 180)  # At least 3 minutes for o* models
-                self.logger.info(f"Using extended timeout of {timeout}s for o* model: {config.model}")
+                log.log_info(f"[BinAssist] Using extended timeout of {timeout}s for o* model: {config.model}")
             
             self._openai_client = OpenAI(
                 api_key=config.api_key,
@@ -67,12 +66,12 @@ class OpenAIProvider(APIProvider, ChatProvider, FunctionCallingProvider):
                 timeout=timeout,
                 max_retries=0  # We handle retries ourselves
             )
-            self.logger.debug(f"OpenAI client initialized with base_url: {config.base_url}, timeout: {timeout}s")
+            log.log_debug(f"[BinAssist] OpenAI client initialized with base_url: {config.base_url}, timeout: {timeout}s")
         except Exception as e:
-            self.logger.error(f"Failed to initialize OpenAI client: {e}")
+            log.log_error(f"[BinAssist] Failed to initialize OpenAI client: {e}")
             raise APIProviderError(f"Failed to initialize OpenAI client: {e}")
             
-        self.logger.debug(f"Provider initialized successfully for model: {config.model}")
+        log.log_debug(f"[BinAssist] Provider initialized successfully for model: {config.model}")
     
     def get_capabilities(self) -> List[type]:
         """Get supported capabilities."""
@@ -101,12 +100,12 @@ class OpenAIProvider(APIProvider, ChatProvider, FunctionCallingProvider):
         is_reasoning = (model_name.startswith("o1") or 
                        model_name.startswith("o3") or 
                        model_name.startswith("o4"))
-        self.logger.debug(f"Model {model_name} detected as reasoning model: {is_reasoning}")
+        log.log_debug(f"[BinAssist] Model {model_name} detected as reasoning model: {is_reasoning}")
         return is_reasoning
     
     def _prepare_messages(self, messages: List[ChatMessage]) -> List[Dict[str, Any]]:
         """Convert BinAssist ChatMessage objects to OpenAI message format."""
-        self.logger.debug(f"Converting {len(messages)} messages to OpenAI format")
+        log.log_debug(f"[BinAssist] Converting {len(messages)} messages to OpenAI format")
         
         openai_messages = []
         for msg in messages:
@@ -135,20 +134,20 @@ class OpenAIProvider(APIProvider, ChatProvider, FunctionCallingProvider):
             
             openai_messages.append(openai_msg)
         
-        self.logger.debug(f"Converted messages successfully")
+        log.log_debug(f"[BinAssist] Converted messages successfully")
         return openai_messages
     
     def create_chat_completion(self, messages: List[ChatMessage], **kwargs) -> str:
         """Create a chat completion with OpenAI-specific handling."""
-        self.logger.info(f"Starting chat completion for {self.config.model} with {len(messages)} messages")
+        log.log_info(f"[BinAssist] Starting chat completion for {self.config.model} with {len(messages)} messages")
         
         try:
             # Reset stop event for this request
             self.reset_stop_event()
-            self.logger.debug("Stop event reset")
+            log.log_debug("[BinAssist] Stop event reset")
             
             def _make_request():
-                self.logger.debug("Making chat completion request")
+                log.log_debug("[BinAssist] Making chat completion request")
                 
                 # Convert BinAssist messages to OpenAI format
                 openai_messages = self._prepare_messages(messages)
@@ -163,38 +162,38 @@ class OpenAIProvider(APIProvider, ChatProvider, FunctionCallingProvider):
                 # Handle different token field names based on model type
                 if self._is_reasoning_model():
                     completion_kwargs["max_completion_tokens"] = self.config.max_tokens
-                    self.logger.debug(f"Using max_completion_tokens={self.config.max_tokens} for o* model")
+                    log.log_debug(f"[BinAssist] Using max_completion_tokens={self.config.max_tokens} for o* model")
                 else:
                     completion_kwargs["max_tokens"] = self.config.max_tokens
-                    self.logger.debug(f"Using max_tokens={self.config.max_tokens} for regular model")
+                    log.log_debug(f"[BinAssist] Using max_tokens={self.config.max_tokens} for regular model")
                 
-                self.logger.debug(f"Sending request to OpenAI chat completions API")
+                log.log_debug(f"[BinAssist] Sending request to OpenAI chat completions API")
                 response = self._openai_client.chat.completions.create(**completion_kwargs)
-                self.logger.debug(f"Received response from OpenAI")
+                log.log_debug(f"[BinAssist] Received response from OpenAI")
                 
                 if not response.choices:
-                    self.logger.warning("No choices in response")
+                    log.log_warn("[BinAssist] No choices in response")
                     return ""
                 
                 content = response.choices[0].message.content or ""
-                self.logger.debug(f"Extracted content length: {len(content)}")
+                log.log_debug(f"[BinAssist] Extracted content length: {len(content)}")
                 return content
             
             result = self._retry_handler.retry(_make_request)
-            self.logger.info(f"Chat completion successful, content length: {len(result) if result else 0}")
+            log.log_info(f"[BinAssist] Chat completion successful, content length: {len(result) if result else 0}")
             return result
             
         except openai.AuthenticationError as e:
-            self.logger.error(f"Authentication error: {e}")
+            log.log_error(f"[BinAssist] Authentication error: {e}")
             raise AuthenticationError(f"OpenAI authentication failed: {e}")
         except openai.RateLimitError as e:
-            self.logger.error(f"Rate limit error: {e}")
+            log.log_error(f"[BinAssist] Rate limit error: {e}")
             raise RateLimitError(f"OpenAI rate limit exceeded: {e}")
         except openai.APIError as e:
-            self.logger.error(f"OpenAI API error: {e}")
+            log.log_error(f"[BinAssist] OpenAI API error: {e}")
             raise APIProviderError(f"OpenAI API error: {e}")
         except Exception as e:
-            self.logger.error(f"Chat completion failed: {type(e).__name__}: {e}")
+            log.log_error(f"[BinAssist] Chat completion failed: {type(e).__name__}: {e}")
             if isinstance(e, (NetworkError, APIProviderError, AuthenticationError, RateLimitError)):
                 raise
             raise APIProviderError(f"Unexpected error during chat completion: {e}")
@@ -202,12 +201,12 @@ class OpenAIProvider(APIProvider, ChatProvider, FunctionCallingProvider):
     def stream_chat_completion(self, messages: List[ChatMessage], 
                              response_handler: Callable[[str], None], **kwargs) -> None:
         """Stream a chat completion with OpenAI-specific handling."""
-        self.logger.info(f"Starting streaming chat completion for {self.config.model} with {len(messages)} messages")
+        log.log_info(f"[BinAssist] Starting streaming chat completion for {self.config.model} with {len(messages)} messages")
         
         try:
             # Reset stop event for this request
             self.reset_stop_event()
-            self.logger.debug("Stop event reset for streaming")
+            log.log_debug("[BinAssist] Stop event reset for streaming")
             
             # Convert BinAssist messages to OpenAI format
             openai_messages = self._prepare_messages(messages)
@@ -223,22 +222,22 @@ class OpenAIProvider(APIProvider, ChatProvider, FunctionCallingProvider):
             # Handle different token field names based on model type
             if self._is_reasoning_model():
                 completion_kwargs["max_completion_tokens"] = self.config.max_tokens
-                self.logger.debug(f"Using max_completion_tokens={self.config.max_tokens} for o* model")
+                log.log_debug(f"[BinAssist] Using max_completion_tokens={self.config.max_tokens} for o* model")
             else:
                 completion_kwargs["max_tokens"] = self.config.max_tokens
-                self.logger.debug(f"Using max_tokens={self.config.max_tokens} for regular model")
+                log.log_debug(f"[BinAssist] Using max_tokens={self.config.max_tokens} for regular model")
             
-            self.logger.debug("Starting OpenAI streaming request")
+            log.log_debug("[BinAssist] Starting OpenAI streaming request")
             accumulated_content = ""
             chunk_count = 0
             
             try:
                 stream = self._openai_client.chat.completions.create(**completion_kwargs)
-                self.logger.debug("Streaming response received from OpenAI")
+                log.log_debug("[BinAssist] Streaming response received from OpenAI")
                 
                 for chunk in stream:
                     if self.is_stopped():
-                        self.logger.debug("Streaming stopped by user")
+                        log.log_debug("[BinAssist] Streaming stopped by user")
                         break
                     
                     chunk_count += 1
@@ -247,32 +246,32 @@ class OpenAIProvider(APIProvider, ChatProvider, FunctionCallingProvider):
                         accumulated_content += content
                         
                         if chunk_count <= 5:  # Only log first few chunks to avoid spam
-                            self.logger.debug(f"Processing chunk {chunk_count}, accumulated length: {len(accumulated_content)}")
+                            log.log_debug(f"[BinAssist] Processing chunk {chunk_count}, accumulated length: {len(accumulated_content)}")
                         
                         if not self.is_stopped():
                             response_handler(accumulated_content)
                         else:
-                            self.logger.debug("Skipping response handler - stopped")
+                            log.log_debug("[BinAssist] Skipping response handler - stopped")
                             break
                 
-                self.logger.info(f"Streaming completed successfully with {chunk_count} chunks, total content length: {len(accumulated_content)}")
+                log.log_info(f"[BinAssist] Streaming completed successfully with {chunk_count} chunks, total content length: {len(accumulated_content)}")
                 
             except Exception as e:
-                self.logger.error(f"Error reading stream: {e}")
+                log.log_error(f"[BinAssist] Error reading stream: {e}")
                 if not self.is_stopped():
                     raise NetworkError(f"Error reading stream: {e}")
             
         except openai.AuthenticationError as e:
-            self.logger.error(f"Authentication error: {e}")
+            log.log_error(f"[BinAssist] Authentication error: {e}")
             raise AuthenticationError(f"OpenAI authentication failed: {e}")
         except openai.RateLimitError as e:
-            self.logger.error(f"Rate limit error: {e}")
+            log.log_error(f"[BinAssist] Rate limit error: {e}")
             raise RateLimitError(f"OpenAI rate limit exceeded: {e}")
         except openai.APIError as e:
-            self.logger.error(f"OpenAI API error: {e}")
+            log.log_error(f"[BinAssist] OpenAI API error: {e}")
             raise APIProviderError(f"OpenAI API error: {e}")
         except Exception as e:
-            self.logger.error(f"Streaming chat completion failed: {type(e).__name__}: {e}")
+            log.log_error(f"[BinAssist] Streaming chat completion failed: {type(e).__name__}: {e}")
             if isinstance(e, (NetworkError, APIProviderError, AuthenticationError, RateLimitError)):
                 raise
             raise APIProviderError(f"Unexpected error during streaming: {e}")
@@ -280,14 +279,14 @@ class OpenAIProvider(APIProvider, ChatProvider, FunctionCallingProvider):
     def create_function_call(self, messages: List[ChatMessage], 
                            tools: List[Dict[str, Any]], **kwargs) -> List[ToolCall]:
         """Create a function call completion with OpenAI-specific handling."""
-        self.logger.info(f"Starting function call for {self.config.model} with {len(messages)} messages and {len(tools)} tools")
+        log.log_info(f"[BinAssist] Starting function call for {self.config.model} with {len(messages)} messages and {len(tools)} tools")
         
         try:
             # Reset stop event for this request
             self.reset_stop_event()
             
             def _make_request():
-                self.logger.debug("Making function call request")
+                log.log_debug("[BinAssist] Making function call request")
                 
                 # Convert BinAssist messages to OpenAI format
                 openai_messages = self._prepare_messages(messages)
@@ -303,28 +302,28 @@ class OpenAIProvider(APIProvider, ChatProvider, FunctionCallingProvider):
                 # Handle different token field names based on model type
                 if self._is_reasoning_model():
                     completion_kwargs["max_completion_tokens"] = self.config.max_tokens
-                    self.logger.debug(f"Using max_completion_tokens={self.config.max_tokens} for o* model")
+                    log.log_debug(f"[BinAssist] Using max_completion_tokens={self.config.max_tokens} for o* model")
                 else:
                     completion_kwargs["max_tokens"] = self.config.max_tokens
-                    self.logger.debug(f"Using max_tokens={self.config.max_tokens} for regular model")
+                    log.log_debug(f"[BinAssist] Using max_tokens={self.config.max_tokens} for regular model")
                 
-                self.logger.info(f"Sending function call request to OpenAI for o* model (may take up to 3 minutes)")
-                self.logger.debug(f"Function call request params: {completion_kwargs}")
+                log.log_info(f"[BinAssist] Sending function call request to OpenAI for o* model (may take up to 3 minutes)")
+                log.log_debug(f"[BinAssist] Function call request params: {completion_kwargs}")
                 
                 import time
                 start_time = time.time()
                 response = self._openai_client.chat.completions.create(**completion_kwargs)
                 end_time = time.time()
                 
-                self.logger.info(f"Received function call response from OpenAI (took {end_time - start_time:.1f}s)")
+                log.log_info(f"[BinAssist] Received function call response from OpenAI (took {end_time - start_time:.1f}s)")
                 
                 if not response.choices:
-                    self.logger.warning("No choices in function call response")
+                    log.log_warn("[BinAssist] No choices in function call response")
                     return []
                 
                 message = response.choices[0].message
                 if not message.tool_calls:
-                    self.logger.debug("No tool calls in response")
+                    log.log_debug("[BinAssist] No tool calls in response")
                     return []
                 
                 # Convert OpenAI tool calls to BinAssist ToolCall objects
@@ -334,7 +333,7 @@ class OpenAIProvider(APIProvider, ChatProvider, FunctionCallingProvider):
                     try:
                         arguments = json.loads(tc.function.arguments) if tc.function.arguments else {}
                     except json.JSONDecodeError:
-                        self.logger.warning(f"Failed to parse tool call arguments: {tc.function.arguments}")
+                        log.log_warn(f"[BinAssist] Failed to parse tool call arguments: {tc.function.arguments}")
                         arguments = {}
                     
                     tool_call = ToolCall(
@@ -344,24 +343,24 @@ class OpenAIProvider(APIProvider, ChatProvider, FunctionCallingProvider):
                     )
                     tool_calls.append(tool_call)
                 
-                self.logger.debug(f"Converted {len(tool_calls)} tool calls")
+                log.log_debug(f"[BinAssist] Converted {len(tool_calls)} tool calls")
                 return tool_calls
             
             result = self._retry_handler.retry(_make_request)
-            self.logger.info(f"Function call successful, returned {len(result)} tool calls")
+            log.log_info(f"[BinAssist] Function call successful, returned {len(result)} tool calls")
             return result
             
         except openai.AuthenticationError as e:
-            self.logger.error(f"Authentication error: {e}")
+            log.log_error(f"[BinAssist] Authentication error: {e}")
             raise AuthenticationError(f"OpenAI authentication failed: {e}")
         except openai.RateLimitError as e:
-            self.logger.error(f"Rate limit error: {e}")
+            log.log_error(f"[BinAssist] Rate limit error: {e}")
             raise RateLimitError(f"OpenAI rate limit exceeded: {e}")
         except openai.APIError as e:
-            self.logger.error(f"OpenAI API error: {e}")
+            log.log_error(f"[BinAssist] OpenAI API error: {e}")
             raise APIProviderError(f"OpenAI API error: {e}")
         except Exception as e:
-            self.logger.error(f"Function call failed: {type(e).__name__}: {e}")
+            log.log_error(f"[BinAssist] Function call failed: {type(e).__name__}: {e}")
             if isinstance(e, (NetworkError, APIProviderError, AuthenticationError, RateLimitError)):
                 raise
             raise APIProviderError(f"Unexpected error during function call: {e}")
@@ -387,23 +386,23 @@ class OpenAIProvider(APIProvider, ChatProvider, FunctionCallingProvider):
     
     def test_connectivity(self) -> str:
         """Test OpenAI provider connectivity with detailed logging."""
-        self.logger.info(f"Testing connectivity for OpenAI provider: {self.config.name}")
+        log.log_info(f"[BinAssist] Testing connectivity for OpenAI provider: {self.config.name}")
         
         try:
             # Create test message
             test_messages = [ChatMessage(role=MessageRole.USER, content="This is a test. Please respond only with the word 'OK'.")]
             
             # Log the test attempt
-            self.logger.info(f"Sending test request to model: {self.config.model}")
+            log.log_info(f"[BinAssist] Sending test request to model: {self.config.model}")
             
             # Use the standard chat completion method
             response_text = self.create_chat_completion(test_messages)
             
-            self.logger.info(f"Test successful, received response: '{response_text}'")
+            log.log_info(f"[BinAssist] Test successful, received response: '{response_text}'")
             return response_text
             
         except Exception as e:
-            self.logger.error(f"Connectivity test failed: {e}")
+            log.log_error(f"[BinAssist] Connectivity test failed: {e}")
             raise
 
 

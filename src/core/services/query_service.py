@@ -13,6 +13,7 @@ from ..api_provider.capabilities import ChatProvider, FunctionCallingProvider
 from ..models.chat_message import ChatMessage, MessageRole
 from ..models.tool_call import ToolCall
 from ..models.api_response import APIResponse
+from binaryninja import log
 
 
 @dataclass
@@ -73,18 +74,7 @@ class QueryService(BaseService):
         self._active_providers = {}
         self._lock = threading.Lock()
         
-        # Configure logging
-        import logging
-        self.logger.setLevel(logging.DEBUG)
-        
-        # Add console handler if not already present
-        if not self.logger.handlers:
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-            handler.setFormatter(formatter)
-            self.logger.addHandler(handler)
-            
-        self.logger.info("Query service initialized")
+        log.log_info("[BinAssist] Query service initialized")
     
     def execute_query(self, request: QueryRequest, 
                      response_handler: Callable[[QueryResponse], None]) -> None:
@@ -95,40 +85,40 @@ class QueryService(BaseService):
             request: The query request
             response_handler: Callback for handling responses
         """
-        self.logger.info(f"Executing query with provider: {request.provider_config.name}, model: {request.provider_config.model}")
-        self.logger.debug(f"Query details - messages: {len(request.messages)}, use_rag: {request.use_rag}, tools: {len(request.tools) if request.tools else 0}, stream: {request.stream}")
+        log.log_info(f"[BinAssist] Executing query with provider: {request.provider_config.name}, model: {request.provider_config.model}")
+        log.log_debug(f"[BinAssist] Query details - messages: {len(request.messages)}, use_rag: {request.use_rag}, tools: {len(request.tools) if request.tools else 0}, stream: {request.stream}")
         
         try:
             # Reset stop event
             self.reset()
-            self.logger.debug("Query service reset completed")
+            log.log_debug("[BinAssist] Query service reset completed")
             
             # Get or create provider
-            self.logger.debug("Getting provider instance")
+            log.log_debug("[BinAssist] Getting provider instance")
             provider = self._get_provider(request.provider_config)
-            self.logger.debug(f"Provider obtained: {type(provider).__name__}")
+            log.log_debug(f"[BinAssist] Provider obtained: {type(provider).__name__}")
             
             # Augment with RAG if requested
             if request.use_rag and self.rag_service:
-                self.logger.debug("Augmenting query with RAG")
+                log.log_debug("[BinAssist] Augmenting query with RAG")
                 request = self._augment_with_rag(request)
-                self.logger.debug("RAG augmentation completed")
+                log.log_debug("[BinAssist] RAG augmentation completed")
             
             # Execute the query
             if request.tools and provider.supports_capability(FunctionCallingProvider):
-                self.logger.debug("Executing function call query")
+                log.log_debug("[BinAssist] Executing function call query")
                 self._execute_function_call_query(provider, request, response_handler)
             elif provider.supports_capability(ChatProvider):
-                self.logger.debug("Executing chat query")
+                log.log_debug("[BinAssist] Executing chat query")
                 self._execute_chat_query(provider, request, response_handler)
             else:
-                self.logger.error("Provider does not support required capabilities")
+                log.log_error("[BinAssist] Provider does not support required capabilities")
                 raise ServiceError("Provider does not support required capabilities")
                 
-            self.logger.info("Query execution completed successfully")
+            log.log_info("[BinAssist] Query execution completed successfully")
                 
         except Exception as e:
-            self.logger.error(f"Query execution failed: {type(e).__name__}: {e}")
+            log.log_error(f"[BinAssist] Query execution failed: {type(e).__name__}: {e}")
             self.handle_error(e, "query execution")
             
             # Send error response
@@ -138,11 +128,11 @@ class QueryService(BaseService):
             )
             
             try:
-                self.logger.debug("Sending error response to handler")
+                log.log_debug("[BinAssist] Sending error response to handler")
                 response_handler(error_response)
-                self.logger.debug("Error response sent successfully")
+                log.log_debug("[BinAssist] Error response sent successfully")
             except Exception as handler_error:
-                self.logger.error(f"Error in response handler: {handler_error}")
+                log.log_error(f"[BinAssist] Error in response handler: {handler_error}")
     
     def _get_provider(self, config: APIProviderConfig):
         """Get or create a provider instance."""
@@ -209,48 +199,48 @@ class QueryService(BaseService):
                 )
                 
         except Exception as e:
-            self.logger.warning(f"Failed to augment with RAG: {e}")
+            log.log_warn(f"[BinAssist] Failed to augment with RAG: {e}")
         
         return request
     
     def _execute_chat_query(self, provider: ChatProvider, request: QueryRequest,
                           response_handler: Callable[[QueryResponse], None]) -> None:
         """Execute a chat query."""
-        self.logger.debug(f"Executing chat query - streaming: {request.stream}")
+        log.log_debug(f"[BinAssist] Executing chat query - streaming: {request.stream}")
         
         try:
             if request.stream:
-                self.logger.debug("Starting streaming chat query")
+                log.log_debug("[BinAssist] Starting streaming chat query")
                 
                 def stream_handler(content: str):
                     if not self.is_stopped():
-                        self.logger.debug(f"Received streaming content, length: {len(content) if content else 0}")
+                        log.log_debug(f"[BinAssist] Received streaming content, length: {len(content) if content else 0}")
                         try:
                             response = QueryResponse(content=content)
-                            self.logger.debug("Created QueryResponse, calling response_handler")
+                            log.log_debug("[BinAssist] Created QueryResponse, calling response_handler")
                             response_handler(response)
-                            self.logger.debug("Response handler completed for streaming content")
+                            log.log_debug("[BinAssist] Response handler completed for streaming content")
                         except Exception as e:
-                            self.logger.error(f"Error in stream response handler: {e}")
+                            log.log_error(f"[BinAssist] Error in stream response handler: {e}")
                     else:
-                        self.logger.debug("Skipping stream handler - service stopped")
+                        log.log_debug("[BinAssist] Skipping stream handler - service stopped")
                 
-                self.logger.debug("Calling provider.stream_chat_completion")
+                log.log_debug("[BinAssist] Calling provider.stream_chat_completion")
                 provider.stream_chat_completion(request.messages, stream_handler)
-                self.logger.debug("stream_chat_completion call completed")
+                log.log_debug("[BinAssist] stream_chat_completion call completed")
                 
             else:
-                self.logger.debug("Starting non-streaming chat query")
+                log.log_debug("[BinAssist] Starting non-streaming chat query")
                 content = provider.create_chat_completion(request.messages)
-                self.logger.debug(f"Received non-streaming content, length: {len(content) if content else 0}")
+                log.log_debug(f"[BinAssist] Received non-streaming content, length: {len(content) if content else 0}")
                 
                 response = QueryResponse(content=content)
-                self.logger.debug("Created QueryResponse, calling response_handler")
+                log.log_debug("[BinAssist] Created QueryResponse, calling response_handler")
                 response_handler(response)
-                self.logger.debug("Response handler completed for non-streaming content")
+                log.log_debug("[BinAssist] Response handler completed for non-streaming content")
                 
         except Exception as e:
-            self.logger.error(f"Error in chat query execution: {type(e).__name__}: {e}")
+            log.log_error(f"[BinAssist] Error in chat query execution: {type(e).__name__}: {e}")
             raise
     
     def _execute_function_call_query(self, provider: FunctionCallingProvider, 
@@ -278,7 +268,7 @@ class QueryService(BaseService):
                 try:
                     provider.stop_streaming()
                 except Exception as e:
-                    self.logger.warning(f"Error stopping provider: {e}")
+                    log.log_warn(f"[BinAssist] Error stopping provider: {e}")
     
     def cleanup(self) -> None:
         """Cleanup resources."""
@@ -289,6 +279,6 @@ class QueryService(BaseService):
                 try:
                     provider.close()
                 except Exception as e:
-                    self.logger.warning(f"Error closing provider: {e}")
+                    log.log_warn(f"[BinAssist] Error closing provider: {e}")
             
             self._active_providers.clear()

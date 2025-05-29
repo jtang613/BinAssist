@@ -11,7 +11,8 @@ from pathlib import Path
 from ..core.services.rag_service import (
     RAGService, RAGConfiguration, DocumentMetadata, ChunkingStrategy
 )
-from ..core.services.mcp_service import MCPService
+# TODO: Update to use new MCPService when needed
+# from ..core.mcp import MCPService
 
 class RAGIntegrationHelper:
     """Helper class for integrating enhanced RAG with existing systems."""

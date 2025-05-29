@@ -9,14 +9,13 @@ This module provides an enhanced query handler that can:
 """
 
 import asyncio
-import logging
 import json
 from typing import Dict, List, Any, Optional, Callable
 from datetime import datetime
 
 from binaryninja import log
 from .llm_api import LlmApi
-from .mcp_integration import McpIntegrationService, create_mcp_integration_for_plugin
+# TODO: Update to use new MCPService when custom query integration is implemented
 
 
 class EnhancedQueryHandler:
@@ -29,65 +28,22 @@ class EnhancedQueryHandler:
         self.plugin = plugin
         self.settings = plugin.settings
         self.llm_api = plugin.LlmApi
-        self.logger = logging.getLogger("binassist.enhanced_query")
         
-        # MCP integration
-        self.mcp_integration: Optional[McpIntegrationService] = None
+        # MCP integration - TODO: Update to use new MCPService
+        self.mcp_integration: Optional[Any] = None
         
         # Conversation state
         self.conversation_active = False
         self.tool_execution_logs: List[str] = []
         
     def initialize_mcp_if_needed(self) -> bool:
-        """Initialize MCP integration if enabled and needed."""
-        try:
-            self.logger.info("Checking MCP tool configuration...")
-            
-            # Check if MCP tools are enabled
-            try:
-                use_mcp_tools = self.settings.get_boolean('use_mcp_tools')
-                self.logger.info(f"MCP tools enabled: {use_mcp_tools}")
-            except Exception as e:
-                self.logger.warning(f"Failed to read MCP tools setting: {e}")
-                use_mcp_tools = False
-                
-            if not use_mcp_tools:
-                self.logger.info("MCP tools disabled, skipping initialization")
-                return False
-            
-            # Create MCP integration if not already created
-            if self.mcp_integration is None:
-                self.logger.info("Creating MCP integration service...")
-                self.logger.info("Calling create_mcp_integration_for_plugin()...")
-                self.mcp_integration = create_mcp_integration_for_plugin(self.plugin)
-                if self.mcp_integration:
-                    self.logger.info("✅ MCP integration service created successfully")
-                    self.logger.info(f"MCP integration type: {type(self.mcp_integration)}")
-                else:
-                    self.logger.error("❌ Failed to create MCP integration service - returned None")
-                    self.logger.error("This means either MCP tools are disabled or no servers are configured")
-            else:
-                self.logger.debug("Using existing MCP integration service")
-                
-            # Check if MCP is available
-            is_available = self.mcp_integration is not None and self.mcp_integration.is_available()
-            self.logger.info(f"MCP integration available: {is_available}")
-            
-            if is_available:
-                # Get available tools for logging
-                try:
-                    tools_dict = self.mcp_integration.get_available_tools()
-                    tool_names = [tool.name for tool in tools_dict.values()]
-                    self.logger.info(f"Available MCP tools: {tool_names}")
-                except Exception as e:
-                    self.logger.warning(f"Failed to get available tools: {e}")
-                    
-            return is_available
-            
-        except Exception as e:
-            self.logger.error(f"Error initializing MCP: {e}")
-            self.logger.exception("Full traceback for MCP initialization error:")
-            return False
+        """
+        Initialize MCP integration if enabled and needed.
+        TODO: Update to use new MCPService
+        """
+        # Temporarily disabled during refactoring
+        log.log_info("[BinAssist] MCP integration temporarily disabled during refactoring")
+        return False
     
     def execute_enhanced_query(self, query: str, response_callback: Callable[[Dict[str, Any]], None]):
         """
@@ -100,29 +56,28 @@ class EnhancedQueryHandler:
         try:
             log.log_info("=== ENHANCED QUERY EXECUTION START ===")
             log.log_info(f"Query: {query}")
-            self.logger.info("=== ENHANCED QUERY EXECUTION START ===")
-            self.logger.info(f"Query: {query}")
+            log.log_info("[BinAssist] === ENHANCED QUERY EXECUTION START ===")
+            log.log_info(f"[BinAssist] Query: {query}")
             
             self.conversation_active = True
             self.tool_execution_logs.clear()
             
             # Initialize MCP if needed
             log.log_info("Initializing MCP integration...")
-            self.logger.info("Initializing MCP integration...")
+            log.log_info("[BinAssist] Initializing MCP integration...")
             mcp_available = self.initialize_mcp_if_needed()
             log.log_info(f"MCP available for this query: {mcp_available}")
-            self.logger.info(f"MCP available for this query: {mcp_available}")
+            log.log_info(f"[BinAssist] MCP available for this query: {mcp_available}")
             
             # Start the conversation loop
             log.log_info("Starting conversation loop...")
-            self.logger.info("Starting conversation loop...")
+            log.log_info("[BinAssist] Starting conversation loop...")
             self._start_conversation_loop(query, response_callback, mcp_available)
             log.log_info("✅ Enhanced query execution completed")
-            self.logger.info("✅ Enhanced query execution completed")
+            log.log_info("[BinAssist] ✅ Enhanced query execution completed")
             
         except Exception as e:
-            self.logger.error(f"Error executing enhanced query: {e}")
-            self.logger.exception("Full traceback for enhanced query execution error:")
+            log.log_error(f"[BinAssist] Error executing enhanced query: {e}")
             response_callback({
                 "type": "error",
                 "content": f"Error executing query: {str(e)}"
@@ -132,7 +87,7 @@ class EnhancedQueryHandler:
         """Start the conversation loop with tool support."""
         try:
             log.log_info("=== STARTING CONVERSATION LOOP ===")
-            self.logger.info("=== STARTING CONVERSATION LOOP ===")
+            log.log_info("[BinAssist] === STARTING CONVERSATION LOOP ===")
             
             # Prepare the query with context
             log.log_info("Preparing query with context...")
@@ -153,7 +108,7 @@ class EnhancedQueryHandler:
                 
                 tools.extend(mcp_tools)
                 log.log_info(f"Added {len(mcp_tools)} MCP tools to query")
-                self.logger.info(f"Added {len(mcp_tools)} MCP tools to query")
+                log.log_info(f"[BinAssist] Added {len(mcp_tools)} MCP tools to query")
             
             # If we have tools, use function calling
             if tools:
@@ -165,7 +120,7 @@ class EnhancedQueryHandler:
                 self._execute_regular_query(full_query, response_callback)
                 
         except Exception as e:
-            self.logger.error(f"Error in conversation loop: {e}")
+            log.log_error(f"[BinAssist] Error in conversation loop: {e}")
             response_callback({
                 "type": "error", 
                 "content": f"Error in conversation: {str(e)}"
@@ -196,26 +151,26 @@ class EnhancedQueryHandler:
             return full_query
             
         except Exception as e:
-            self.logger.error(f"Error preparing query context: {e}")
+            log.log_error(f"[BinAssist] Error preparing query context: {e}")
             return query
     
     def _execute_query_with_tools(self, query: str, tools: List[Dict], response_callback: Callable):
         """Execute query with tool calling support."""
         try:
             log.log_info(f"=== EXECUTING QUERY WITH {len(tools)} TOOLS ===")
-            self.logger.info(f"=== EXECUTING QUERY WITH {len(tools)} TOOLS ===")
+            log.log_info(f"[BinAssist] === EXECUTING QUERY WITH {len(tools)} TOOLS ===")
             
             # Log all tool names for debugging
             tool_names = [tool.get('function', {}).get('name', 'unknown') for tool in tools]
             log.log_info(f"Tool names being sent to LLM: {tool_names}")
-            self.logger.info(f"Tool names being sent to LLM: {tool_names}")
+            log.log_info(f"[BinAssist] Tool names being sent to LLM: {tool_names}")
             
             # Create a custom response handler that can handle tool calls
             def tool_aware_response_handler(response_data):
                 try:
-                    self.logger.info(f"=== RECEIVED RESPONSE FROM LLM ===")
-                    self.logger.debug(f"Response data type: {type(response_data)}")
-                    self.logger.debug(f"Response data: {response_data}")
+                    log.log_info(f"[BinAssist] === RECEIVED RESPONSE FROM LLM ===")
+                    log.log_debug(f"[BinAssist] Response data type: {type(response_data)}")
+                    log.log_debug(f"[BinAssist] Response data: {response_data}")
                     
                     if isinstance(response_data, dict) and "response" in response_data:
                         response = response_data["response"]
@@ -224,34 +179,33 @@ class EnhancedQueryHandler:
                         if hasattr(response, 'choices') and response.choices:
                             choice = response.choices[0]
                             finish_reason = choice.finish_reason
-                            self.logger.info(f"LLM response finish_reason: {finish_reason}")
+                            log.log_info(f"[BinAssist] LLM response finish_reason: {finish_reason}")
                             
                             if finish_reason == 'tool_calls' and hasattr(choice.message, 'tool_calls') and choice.message.tool_calls:
-                                self.logger.info(f"LLM responded with {len(choice.message.tool_calls)} tool calls")
+                                log.log_info(f"[BinAssist] LLM responded with {len(choice.message.tool_calls)} tool calls")
                                 self._handle_tool_calls(choice.message.tool_calls, query, response_callback)
                             else:
                                 # Regular text response or no tool calls
                                 content = choice.message.content if choice.message.content else ""
-                                self.logger.info(f"LLM responded with text (finish_reason: {finish_reason})")
+                                log.log_info(f"[BinAssist] LLM responded with text (finish_reason: {finish_reason})")
                                 self._handle_text_response(content, response_callback)
                         # Check if response contains tool calls (legacy format)
                         elif isinstance(response, list):  # Tool calls
-                            self.logger.info(f"LLM responded with {len(response)} tool calls")
+                            log.log_info(f"[BinAssist] LLM responded with {len(response)} tool calls")
                             self._handle_tool_calls(response, query, response_callback)
                         else:  # Regular text response
-                            self.logger.info("LLM responded with text (no tool calls)")
+                            log.log_info("[BinAssist] LLM responded with text (no tool calls)")
                             self._handle_text_response(response, response_callback)
                     else:
                         # Fallback for other response formats
-                        self.logger.info("Using fallback response handling")
+                        log.log_info("[BinAssist] Using fallback response handling")
                         response_callback({
                             "type": "text",
                             "content": str(response_data)
                         })
                         
                 except Exception as e:
-                    self.logger.error(f"Error in tool aware response handler: {e}")
-                    self.logger.exception("Full traceback:")
+                    log.log_error(f"[BinAssist] Error in tool aware response handler: {e}")
                     response_callback({
                         "type": "error",
                         "content": f"Error processing response: {str(e)}"
@@ -263,15 +217,14 @@ class EnhancedQueryHandler:
             log.log_info("✅ _execute_direct_llm_call completed")
             
         except Exception as e:
-            self.logger.error(f"Error executing query with tools: {e}")
-            self.logger.exception("Full traceback:")
+            log.log_error(f"[BinAssist] Error executing query with tools: {e}")
             self._execute_regular_query(query, response_callback)
     
     def _execute_direct_llm_call(self, query: str, tools: List[Dict], response_callback: Callable):
         """Execute a direct LLM API call with tools."""
         try:
             log.log_info("=== MAKING DIRECT LLM CALL WITH TOOLS ===")
-            self.logger.info("=== MAKING DIRECT LLM CALL WITH TOOLS ===")
+            log.log_info("[BinAssist] === MAKING DIRECT LLM CALL WITH TOOLS ===")
             
             # Get LLM configuration
             log.log_info("Getting LLM configuration...")
@@ -284,9 +237,9 @@ class EnhancedQueryHandler:
             log.log_info(f"Using model: {model}")
             log.log_info(f"Max tokens: {max_tokens}")
             log.log_info(f"Number of tools: {len(tools)}")
-            self.logger.info(f"Using model: {model}")
-            self.logger.info(f"Max tokens: {max_tokens}")
-            self.logger.info(f"Number of tools: {len(tools)}")
+            log.log_info(f"[BinAssist] Using model: {model}")
+            log.log_info(f"[BinAssist] Max tokens: {max_tokens}")
+            log.log_info(f"[BinAssist] Number of tools: {len(tools)}")
             
             # Create Qt signal for response handling
             from PySide6 import QtCore
@@ -299,7 +252,7 @@ class EnhancedQueryHandler:
             
             # Use the LLM API's _start_thread method directly with tools
             log.log_info("Starting LLM thread with tools...")
-            self.logger.info("Starting LLM thread with tools...")
+            log.log_info("[BinAssist] Starting LLM thread with tools...")
             thread = self.llm_api._start_thread(
                 client=client,
                 model=model,
@@ -311,11 +264,10 @@ class EnhancedQueryHandler:
             )
             
             log.log_info("LLM thread started successfully")
-            self.logger.info("LLM thread started successfully")
+            log.log_info("[BinAssist] LLM thread started successfully")
             
         except Exception as e:
-            self.logger.error(f"Error in direct LLM call: {e}")
-            self.logger.exception("Full traceback:")
+            log.log_error(f"[BinAssist] Error in direct LLM call: {e}")
             response_callback({
                 "type": "error",
                 "content": f"Error calling LLM: {str(e)}"
@@ -352,7 +304,7 @@ class EnhancedQueryHandler:
             )
             
         except Exception as e:
-            self.logger.error(f"Error in function calling execution: {e}")
+            log.log_error(f"[BinAssist] Error in function calling execution: {e}")
             self._execute_regular_query(query, response_callback)
     
     def _execute_regular_query(self, query: str, response_callback: Callable):
@@ -360,7 +312,7 @@ class EnhancedQueryHandler:
         try:
             self.llm_api.query(query, response_callback)
         except Exception as e:
-            self.logger.error(f"Error executing regular query: {e}")
+            log.log_error(f"[BinAssist] Error executing regular query: {e}")
             response_callback({
                 "type": "error",
                 "content": f"Error executing query: {str(e)}"
@@ -369,7 +321,7 @@ class EnhancedQueryHandler:
     def _handle_tool_calls(self, tool_calls: List, original_query: str, response_callback: Callable):
         """Handle tool calls from LLM response."""
         try:
-            self.logger.info(f"Handling {len(tool_calls)} tool calls")
+            log.log_info(f"[BinAssist] Handling {len(tool_calls)} tool calls")
             
             tool_results = []
             
@@ -384,7 +336,7 @@ class EnhancedQueryHandler:
                         tool_name = tool_call.get('name', '')
                         arguments = tool_call.get('arguments', {})
                     
-                    self.logger.info(f"Executing tool: {tool_name} with args: {arguments}")
+                    log.log_info(f"[BinAssist] Executing tool: {tool_name} with args: {arguments}")
                     
                     # Check if this is an MCP tool
                     if tool_name.startswith("mcp_") and self.mcp_integration:
@@ -406,14 +358,14 @@ class EnhancedQueryHandler:
                         tool_results.append(result)
                         
                 except Exception as e:
-                    self.logger.error(f"Error executing individual tool call: {e}")
+                    log.log_error(f"[BinAssist] Error executing individual tool call: {e}")
                     tool_results.append({"success": False, "error": str(e)})
             
             # Continue conversation with tool results
             self._continue_conversation_with_tool_results(original_query, tool_results, response_callback)
             
         except Exception as e:
-            self.logger.error(f"Error handling tool calls: {e}")
+            log.log_error(f"[BinAssist] Error handling tool calls: {e}")
             response_callback({
                 "type": "error",
                 "content": f"Error handling tool calls: {str(e)}"
@@ -428,7 +380,7 @@ class EnhancedQueryHandler:
             return self.mcp_integration.execute_tool_call(tool_name, arguments)
             
         except Exception as e:
-            self.logger.error(f"Error executing MCP tool {tool_name}: {e}")
+            log.log_error(f"[BinAssist] Error executing MCP tool {tool_name}: {e}")
             return {"success": False, "error": str(e)}
     
     def _continue_conversation_with_tool_results(self, original_query: str, tool_results: List[Dict], response_callback: Callable):
@@ -444,7 +396,7 @@ class EnhancedQueryHandler:
             self._execute_regular_query(follow_up_query, response_callback)
             
         except Exception as e:
-            self.logger.error(f"Error continuing conversation with tool results: {e}")
+            log.log_error(f"[BinAssist] Error continuing conversation with tool results: {e}")
             response_callback({
                 "type": "error",
                 "content": f"Error processing tool results: {str(e)}"
@@ -464,7 +416,7 @@ class EnhancedQueryHandler:
             return "\n".join(formatted_results)
             
         except Exception as e:
-            self.logger.error(f"Error formatting tool results: {e}")
+            log.log_error(f"[BinAssist] Error formatting tool results: {e}")
             return "Error formatting tool results"
     
     def _handle_text_response(self, response: str, response_callback: Callable):
@@ -475,16 +427,16 @@ class EnhancedQueryHandler:
                 "content": response
             })
         except Exception as e:
-            self.logger.error(f"Error handling text response: {e}")
+            log.log_error(f"[BinAssist] Error handling text response: {e}")
     
     def stop_conversation(self):
         """Stop the active conversation."""
         try:
             self.conversation_active = False
             self.llm_api.stop_threads()
-            self.logger.info("Conversation stopped")
+            log.log_info("[BinAssist] Conversation stopped")
         except Exception as e:
-            self.logger.error(f"Error stopping conversation: {e}")
+            log.log_error(f"[BinAssist] Error stopping conversation: {e}")
     
     def cleanup(self):
         """Clean up resources."""
@@ -497,7 +449,7 @@ class EnhancedQueryHandler:
             self.tool_execution_logs.clear()
             
         except Exception as e:
-            self.logger.error(f"Error during cleanup: {e}")
+            log.log_error(f"[BinAssist] Error during cleanup: {e}")
     
     def get_status(self) -> Dict[str, Any]:
         """Get current status of the enhanced query handler."""

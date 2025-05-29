@@ -3,7 +3,6 @@ Service for leveraging advanced provider capabilities.
 """
 
 from typing import List, Dict, Any, Optional, Union
-import logging
 from datetime import datetime
 
 from .base_service import BaseService, ServiceError
@@ -15,6 +14,7 @@ from ..api_provider.capabilities import (
     CodeAnalysisProvider, AdvancedProvider
 )
 from ..models.chat_message import ChatMessage
+from binaryninja import log
 
 
 class AdvancedCapabilitiesService(BaseService):
@@ -44,7 +44,7 @@ class AdvancedCapabilitiesService(BaseService):
             "ollama": ["chat", "embeddings"]  # Basic capabilities
         }
         
-        self.logger.info(f"Refreshed capability matrix: {self._capability_matrix}")
+        log.log_info(f"[BinAssist] Refreshed capability matrix: {self._capability_matrix}")
     
     def get_provider_with_capability(self, capability: str, provider_config: APIProviderConfig) -> Optional[Any]:
         """
@@ -91,7 +91,7 @@ class AdvancedCapabilitiesService(BaseService):
             return None
             
         except Exception as e:
-            self.logger.error(f"Failed to get provider with capability {capability}: {e}")
+            log.log_error(f"[BinAssist] Failed to get provider with capability {capability}: {e}")
             return None
     
     def analyze_image(self, image_data: bytes, prompt: str, provider_config: APIProviderConfig) -> Dict[str, Any]:
@@ -121,7 +121,7 @@ class AdvancedCapabilitiesService(BaseService):
             }
             
         except Exception as e:
-            self.logger.error(f"Image analysis failed: {e}")
+            log.log_error(f"[BinAssist] Image analysis failed: {e}")
             return {"error": str(e), "success": False}
     
     def get_embeddings(self, texts: List[str], provider_config: APIProviderConfig) -> Dict[str, Any]:
@@ -153,7 +153,7 @@ class AdvancedCapabilitiesService(BaseService):
             }
             
         except Exception as e:
-            self.logger.error(f"Embedding generation failed: {e}")
+            log.log_error(f"[BinAssist] Embedding generation failed: {e}")
             return {"error": str(e), "success": False}
     
     def create_reasoning_completion(self, messages: List[ChatMessage], 
@@ -180,7 +180,7 @@ class AdvancedCapabilitiesService(BaseService):
             return result
             
         except Exception as e:
-            self.logger.error(f"Reasoning completion failed: {e}")
+            log.log_error(f"[BinAssist] Reasoning completion failed: {e}")
             return {"error": str(e), "success": False}
     
     def process_batch(self, batch_requests: List[Dict[str, Any]], 
@@ -211,7 +211,7 @@ class AdvancedCapabilitiesService(BaseService):
             }
             
         except Exception as e:
-            self.logger.error(f"Batch processing failed: {e}")
+            log.log_error(f"[BinAssist] Batch processing failed: {e}")
             return {"error": str(e), "success": False}
     
     def list_models(self, provider_config: APIProviderConfig) -> Dict[str, Any]:
@@ -240,7 +240,7 @@ class AdvancedCapabilitiesService(BaseService):
             }
             
         except Exception as e:
-            self.logger.error(f"Model listing failed: {e}")
+            log.log_error(f"[BinAssist] Model listing failed: {e}")
             return {"error": str(e), "success": False}
     
     def get_usage_analytics(self, start_date: str, end_date: str, 
@@ -273,7 +273,7 @@ class AdvancedCapabilitiesService(BaseService):
             }
             
         except Exception as e:
-            self.logger.error(f"Usage analytics failed: {e}")
+            log.log_error(f"[BinAssist] Usage analytics failed: {e}")
             return {"error": str(e), "success": False}
     
     def get_capability_matrix(self) -> Dict[str, List[str]]:
@@ -320,7 +320,7 @@ class AdvancedCapabilitiesService(BaseService):
             return capabilities
             
         except Exception as e:
-            self.logger.error(f"Capability discovery failed: {e}")
+            log.log_error(f"[BinAssist] Capability discovery failed: {e}")
             return []
     
     def analyze_code_with_provider(self, code: str, language: str, analysis_type: str,
@@ -389,7 +389,7 @@ class AdvancedCapabilitiesService(BaseService):
             }
             
         except Exception as e:
-            self.logger.error(f"Code analysis failed: {e}")
+            log.log_error(f"[BinAssist] Code analysis failed: {e}")
             return {"error": str(e), "success": False}
     
     def get_service_statistics(self) -> Dict[str, Any]:

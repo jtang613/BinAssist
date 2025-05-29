@@ -6,8 +6,7 @@ from typing import Dict, List, Any
 from binaryninja.settings import Settings
 import logging
 
-from ..core.mcp import MCPConfig, MCPServerConfig
-from ..core.services.mcp_service import MCPService
+from ..core.mcp import MCPConfig, MCPServerConfig, MCPService
 
 class MCPConfigHelper:
     """Helper class for MCP configuration management."""

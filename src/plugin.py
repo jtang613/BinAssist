@@ -351,6 +351,88 @@ class BinAssistWidget(SidebarWidget):
         providers_group.setLayout(providers_layout)
         layout.addWidget(providers_group)
 
+        # MCP Servers Section
+        mcp_group = QtWidgets.QGroupBox("MCP Servers")
+        mcp_layout = QtWidgets.QVBoxLayout()
+        
+        # MCP servers management
+        mcp_controls_layout = QtWidgets.QHBoxLayout()
+        
+        self.mcp_servers_list = QtWidgets.QListWidget()
+        self.mcp_servers_list.setMaximumHeight(150)
+        self.mcp_servers_list.currentRowChanged.connect(self.onMCPServerSelected)
+        mcp_layout.addWidget(self.mcp_servers_list)
+        
+        mcp_add_btn = QtWidgets.QPushButton("Add")
+        mcp_add_btn.clicked.connect(self.addMCPServer)
+        mcp_add_btn.setMaximumWidth(80)
+        mcp_controls_layout.addWidget(mcp_add_btn)
+        
+        mcp_remove_btn = QtWidgets.QPushButton("Remove")
+        mcp_remove_btn.clicked.connect(self.removeMCPServer)
+        mcp_remove_btn.setMaximumWidth(80)
+        mcp_controls_layout.addWidget(mcp_remove_btn)
+        
+        mcp_duplicate_btn = QtWidgets.QPushButton("Duplicate")
+        mcp_duplicate_btn.clicked.connect(self.duplicateMCPServer)
+        mcp_duplicate_btn.setMaximumWidth(80)
+        mcp_controls_layout.addWidget(mcp_duplicate_btn)
+        
+        mcp_test_btn = QtWidgets.QPushButton("Test")
+        mcp_test_btn.clicked.connect(self.testMCPServer)
+        mcp_test_btn.setMaximumWidth(80)
+        mcp_controls_layout.addWidget(mcp_test_btn)
+        
+        mcp_controls_layout.addStretch()
+        mcp_layout.addLayout(mcp_controls_layout)
+        
+        # MCP server configuration form
+        mcp_form_layout = QtWidgets.QFormLayout()
+        
+        self.mcp_enabled_checkbox = QtWidgets.QCheckBox()
+        mcp_form_layout.addRow("Enabled:", self.mcp_enabled_checkbox)
+        
+        self.mcp_name_edit = QtWidgets.QLineEdit()
+        self.mcp_name_edit.setPlaceholderText("Server name")
+        mcp_form_layout.addRow("Name:", self.mcp_name_edit)
+        
+        self.mcp_type_combo = QtWidgets.QComboBox()
+        self.mcp_type_combo.addItems(["stdio", "sse"])
+        self.mcp_type_combo.currentTextChanged.connect(self.onMCPTypeChanged)
+        mcp_form_layout.addRow("Type:", self.mcp_type_combo)
+        
+        # Context-aware fields based on type
+        self.mcp_command_edit = QtWidgets.QLineEdit()
+        self.mcp_command_edit.setPlaceholderText("Command path (for stdio)")
+        self.mcp_command_row = mcp_form_layout.addRow("Command:", self.mcp_command_edit)
+        
+        self.mcp_args_edit = QtWidgets.QLineEdit()
+        self.mcp_args_edit.setPlaceholderText("Arguments (space-separated)")
+        self.mcp_args_row = mcp_form_layout.addRow("Args:", self.mcp_args_edit)
+        
+        self.mcp_url_edit = QtWidgets.QLineEdit()
+        self.mcp_url_edit.setPlaceholderText("URL (for sse)")
+        self.mcp_url_row = mcp_form_layout.addRow("URL:", self.mcp_url_edit)
+        
+        self.mcp_timeout_spin = QtWidgets.QSpinBox()
+        self.mcp_timeout_spin.setRange(5, 300)
+        self.mcp_timeout_spin.setValue(30)
+        self.mcp_timeout_spin.setSuffix(" seconds")
+        mcp_form_layout.addRow("Timeout:", self.mcp_timeout_spin)
+        
+        mcp_layout.addLayout(mcp_form_layout)
+        
+        # MCP save button
+        mcp_save_layout = QtWidgets.QHBoxLayout()
+        mcp_save_btn = QtWidgets.QPushButton("Save MCP Server")
+        mcp_save_btn.clicked.connect(self.saveMCPServer)
+        mcp_save_layout.addWidget(mcp_save_btn)
+        mcp_save_layout.addStretch()
+        mcp_layout.addLayout(mcp_save_layout)
+        
+        mcp_group.setLayout(mcp_layout)
+        layout.addWidget(mcp_group)
+
         # System Context Section
         system_context_group = QtWidgets.QGroupBox("System Context")
         system_context_layout = QtWidgets.QVBoxLayout()
@@ -576,6 +658,10 @@ class BinAssistWidget(SidebarWidget):
         self.providers = []
         self.current_provider_index = -1
         self.loadProvidersFromSettings()
+        
+        # Initialize MCP servers data
+        self.mcp_servers = []
+        self.loadMCPServersFromSettings()
 
         settings_widget.setLayout(layout)
         scroll_area.setWidget(settings_widget)
@@ -1612,6 +1698,292 @@ class BinAssistWidget(SidebarWidget):
                 )
             
             log.log_error(f"[BinAssist] Provider test failed: {e}")
+
+    # MCP Server Management Methods
+    def loadMCPServersFromSettings(self) -> None:
+        """Load MCP servers from settings."""
+        try:
+            self.mcp_servers = self.settings.get_json('mcp_servers', [])
+            self.updateMCPServersList()
+            
+            # Select first server if available
+            if self.mcp_servers:
+                self.mcp_servers_list.setCurrentRow(0)
+                
+        except Exception as e:
+            log.log_error(f"[BinAssist] Error loading MCP servers from settings: {e}")
+
+    def updateMCPServersList(self) -> None:
+        """Update the MCP servers list widget."""
+        self.mcp_servers_list.clear()
+        for server in self.mcp_servers:
+            enabled_icon = "✅" if server.get('enabled', True) else "❌"
+            self.mcp_servers_list.addItem(f"{enabled_icon} {server['name']} ({server['transport_type']})")
+
+    def onMCPServerSelected(self, row: int) -> None:
+        """Handle MCP server selection in the list."""
+        if 0 <= row < len(self.mcp_servers):
+            server = self.mcp_servers[row]
+            
+            # Populate form with server data
+            self.mcp_enabled_checkbox.setChecked(server.get('enabled', True))
+            self.mcp_name_edit.setText(server.get('name', ''))
+            self.mcp_type_combo.setCurrentText(server.get('transport_type', 'stdio'))
+            self.mcp_command_edit.setText(server.get('command', ''))
+            self.mcp_args_edit.setText(' '.join(server.get('args', [])))
+            self.mcp_url_edit.setText(server.get('url', ''))
+            self.mcp_timeout_spin.setValue(server.get('timeout', 30))
+            
+            # Update field visibility
+            self.onMCPTypeChanged(server.get('transport_type', 'stdio'))
+        else:
+            self.clearMCPServerForm()
+
+    def onMCPTypeChanged(self, transport_type: str) -> None:
+        """Handle MCP transport type change to show/hide relevant fields."""
+        is_stdio = transport_type == 'stdio'
+        is_sse = transport_type == 'sse'
+        
+        # Show/hide fields based on transport type
+        self.mcp_command_edit.setVisible(is_stdio)
+        self.mcp_args_edit.setVisible(is_stdio)
+        self.mcp_url_edit.setVisible(is_sse)
+        
+        # Get the form layout and update row visibility
+        # Note: This is a simplified approach; in a real implementation you might need
+        # to manage row visibility more carefully
+
+    def addMCPServer(self) -> None:
+        """Add a new MCP server."""
+        new_server = {
+            'name': 'New MCP Server',
+            'transport_type': 'stdio',
+            'enabled': True,
+            'command': '',
+            'args': [],
+            'url': '',
+            'timeout': 30
+        }
+        
+        self.mcp_servers.append(new_server)
+        self.updateMCPServersList()
+        self.saveMCPServersToSettings()
+        
+        # Select the new server
+        self.mcp_servers_list.setCurrentRow(len(self.mcp_servers) - 1)
+
+    def removeMCPServer(self) -> None:
+        """Remove the selected MCP server."""
+        current_row = self.mcp_servers_list.currentRow()
+        if 0 <= current_row < len(self.mcp_servers):
+            # Confirm deletion
+            server_name = self.mcp_servers[current_row]['name']
+            reply = QtWidgets.QMessageBox.question(
+                self, "Confirm Deletion",
+                f"Are you sure you want to delete MCP server '{server_name}'?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
+            )
+            
+            if reply == QtWidgets.QMessageBox.Yes:
+                self.mcp_servers.pop(current_row)
+                self.updateMCPServersList()
+                self.saveMCPServersToSettings()
+                
+                # Clear form or select another server
+                if self.mcp_servers:
+                    new_row = min(current_row, len(self.mcp_servers) - 1)
+                    self.mcp_servers_list.setCurrentRow(new_row)
+                else:
+                    self.clearMCPServerForm()
+
+    def duplicateMCPServer(self) -> None:
+        """Duplicate the selected MCP server."""
+        current_row = self.mcp_servers_list.currentRow()
+        if 0 <= current_row < len(self.mcp_servers):
+            server = self.mcp_servers[current_row].copy()
+            server['name'] = f"{server['name']} (Copy)"
+            
+            self.mcp_servers.append(server)
+            self.updateMCPServersList()
+            self.saveMCPServersToSettings()
+            self.mcp_servers_list.setCurrentRow(len(self.mcp_servers) - 1)
+
+    def saveMCPServer(self) -> None:
+        """Save the current MCP server configuration."""
+        current_row = self.mcp_servers_list.currentRow()
+        if current_row < 0:
+            QtWidgets.QMessageBox.warning(self, "No Selection", "Please select an MCP server to save.")
+            return
+            
+        try:
+            # Parse args from space-separated string
+            args_text = self.mcp_args_edit.text().strip()
+            args = args_text.split() if args_text else []
+            
+            server_config = {
+                'name': self.mcp_name_edit.text(),
+                'transport_type': self.mcp_type_combo.currentText(),
+                'enabled': self.mcp_enabled_checkbox.isChecked(),
+                'command': self.mcp_command_edit.text(),
+                'args': args,
+                'url': self.mcp_url_edit.text(),
+                'timeout': self.mcp_timeout_spin.value()
+            }
+            
+            # Validate required fields
+            if not server_config['name']:
+                QtWidgets.QMessageBox.warning(self, "Validation Error", "Server name is required.")
+                return
+                
+            if server_config['transport_type'] == 'stdio' and not server_config['command']:
+                QtWidgets.QMessageBox.warning(self, "Validation Error", "Command is required for stdio transport.")
+                return
+                
+            if server_config['transport_type'] == 'sse' and not server_config['url']:
+                QtWidgets.QMessageBox.warning(self, "Validation Error", "URL is required for sse transport.")
+                return
+            
+            # Check for duplicate names (excluding current server)
+            for i, existing in enumerate(self.mcp_servers):
+                if i != current_row and existing['name'] == server_config['name']:
+                    QtWidgets.QMessageBox.warning(self, "Validation Error", "Server name must be unique.")
+                    return
+            
+            self.mcp_servers[current_row] = server_config
+            self.updateMCPServersList()
+            self.saveMCPServersToSettings()
+            
+            # Maintain selection
+            self.mcp_servers_list.setCurrentRow(current_row)
+            
+            QtWidgets.QMessageBox.information(self, "Success", "MCP server configuration saved successfully.")
+            
+        except Exception as e:
+            log.log_error(f"[BinAssist] Error saving MCP server: {e}")
+            QtWidgets.QMessageBox.critical(self, "Error", f"Failed to save MCP server: {str(e)}")
+
+    def saveMCPServersToSettings(self) -> None:
+        """Save MCP servers to settings."""
+        self.settings.set_json('mcp_servers', self.mcp_servers)
+
+    def clearMCPServerForm(self) -> None:
+        """Clear the MCP server configuration form."""
+        self.mcp_enabled_checkbox.setChecked(True)
+        self.mcp_name_edit.clear()
+        self.mcp_type_combo.setCurrentText('stdio')
+        self.mcp_command_edit.clear()
+        self.mcp_args_edit.clear()
+        self.mcp_url_edit.clear()
+        self.mcp_timeout_spin.setValue(30)
+
+    def testMCPServer(self) -> None:
+        """Test the current MCP server configuration."""
+        log.log_info("[BinAssist] testMCPServer method called")
+        
+        current_row = self.mcp_servers_list.currentRow()
+        log.log_info(f"[BinAssist] Current selected row: {current_row}")
+        if current_row < 0:
+            log.log_warn("[BinAssist] No MCP server selected for testing")
+            QtWidgets.QMessageBox.warning(self, "No Selection", "Please select an MCP server to test.")
+            return
+            
+        try:
+            # Get current form data
+            args_text = self.mcp_args_edit.text().strip()
+            args = args_text.split() if args_text else []
+            
+            server_config_dict = {
+                'name': self.mcp_name_edit.text(),
+                'transport_type': self.mcp_type_combo.currentText(),
+                'enabled': self.mcp_enabled_checkbox.isChecked(),
+                'command': self.mcp_command_edit.text(),
+                'args': args,
+                'url': self.mcp_url_edit.text(),
+                'timeout': self.mcp_timeout_spin.value()
+            }
+            
+            log.log_info(f"[BinAssist] Testing MCP server config: {server_config_dict}")
+            
+            # Basic validation
+            if not server_config_dict['name']:
+                log.log_warn("[BinAssist] Validation failed: Server name is required")
+                QtWidgets.QMessageBox.warning(self, "Validation Error", "Server name is required.")
+                return
+                
+            if server_config_dict['transport_type'] == 'stdio' and not server_config_dict['command']:
+                log.log_warn("[BinAssist] Validation failed: Command is required for stdio transport")
+                QtWidgets.QMessageBox.warning(self, "Validation Error", "Command is required for stdio transport.")
+                return
+                
+            if server_config_dict['transport_type'] == 'sse' and not server_config_dict['url']:
+                log.log_warn("[BinAssist] Validation failed: URL is required for sse transport")
+                QtWidgets.QMessageBox.warning(self, "Validation Error", "URL is required for sse transport.")
+                return
+            
+            # Create MCPServerConfig object
+            from .core.mcp.config import MCPServerConfig
+            server_config = MCPServerConfig.from_dict(server_config_dict)
+            
+            # Show progress
+            self.test_button = self.sender()
+            original_text = self.test_button.text()
+            self.test_button.setText("Testing...")
+            self.test_button.setEnabled(False)
+            QtWidgets.QApplication.processEvents()
+            
+            # Test connection using MCP service
+            log.log_info("[BinAssist] Initializing MCP service for testing")
+            if not hasattr(self, 'mcp_service'):
+                from .core.mcp.service import MCPService
+                self.mcp_service = MCPService(self.settings)
+                
+            log.log_info(f"[BinAssist] Starting MCP test for server: {server_config.name} ({server_config.transport_type})")
+            result = self.mcp_service.test_connection_sync(server_config)
+            log.log_info(f"[BinAssist] MCP test completed with result: {result}")
+            
+            # Show results
+            if result['success']:
+                tools_count = result.get('tools_count', 0)
+                resources_count = result.get('resources_count', 0)
+                
+                tools_info = ""
+                if tools_count > 0:
+                    tools = result.get('tools', [])
+                    tools_list = '\n'.join([f"  • {tool['name']}: {tool['description']}" for tool in tools[:5]])
+                    if tools_count > 5:
+                        tools_list += f"\n  ... and {tools_count - 5} more"
+                    tools_info = f"\n\nAvailable Tools ({tools_count}):\n{tools_list}"
+                
+                QtWidgets.QMessageBox.information(
+                    self, "Test Successful", 
+                    f"✅ MCP server connection successful!\n\n"
+                    f"Server: {server_config.name}\n"
+                    f"Transport: {server_config.transport_type}\n"
+                    f"Tools: {tools_count}\n"
+                    f"Resources: {resources_count}"
+                    f"{tools_info}"
+                )
+                
+                log.log_info(f"[BinAssist] MCP server test successful: {server_config.name}")
+                log.log_info(f"[BinAssist] Tools found: {[tool['name'] for tool in result.get('tools', [])]}")
+                
+            else:
+                error_msg = result.get('error', 'Unknown error')
+                QtWidgets.QMessageBox.critical(
+                    self, "Test Failed", 
+                    f"❌ MCP server connection failed:\n\n{error_msg}"
+                )
+                log.log_error(f"[BinAssist] MCP server test failed: {error_msg}")
+                
+        except Exception as e:
+            log.log_error(f"[BinAssist] Error testing MCP server: {e}")
+            QtWidgets.QMessageBox.critical(self, "Test Error", f"Test failed with error: {str(e)}")
+            
+        finally:
+            # Restore button
+            if hasattr(self, 'test_button'):
+                self.test_button.setText(original_text)
+                self.test_button.setEnabled(True)
 
     def onApplyActionsClicked(self) -> None:
         """

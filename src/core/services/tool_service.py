@@ -69,7 +69,7 @@ class ToolService(BaseService):
             tool: Tool definition to register
         """
         self._tools[tool.name] = tool
-        self.logger.info(f"Registered tool: {tool.name}")
+        log.log_info(f"[BinAssist] Registered tool: {tool.name}")
     
     def get_tool_definitions(self) -> List[Dict[str, Any]]:
         """

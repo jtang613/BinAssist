@@ -4,8 +4,8 @@ Base service class for common functionality.
 
 from abc import ABC
 from typing import Optional, Callable, Any
-import logging
 import threading
+from binaryninja import log
 
 
 class ServiceError(Exception):
@@ -29,7 +29,6 @@ class BaseService(ABC):
             name: Name of the service for logging
         """
         self.name = name
-        self.logger = logging.getLogger(f"binassist.{name}")
         self._stop_event = threading.Event()
         self._error_handler: Optional[Callable[[Exception], None]] = None
     
@@ -50,13 +49,13 @@ class BaseService(ABC):
             error: The exception that occurred
             operation: Description of the operation that failed
         """
-        self.logger.error(f"Error during {operation}: {error}")
+        log.log_error(f"[BinAssist] Error during {operation}: {error}")
         
         if self._error_handler:
             try:
                 self._error_handler(error)
             except Exception as handler_error:
-                self.logger.error(f"Error in error handler: {handler_error}")
+                log.log_error(f"[BinAssist] Error in error handler: {handler_error}")
     
     def stop(self) -> None:
         """Stop any ongoing operations."""
