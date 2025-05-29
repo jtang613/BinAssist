@@ -1,4 +1,5 @@
 openai
+anthropic
 pysqlite3
 markdown
 httpx

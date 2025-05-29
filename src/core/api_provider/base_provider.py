@@ -102,6 +102,27 @@ class APIProvider(ABC):
         """
         return capability in self.get_capabilities()
     
+    def test_connectivity(self) -> str:
+        """
+        Test provider connectivity with a simple request.
+        
+        Returns:
+            Response text from the test request
+            
+        Raises:
+            APIProviderError: If the test fails
+            AuthenticationError: If authentication fails
+            RateLimitError: If rate limit is exceeded
+            NetworkError: If network issues occur
+        """
+        # Default implementation for chat providers
+        if self.supports_capability(ChatProvider):
+            from ..models.chat_message import MessageRole
+            test_messages = [ChatMessage(role=MessageRole.USER, content="This is a test. Please respond only with the word 'OK'.")]
+            return self.create_chat_completion(test_messages)
+        else:
+            raise APIProviderError("Provider does not support chat capabilities for testing")
+    
     def _handle_error(self, response: httpx.Response, operation: str) -> None:
         """
         Handle HTTP errors and convert to appropriate exceptions.

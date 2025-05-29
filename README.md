@@ -76,6 +76,7 @@ The following dependencies are required for this plugin:
 ## License
 
 This plugin is released under a MIT license.
+
 ## Metadata Version
 
 2

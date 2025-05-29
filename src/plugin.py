@@ -1,22 +1,20 @@
 from binaryninja import *
-from binaryninja.settings import Settings
+from binaryninja import log
 from binaryninjaui import SidebarWidget, SidebarWidgetType, UIActionHandler, SidebarWidgetLocation, \
     SidebarContextSensitivity, ViewFrame, ViewType, UIContext
 from binaryninja import FunctionGraphType, PythonScriptingProvider, PythonScriptingInstance
 from PySide6 import QtCore, QtGui, QtWidgets
 import markdown
-import logging
+import json
+import re
 
-# Enable debug logging for BinAssist
-try:
-    from .core.debug_logger import setup_debug_logging
-    debug_logger = setup_debug_logging(level=logging.DEBUG, log_to_file=True)
-    debug_logger.info("BinAssist plugin loading with debug logging enabled")
-except Exception as e:
-    print(f"Failed to setup debug logging: {e}")
+# BinAssist plugin uses Binary Ninja's native logging interface
+
+# Import new settings system
+from .core.settings import get_settings_manager, migrate_from_binary_ninja_settings
 
 from .llm_api import LlmApi
-from .llm_api import ToolCalling
+from .core.services.tool_service import ToolService
 
 class BinAssistWidget(SidebarWidget):
     """
@@ -36,20 +34,28 @@ class BinAssistWidget(SidebarWidget):
         try:
             super().__init__(name)
             
-            # Setup logging for this widget
-            self.logger = logging.getLogger(f"binassist.widget.{name}")
-            self.logger.info(f"Initializing BinAssistWidget: {name}")
+            # Use Binary Ninja's native logging
+            log.log_info(f"[BinAssist] Initializing BinAssistWidget: {name}")
             
-            self.settings = Settings()
-            self.logger.debug("Settings initialized")
+            # Initialize new settings system and perform migration if needed
+            try:
+                migrate_from_binary_ninja_settings(backup_existing=True)
+            except Exception as e:
+                log.log_warn(f"[BinAssist] Settings migration failed: {e}")
+            
+            self.settings = get_settings_manager()
+            log.log_debug("[BinAssist] Settings initialized with SQLite backend")
             
             self.LlmApi = LlmApi()
-            self.logger.debug("LlmApi initialized")
+            log.log_debug("[BinAssist] LlmApi initialized")
+            
+            self.tool_service = ToolService()
+            log.log_debug("[BinAssist] ToolService initialized")
             
             self.offset_addr = 0
             self.actionHandler = UIActionHandler()
             self.actionHandler.setupActionHandler(self)
-            self.logger.debug("Action handler setup completed")
+            log.log_debug("[BinAssist] Action handler setup completed")
             
             self.bv = None
             self.datatype = None
@@ -58,17 +64,23 @@ class BinAssistWidget(SidebarWidget):
             self.response = None
             self.session_log = []
 
+            # Add timeout timer for button state recovery
+            self.button_timeout_timer = QtCore.QTimer()
+            self.button_timeout_timer.timeout.connect(self._handle_button_timeout)
+            self.button_timeout_timer.setSingleShot(True)
+            log.log_debug("[BinAssist] Button timeout timer initialized")
+
             self.offset = QtWidgets.QLabel(hex(0))
 
             self._init_ui()
-            self.logger.info("BinAssistWidget initialization completed successfully")
+            log.log_info("[BinAssist] BinAssistWidget initialization completed successfully")
             
         except Exception as e:
             error_msg = f"Critical error during BinAssistWidget initialization: {type(e).__name__}: {e}"
             print(error_msg)  # Ensure it gets to console even if logging fails
             try:
-                self.logger.error(error_msg)
-                self.logger.exception("Full traceback:")
+                log.log_error(f"[BinAssist] {error_msg}")
+                log.log_error(f"[BinAssist] Full traceback: {e}")
             except:
                 pass
             raise
@@ -140,7 +152,7 @@ class BinAssistWidget(SidebarWidget):
 
         # Create and add the 'Use RAG' checkbox
         self.use_rag_checkbox = QtWidgets.QCheckBox("Use RAG")
-        self.use_rag_checkbox.setChecked(self.settings.get_bool('binassist.use_rag'))
+        self.use_rag_checkbox.setChecked(self.settings.get_boolean('use_rag'))
         self.use_rag_checkbox.stateChanged.connect(self.onUseRAGChanged)
         layout.addWidget(self.use_rag_checkbox)
 
@@ -176,7 +188,8 @@ class BinAssistWidget(SidebarWidget):
         filter_layout = QtWidgets.QVBoxLayout(filter_widget)
         
         self.filter_checkboxes = {}
-        for fn_dict in ToolCalling.FN_TEMPLATES:
+        tool_definitions = self.tool_service.get_tool_definitions()
+        for fn_dict in tool_definitions:
             if fn_dict["type"] == "function":
                 fn_name = f"{fn_dict['function']['name'].replace('_',' ')}: {fn_dict['function']['description']}"
                 checkbox = QtWidgets.QCheckBox(fn_name)
@@ -278,12 +291,28 @@ class BinAssistWidget(SidebarWidget):
         self.provider_config_layout.addRow("Model:", self.provider_model_edit)
         self.provider_config_layout.addRow("Max Tokens:", self.provider_tokens_spin)
         
-        # Save provider button
-        save_provider_layout = QtWidgets.QHBoxLayout()
-        save_provider_layout.addStretch()
+        # Connect auto-save events to all provider fields
+        self.provider_name_edit.editingFinished.connect(self.onProviderConfigChanged)
+        self.provider_type_combo.currentTextChanged.connect(self.onProviderConfigChanged)
+        self.provider_url_edit.editingFinished.connect(self.onProviderConfigChanged)
+        self.provider_key_edit.editingFinished.connect(self.onProviderConfigChanged)
+        self.provider_model_edit.editingFinished.connect(self.onProviderConfigChanged)
+        self.provider_tokens_spin.valueChanged.connect(self.onProviderConfigChanged)
+        
+        # Provider action buttons
+        provider_buttons_layout = QtWidgets.QHBoxLayout()
+        provider_buttons_layout.addStretch()
+        
+        self.test_provider_btn = QtWidgets.QPushButton("Test")
+        self.test_provider_btn.clicked.connect(self.testCurrentProvider)
+        self.test_provider_btn.setMaximumWidth(80)
+        provider_buttons_layout.addWidget(self.test_provider_btn)
+        
         self.save_provider_btn = QtWidgets.QPushButton("Save Provider")
         self.save_provider_btn.clicked.connect(self.saveCurrentProvider)
-        save_provider_layout.addWidget(self.save_provider_btn)
+        provider_buttons_layout.addWidget(self.save_provider_btn)
+        
+        save_provider_layout = provider_buttons_layout
         
         self.provider_config_group.setLayout(self.provider_config_layout)
         providers_layout.addWidget(self.provider_config_group)
@@ -309,35 +338,20 @@ class BinAssistWidget(SidebarWidget):
         system_context_layout.addWidget(context_label)
         
         self.system_context_edit = QtWidgets.QTextEdit()
-        self.system_context_edit.setPlaceholderText("Enter system context/instructions for the LLM...")
+        self.system_context_edit.setPlaceholderText("Enter custom system context/instructions for the LLM (leave empty to use default)...")
         self.system_context_edit.setMaximumHeight(120)
         
-        # Load default system prompt from LlmApi
-        try:
-            default_prompt = self.LlmApi.SYSTEM_PROMPT.strip()
-            self.system_context_edit.setPlainText(default_prompt)
-            self.original_system_context = default_prompt  # Store for revert
-        except:
-            self.original_system_context = ""
+        # Load current system prompt from settings (empty means use default)
+        current_prompt = self.settings.get_string('system_prompt', '')
+        self.system_context_edit.setPlainText(current_prompt)
+        
+        # Auto-save when text changes (with debouncing)
+        self.system_context_timer = QtCore.QTimer()
+        self.system_context_timer.setSingleShot(True)
+        self.system_context_timer.timeout.connect(self.onSystemContextChanged)
+        self.system_context_edit.textChanged.connect(lambda: self.system_context_timer.start(1000))  # 1 second delay
         
         system_context_layout.addWidget(self.system_context_edit)
-        
-        # Save and Revert buttons
-        context_buttons_layout = QtWidgets.QHBoxLayout()
-        context_buttons_layout.addStretch()
-        
-        save_context_button = QtWidgets.QPushButton("Save")
-        save_context_button.clicked.connect(self.onSaveSystemContext)
-        save_context_button.setMaximumWidth(80)
-        
-        revert_context_button = QtWidgets.QPushButton("Revert")
-        revert_context_button.clicked.connect(self.onRevertSystemContext)
-        revert_context_button.setMaximumWidth(80)
-        
-        context_buttons_layout.addWidget(save_context_button)
-        context_buttons_layout.addWidget(revert_context_button)
-        
-        system_context_layout.addLayout(context_buttons_layout)
         system_context_group.setLayout(system_context_layout)
         layout.addWidget(system_context_group)
 
@@ -349,14 +363,23 @@ class BinAssistWidget(SidebarWidget):
         il_level_layout = QtWidgets.QHBoxLayout()
         il_level_label = QtWidgets.QLabel("Default IL Level:")
         self.il_level_combo = QtWidgets.QComboBox()
-        self.il_level_combo.addItems([
+        il_level_options = [
             "Assembly (ASM)",
             "Low Level IL (LLIL)", 
             "Medium Level IL (MLIL)",
             "High Level IL (HLIL)",
             "Pseudo-C"
-        ])
-        self.il_level_combo.setCurrentIndex(3)  # Default to HLIL
+        ]
+        self.il_level_combo.addItems(il_level_options)
+        
+        # Load from settings
+        saved_il_level = self.settings.get_string('default_il_level', 'HLIL')
+        il_level_map = {
+            'ASM': 0, 'LLIL': 1, 'MLIL': 2, 'HLIL': 3, 'Pseudo-C': 4
+        }
+        self.il_level_combo.setCurrentIndex(il_level_map.get(saved_il_level, 3))
+        self.il_level_combo.currentTextChanged.connect(self.onAnalysisOptionChanged)
+        
         il_level_layout.addWidget(il_level_label)
         il_level_layout.addWidget(self.il_level_combo)
         il_level_layout.addStretch()
@@ -367,8 +390,9 @@ class BinAssistWidget(SidebarWidget):
         context_label = QtWidgets.QLabel("Context Lines:")
         self.context_spin = QtWidgets.QSpinBox()
         self.context_spin.setRange(0, 100)
-        self.context_spin.setValue(10)
+        self.context_spin.setValue(self.settings.get_integer('context_lines', 10))
         self.context_spin.setToolTip("Number of surrounding lines to include for context")
+        self.context_spin.valueChanged.connect(self.onAnalysisOptionChanged)
         context_layout.addWidget(context_label)
         context_layout.addWidget(self.context_spin)
         context_layout.addStretch()
@@ -378,12 +402,17 @@ class BinAssistWidget(SidebarWidget):
         mode_layout = QtWidgets.QHBoxLayout()
         mode_label = QtWidgets.QLabel("Analysis Mode:")
         self.analysis_mode_combo = QtWidgets.QComboBox()
-        self.analysis_mode_combo.addItems([
-            "Conservative", 
-            "Balanced", 
-            "Aggressive"
-        ])
-        self.analysis_mode_combo.setCurrentIndex(1)  # Default to Balanced
+        analysis_mode_options = ["Conservative", "Balanced", "Aggressive"]
+        self.analysis_mode_combo.addItems(analysis_mode_options)
+        
+        # Load from settings
+        saved_mode = self.settings.get_string('analysis_mode', 'Balanced')
+        try:
+            self.analysis_mode_combo.setCurrentIndex(analysis_mode_options.index(saved_mode))
+        except ValueError:
+            self.analysis_mode_combo.setCurrentIndex(1)  # Default to Balanced
+        self.analysis_mode_combo.currentTextChanged.connect(self.onAnalysisOptionChanged)
+        
         mode_layout.addWidget(mode_label)
         mode_layout.addWidget(self.analysis_mode_combo)
         mode_layout.addStretch()
@@ -393,8 +422,17 @@ class BinAssistWidget(SidebarWidget):
         verbosity_layout = QtWidgets.QHBoxLayout()
         verbosity_label = QtWidgets.QLabel("Response Verbosity:")
         self.verbosity_combo = QtWidgets.QComboBox()
-        self.verbosity_combo.addItems(["Concise", "Detailed", "Comprehensive"])
-        self.verbosity_combo.setCurrentIndex(1)  # Default to Detailed
+        verbosity_options = ["Concise", "Detailed", "Comprehensive"]
+        self.verbosity_combo.addItems(verbosity_options)
+        
+        # Load from settings
+        saved_verbosity = self.settings.get_string('response_verbosity', 'Detailed')
+        try:
+            self.verbosity_combo.setCurrentIndex(verbosity_options.index(saved_verbosity))
+        except ValueError:
+            self.verbosity_combo.setCurrentIndex(1)  # Default to Detailed
+        self.verbosity_combo.currentTextChanged.connect(self.onAnalysisOptionChanged)
+        
         verbosity_layout.addWidget(verbosity_label)
         verbosity_layout.addWidget(self.verbosity_combo)
         verbosity_layout.addStretch()
@@ -402,23 +440,28 @@ class BinAssistWidget(SidebarWidget):
 
         # Checkboxes
         self.include_comments_check = QtWidgets.QCheckBox("Include existing comments in analysis")
-        self.include_comments_check.setChecked(True)
+        self.include_comments_check.setChecked(self.settings.get_boolean('include_comments', True))
+        self.include_comments_check.stateChanged.connect(self.onAnalysisOptionChanged)
         analysis_layout.addWidget(self.include_comments_check)
 
         self.include_imports_check = QtWidgets.QCheckBox("Include import/library information")
-        self.include_imports_check.setChecked(True)
+        self.include_imports_check.setChecked(self.settings.get_boolean('include_imports', True))
+        self.include_imports_check.stateChanged.connect(self.onAnalysisOptionChanged)
         analysis_layout.addWidget(self.include_imports_check)
 
         self.auto_apply_check = QtWidgets.QCheckBox("Auto-apply high-confidence suggestions")
-        self.auto_apply_check.setChecked(False)
+        self.auto_apply_check.setChecked(self.settings.get_boolean('auto_apply_suggestions', False))
+        self.auto_apply_check.stateChanged.connect(self.onAnalysisOptionChanged)
         analysis_layout.addWidget(self.auto_apply_check)
 
         self.syntax_highlight_check = QtWidgets.QCheckBox("Enable syntax highlighting in responses")
-        self.syntax_highlight_check.setChecked(True)
+        self.syntax_highlight_check.setChecked(self.settings.get_boolean('syntax_highlighting', True))
+        self.syntax_highlight_check.stateChanged.connect(self.onAnalysisOptionChanged)
         analysis_layout.addWidget(self.syntax_highlight_check)
 
         self.show_addresses_check = QtWidgets.QCheckBox("Show addresses in code snippets")
-        self.show_addresses_check.setChecked(True)
+        self.show_addresses_check.setChecked(self.settings.get_boolean('show_addresses', True))
+        self.show_addresses_check.stateChanged.connect(self.onAnalysisOptionChanged)
         analysis_layout.addWidget(self.show_addresses_check)
 
         analysis_group.setLayout(analysis_layout)
@@ -430,7 +473,7 @@ class BinAssistWidget(SidebarWidget):
 
         # RAG Settings
         self.use_rag_check = QtWidgets.QCheckBox("Enable RAG (Retrieval Augmented Generation)")
-        self.use_rag_check.setChecked(self.settings.get_bool('binassist.use_rag'))
+        self.use_rag_check.setChecked(self.settings.get_boolean('use_rag'))
         self.use_rag_check.stateChanged.connect(self.onUseRAGChanged)
         general_layout.addWidget(self.use_rag_check)
 
@@ -439,7 +482,8 @@ class BinAssistWidget(SidebarWidget):
         rag_path_layout.addWidget(QtWidgets.QLabel("RAG Database Path:"))
         
         self.rag_path_edit = QtWidgets.QLineEdit()
-        self.rag_path_edit.setText(self.settings.get_string('binassist.rag_db_path'))
+        self.rag_path_edit.setText(self.settings.get_string('rag_db_path'))
+        self.rag_path_edit.editingFinished.connect(self.onRagPathChanged)
         rag_path_layout.addWidget(self.rag_path_edit)
         
         rag_browse_btn = QtWidgets.QPushButton("Browse")
@@ -454,7 +498,8 @@ class BinAssistWidget(SidebarWidget):
         rlhf_path_layout.addWidget(QtWidgets.QLabel("RLHF Database Path:"))
         
         self.rlhf_path_edit = QtWidgets.QLineEdit()
-        self.rlhf_path_edit.setText(self.settings.get_string('binassist.rlhf_db'))
+        self.rlhf_path_edit.setText(self.settings.get_string('rlhf_db_path'))
+        self.rlhf_path_edit.editingFinished.connect(self.onRlhfPathChanged)
         rlhf_path_layout.addWidget(self.rlhf_path_edit)
         
         rlhf_browse_btn = QtWidgets.QPushButton("Browse")
@@ -608,7 +653,7 @@ class BinAssistWidget(SidebarWidget):
         return line
 
     def onUseRAGChanged(self, state):
-        self.settings.set_bool('binassist.use_rag', state == QtCore.Qt.Checked)
+        self.settings.set_boolean('use_rag', state == QtCore.Qt.Checked)
 
     def onRAGInitClicked(self):
         file_dialog = QtWidgets.QFileDialog()
@@ -713,70 +758,76 @@ class BinAssistWidget(SidebarWidget):
         """
         Submits the custom query or stops a running query based on the button state.
         """
-        self.logger.info("onSubmitQueryClicked triggered")
+        log.log_info("[BinAssist] onSubmitQueryClicked triggered")
         
         try:
             # Toggle functionality between Submit and Stop
             self.submit_button = self.sender()
-            self.logger.debug(f"Submit button text: {self.submit_button.text()}")
+            log.log_debug(f"[BinAssist] Submit button text: {self.submit_button.text()}")
 
             if self.submit_button.text() == "Submit":
                 self.submit_label = self.submit_button.text()
                 
                 # Start a new query
                 query = self.query_edit.toPlainText()
-                self.logger.debug(f"Original query length: {len(query)}")
+                log.log_debug(f"[BinAssist] Original query length: {len(query)}")
                 
                 query = self._process_custom_query(query)
-                self.logger.debug(f"Processed query length: {len(query)}")
+                log.log_debug(f"[BinAssist] Processed query length: {len(query)}")
                 
                 self.session_log.append({"user": query, "assistant": "Awaiting response..."})
 
                 # Prepend the session log to the query for context
                 full_query = "\n".join([f"User: {entry['user']}\nAssistant: {entry['assistant']}" for entry in self.session_log]) + f"\nUser: {query}"
-                self.logger.debug(f"Full query length: {len(full_query)}")
+                log.log_debug(f"[BinAssist] Full query length: {len(full_query)}")
 
                 # Update system context if modified
                 if hasattr(self, 'system_context_edit'):
                     current_context = self.system_context_edit.toPlainText().strip()
                     if current_context and current_context != self.LlmApi.SYSTEM_PROMPT:
-                        self.logger.debug("Using custom system context for this query")
+                        log.log_debug("[BinAssist] Using custom system context for this query")
                         original_prompt = self.LlmApi.SYSTEM_PROMPT
                         self.LlmApi.SYSTEM_PROMPT = current_context
                         
                         # Store the running request
-                        self.logger.debug("Calling LlmApi.query with custom context")
+                        log.log_debug("[BinAssist] Calling LlmApi.query with custom context")
                         self.request = self.LlmApi.query(full_query, self.display_custom_response)
                         
                         # Restore original prompt
                         self.LlmApi.SYSTEM_PROMPT = original_prompt
-                        self.logger.debug("LlmApi.query call completed with custom context")
+                        log.log_debug("[BinAssist] LlmApi.query call completed with custom context")
                     else:
                         # Store the running request
-                        self.logger.debug("Calling LlmApi.query")
+                        log.log_debug("[BinAssist] Calling LlmApi.query (else branch)")
                         self.request = self.LlmApi.query(full_query, self.display_custom_response)
-                        self.logger.debug("LlmApi.query call completed")
+                        log.log_debug("[BinAssist] LlmApi.query call completed (else branch)")
                 else:
                     # Store the running request
-                    self.logger.debug("Calling LlmApi.query")
+                    log.log_debug("[BinAssist] Calling LlmApi.query (main else)")
                     self.request = self.LlmApi.query(full_query, self.display_custom_response)
-                    self.logger.debug("LlmApi.query call completed")
+                    log.log_debug("[BinAssist] LlmApi.query call completed (main else)")
 
                 # Update button to Stop
                 self.submit_button.setText("Stop")
-                self.logger.debug("Button text changed to Stop")
+                log.log_debug("[BinAssist] Button text changed to Stop")
+                
+                # Start timeout timer (5 minutes = 300000 ms)
+                self.button_timeout_timer.start(300000)  # 5 minute timeout
+                log.log_debug("[BinAssist] Button timeout timer started (5 minutes)")
             else:
-                self.logger.debug("Stopping running query")
+                log.log_debug("[BinAssist] Stopping running query")
                 # Stop the running query
                 self.LlmApi.stop_threads()
+                # Stop the timeout timer
+                self.button_timeout_timer.stop()
                 # Revert button back to Submit
                 self.submit_button.setText(self.submit_label)
-                self.logger.debug("Query stopped and button reverted")
+                log.log_debug("[BinAssist] Query stopped and button reverted")
                 
         except Exception as e:
             error_msg = f"Error in onSubmitQueryClicked: {type(e).__name__}: {e}"
-            self.logger.error(error_msg)
-            self.logger.exception("Full traceback:")
+            log.log_error(f"[BinAssist] {error_msg}")
+            log.log_error(f"[BinAssist] Full traceback: {e}")
             
             # Show error to user
             try:
@@ -784,8 +835,10 @@ class BinAssistWidget(SidebarWidget):
             except:
                 pass  # Don't let error dialog crash us too
                 
-            # Reset button state
+            # Reset button state and stop timer
             try:
+                if hasattr(self, 'button_timeout_timer'):
+                    self.button_timeout_timer.stop()
                 if hasattr(self, 'submit_button') and hasattr(self, 'submit_label'):
                     self.submit_button.setText(self.submit_label)
             except:
@@ -797,32 +850,68 @@ class BinAssistWidget(SidebarWidget):
         Event for the 'Analyze Function' button.
         Toggles the button between 'Analyze Function' and 'Stop'.
         """
-        self.submit_button = self.sender()
+        log.log_info("[BinAssist] onAnalyzeFunctionClicked triggered")
+        
+        try:
+            self.submit_button = self.sender()
+            log.log_debug(f"[BinAssist] Analyze button text: {self.submit_button.text()}")
 
-        if self.submit_button.text() == "Analyze Function":
-            self.submit_label = self.submit_button.text()
-            # Start analysis
-            datatype = self.datatype.split(':')[1]
-            il_type = self.il_type.name
-            func = self.get_func_text()
+            if self.submit_button.text() == "Analyze Function":
+                self.submit_label = self.submit_button.text()
+                log.log_debug("[BinAssist] Starting function analysis")
+                
+                # Start analysis
+                datatype = self.datatype.split(':')[1]
+                il_type = self.il_type.name
+                func = self.get_func_text()
 
-            for fn_name, checkbox in self.filter_checkboxes.items():
-                if checkbox.isChecked():
-                    action = fn_name.split(':')[0].replace(' ', '_')
-                    
-                    # Trigger LLM query and store request
-                    self.request = self.LlmApi.analyze_function(
-                        action, self.bv, self.offset_addr, datatype, il_type, func, self.display_analyze_response
-                    )
+                for fn_name, checkbox in self.filter_checkboxes.items():
+                    if checkbox.isChecked():
+                        action = fn_name.split(':')[0].replace(' ', '_')
+                        
+                        log.log_debug(f"[BinAssist] Calling LlmApi.analyze_function for action: {action}")
+                        # Trigger LLM query and store request
+                        self.request = self.LlmApi.analyze_function(
+                            action, self.bv, self.offset_addr, datatype, il_type, func, self.display_analyze_response
+                        )
+                        log.log_debug("[BinAssist] LlmApi.analyze_function call completed")
 
-            # Change the button text to "Stop"
-            self.submit_button.setText("Stop")
-        else:
-            # Stop the running query
-            self.LlmApi.stop_threads()
+                # Change the button text to "Stop"
+                self.submit_button.setText("Stop")
+                log.log_debug("[BinAssist] Analyze button text changed to Stop")
+                
+                # Start timeout timer (5 minutes = 300000 ms)
+                self.button_timeout_timer.start(300000)  # 5 minute timeout
+                log.log_debug("[BinAssist] Analyze button timeout timer started (5 minutes)")
+                
+            else:
+                log.log_debug("[BinAssist] Stopping running analysis")
+                # Stop the running query
+                self.LlmApi.stop_threads()
+                # Stop the timeout timer
+                self.button_timeout_timer.stop()
+                # Revert the button back to "Analyze Function"
+                self.submit_button.setText(self.submit_label)
+                log.log_debug("[BinAssist] Analysis stopped and button reverted")
+                
+        except Exception as e:
+            error_msg = f"Error in onAnalyzeFunctionClicked: {type(e).__name__}: {e}"
+            log.log_error(f"[BinAssist] {error_msg}")
             
-            # Revert the button back to "Analyze Function"
-            self.submit_button.setText(self.submit_label)
+            # Show error to user
+            try:
+                QtWidgets.QMessageBox.critical(self, "Analysis Error", f"An error occurred: {str(e)}")
+            except:
+                pass  # Don't let error dialog crash us too
+                
+            # Reset button state and stop timer
+            try:
+                if hasattr(self, 'button_timeout_timer'):
+                    self.button_timeout_timer.stop()
+                if hasattr(self, 'submit_button') and hasattr(self, 'submit_label'):
+                    self.submit_button.setText(self.submit_label)
+            except:
+                pass
 
     def onAnalyzeClearClicked(self) -> None:
         """
@@ -832,28 +921,11 @@ class BinAssistWidget(SidebarWidget):
 
     def loadProvidersFromSettings(self) -> None:
         """
-        Load providers from Binary Ninja settings.
+        Load providers from SQLite settings.
         """
         try:
-            self.providers = []
-            provider_names = []
-            
-            for i in range(1, 4):  # provider1, provider2, provider3
-                try:
-                    name = self.settings.get_string(f'binassist.provider{i}_name')
-                    if name:
-                        provider_data = {
-                            'name': name,
-                            'provider_type': self.settings.get_string(f'binassist.provider{i}_type'),
-                            'base_url': self.settings.get_string(f'binassist.provider{i}_host'),
-                            'api_key': self.settings.get_string(f'binassist.provider{i}_key'),
-                            'model': self.settings.get_string(f'binassist.provider{i}_model'),
-                            'max_tokens': self.settings.get_integer(f'binassist.provider{i}_max_tokens')
-                        }
-                        self.providers.append(provider_data)
-                        provider_names.append(name)
-                except:
-                    continue
+            # Load providers from new JSON-based storage
+            self.providers = self.settings.get_json('api_providers', [])
             
             # Update UI
             self.updateProvidersList()
@@ -864,7 +936,7 @@ class BinAssistWidget(SidebarWidget):
                 self.providers_list.setCurrentRow(0)
                 
         except Exception as e:
-            self.logger.error(f"Error loading providers from settings: {e}")
+            log.log_error(f"[BinAssist] Error loading providers from settings: {e}")
 
     def updateProvidersList(self) -> None:
         """
@@ -878,22 +950,58 @@ class BinAssistWidget(SidebarWidget):
         """
         Update the active provider combo box.
         """
+        # Temporarily disconnect signal to avoid triggering changes during setup
+        self.active_provider_combo.currentTextChanged.disconnect()
+        
         current_text = self.active_provider_combo.currentText()
         self.active_provider_combo.clear()
         
         provider_names = [p['name'] for p in self.providers]
         self.active_provider_combo.addItems(provider_names)
         
-        # Restore selection if possible
-        if current_text in provider_names:
+        # Always try to restore from settings first, then fall back to current selection
+        active_provider = self.settings.get_string('active_provider', '')
+        
+        if active_provider and active_provider in provider_names:
+            # Restore from settings
+            index = provider_names.index(active_provider)
+            self.active_provider_combo.setCurrentIndex(index)
+            log.log_debug(f"[BinAssist] Restored active provider from settings: {active_provider}")
+        elif current_text and current_text in provider_names:
+            # Fall back to current selection
             index = provider_names.index(current_text)
             self.active_provider_combo.setCurrentIndex(index)
+            log.log_debug(f"[BinAssist] Restored active provider from current: {current_text}")
         elif provider_names:
-            # Default to current active provider from settings
-            active_provider = self.settings.get_string('binassist.active_provider')
-            if active_provider in provider_names:
-                index = provider_names.index(active_provider)
-                self.active_provider_combo.setCurrentIndex(index)
+            # Default to first provider and save it as active
+            self.active_provider_combo.setCurrentIndex(0)
+            self.settings.set_string('active_provider', provider_names[0])
+            log.log_debug(f"[BinAssist] Defaulted to first provider: {provider_names[0]}")
+        
+        # Reconnect signal
+        self.active_provider_combo.currentTextChanged.connect(self.onActiveProviderChanged)
+    
+    def _disconnect_provider_auto_save(self) -> None:
+        """Temporarily disconnect provider auto-save signals."""
+        try:
+            self.provider_name_edit.editingFinished.disconnect(self.onProviderConfigChanged)
+            self.provider_type_combo.currentTextChanged.disconnect(self.onProviderConfigChanged)
+            self.provider_url_edit.editingFinished.disconnect(self.onProviderConfigChanged)
+            self.provider_key_edit.editingFinished.disconnect(self.onProviderConfigChanged)
+            self.provider_model_edit.editingFinished.disconnect(self.onProviderConfigChanged)
+            self.provider_tokens_spin.valueChanged.disconnect(self.onProviderConfigChanged)
+        except Exception as e:
+            # Signals might already be disconnected
+            log.log_debug(f"[BinAssist] Note: Some auto-save signals were already disconnected: {e}")
+    
+    def _connect_provider_auto_save(self) -> None:
+        """Reconnect provider auto-save signals."""
+        self.provider_name_edit.editingFinished.connect(self.onProviderConfigChanged)
+        self.provider_type_combo.currentTextChanged.connect(self.onProviderConfigChanged)
+        self.provider_url_edit.editingFinished.connect(self.onProviderConfigChanged)
+        self.provider_key_edit.editingFinished.connect(self.onProviderConfigChanged)
+        self.provider_model_edit.editingFinished.connect(self.onProviderConfigChanged)
+        self.provider_tokens_spin.valueChanged.connect(self.onProviderConfigChanged)
 
     def onProviderSelected(self, row: int) -> None:
         """
@@ -903,18 +1011,28 @@ class BinAssistWidget(SidebarWidget):
             self.current_provider_index = row
             provider = self.providers[row]
             
-            # Load provider data into form
-            self.provider_name_edit.setText(provider['name'])
+            # Temporarily disconnect auto-save signals to prevent premature saves
+            self._disconnect_provider_auto_save()
             
-            provider_type = provider['provider_type']
-            index = self.provider_type_combo.findText(provider_type)
-            if index >= 0:
-                self.provider_type_combo.setCurrentIndex(index)
-            
-            self.provider_url_edit.setText(provider['base_url'])
-            self.provider_key_edit.setText(provider['api_key'])
-            self.provider_model_edit.setText(provider['model'])
-            self.provider_tokens_spin.setValue(provider['max_tokens'])
+            try:
+                log.log_debug(f"[BinAssist] Loading provider {row}: {provider['name']} ({provider['provider_type']}) - {provider['model']}")
+                
+                # Load provider data into form
+                self.provider_name_edit.setText(provider['name'])
+                
+                provider_type = provider['provider_type']
+                index = self.provider_type_combo.findText(provider_type)
+                if index >= 0:
+                    self.provider_type_combo.setCurrentIndex(index)
+                
+                self.provider_url_edit.setText(provider['base_url'])
+                self.provider_key_edit.setText(provider['api_key'])
+                self.provider_model_edit.setText(provider['model'])
+                self.provider_tokens_spin.setValue(provider['max_tokens'])
+                
+            finally:
+                # Reconnect auto-save signals
+                self._connect_provider_auto_save()
 
     def addProvider(self) -> None:
         """
@@ -1002,44 +1120,25 @@ class BinAssistWidget(SidebarWidget):
             QtWidgets.QMessageBox.information(self, "Success", "Provider saved successfully!")
             
         except Exception as e:
-            self.logger.error(f"Error saving provider: {e}")
+            log.log_error(f"[BinAssist] Error saving provider: {e}")
             QtWidgets.QMessageBox.critical(self, "Error", f"Failed to save provider: {str(e)}")
 
     def saveProvidersToSettings(self) -> None:
         """
-        Save providers to Binary Ninja settings.
+        Save providers to SQLite settings.
         """
-        # Save up to 3 providers
-        for i in range(3):
-            if i < len(self.providers):
-                provider = self.providers[i]
-                self.settings.set_string(f'binassist.provider{i+1}_name', provider['name'])
-                self.settings.set_string(f'binassist.provider{i+1}_type', provider['provider_type'])
-                self.settings.set_string(f'binassist.provider{i+1}_host', provider['base_url'])
-                self.settings.set_string(f'binassist.provider{i+1}_key', provider['api_key'])
-                self.settings.set_string(f'binassist.provider{i+1}_model', provider['model'])
-                self.settings.set_integer(f'binassist.provider{i+1}_max_tokens', provider['max_tokens'])
-            else:
-                # Clear unused provider slots
-                self.settings.set_string(f'binassist.provider{i+1}_name', '')
-        
-        # Update active provider enum options in Binary Ninja settings
-        if hasattr(self.settings, 'set_enum_values'):
-            provider_names = [p['name'] for p in self.providers]
-            try:
-                self.settings.set_enum_values('binassist.active_provider', provider_names)
-            except:
-                pass  # Ignore if not supported
+        # Save providers as JSON array
+        self.settings.set_json('api_providers', self.providers)
 
     def onActiveProviderChanged(self, provider_name: str) -> None:
         """
         Handle active provider change.
         """
         if provider_name:
-            self.settings.set_string('binassist.active_provider', provider_name)
+            self.settings.set_string('active_provider', provider_name)
             # Refresh API provider
             self.LlmApi.api_provider = self.LlmApi.get_active_provider()
-            self.logger.info(f"Active provider changed to: {provider_name}")
+            log.log_info(f"[BinAssist] Active provider changed to: {provider_name}")
 
     def clearProviderForm(self) -> None:
         """
@@ -1059,7 +1158,7 @@ class BinAssistWidget(SidebarWidget):
         path = QtWidgets.QFileDialog.getExistingDirectory(self, "Select RAG Database Directory")
         if path:
             self.rag_path_edit.setText(path)
-            self.settings.set_string('binassist.rag_db_path', path)
+            self.onRagPathChanged()  # Trigger auto-save
 
     def browseRlhfPath(self) -> None:
         """
@@ -1068,40 +1167,251 @@ class BinAssistWidget(SidebarWidget):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Select RLHF Database File", "", "Database Files (*.db)")
         if path:
             self.rlhf_path_edit.setText(path)
-            self.settings.set_string('binassist.rlhf_db', path)
+            self.onRlhfPathChanged()  # Trigger auto-save
 
-    def onSaveSystemContext(self) -> None:
+    def onSystemContextChanged(self) -> None:
         """
-        Save the current system context to the LlmApi.
+        Auto-save system context when it changes.
         """
         try:
-            new_context = self.system_context_edit.toPlainText()
+            new_context = self.system_context_edit.toPlainText().strip()
+            
+            # Save to settings (empty string means use default)
+            self.settings.set_string('system_prompt', new_context)
+            
             # Update the LlmApi system prompt
-            self.LlmApi.SYSTEM_PROMPT = new_context
-            self.original_system_context = new_context
-            self.logger.info("System context saved successfully")
+            if new_context:
+                self.LlmApi.SYSTEM_PROMPT = new_context
+            else:
+                # Use default system prompt
+                default_prompt = self.settings.get_setting_definition('system_prompt')['default_value']
+                self.LlmApi.SYSTEM_PROMPT = default_prompt
             
-            # Show confirmation
-            QtWidgets.QMessageBox.information(self, "Success", "System context saved successfully!")
+            log.log_debug(f"[BinAssist] System context auto-saved: {'custom' if new_context else 'default'}")
             
         except Exception as e:
-            self.logger.error(f"Error saving system context: {e}")
-            QtWidgets.QMessageBox.critical(self, "Error", f"Failed to save system context: {str(e)}")
-
-    def onRevertSystemContext(self) -> None:
+            log.log_error(f"[BinAssist] Error auto-saving system context: {e}")
+    
+    def onProviderConfigChanged(self) -> None:
         """
-        Revert the system context to the original/saved version.
+        Auto-save provider configuration when any field changes.
         """
         try:
-            self.system_context_edit.setPlainText(self.original_system_context)
-            self.logger.info("System context reverted")
+            if hasattr(self, 'current_provider_index') and self.current_provider_index >= 0:
+                # Update the current provider in memory
+                if self.current_provider_index < len(self.providers):
+                    updated_provider = {
+                        'name': self.provider_name_edit.text(),
+                        'provider_type': self.provider_type_combo.currentText(),
+                        'base_url': self.provider_url_edit.text(),
+                        'api_key': self.provider_key_edit.text(),
+                        'model': self.provider_model_edit.text(),
+                        'max_tokens': self.provider_tokens_spin.value(),
+                        'timeout': 120,
+                        'enabled': True
+                    }
+                    
+                    log.log_debug(f"[BinAssist] Auto-saving provider {self.current_provider_index}: {updated_provider['name']} ({updated_provider['provider_type']}) - {updated_provider['model']}")
+                    self.providers[self.current_provider_index] = updated_provider
+                    
+                    # Auto-save to settings
+                    self.saveProvidersToSettings()
+                    self.updateProvidersList()
+                    self.updateActiveProviderCombo()
+                    
+                    # Refresh API provider if this is the active one
+                    active_provider = self.settings.get_string('active_provider')
+                    if self.providers[self.current_provider_index]['name'] == active_provider:
+                        self.LlmApi.api_provider = self.LlmApi.get_active_provider()
+                    
+                    log.log_debug("[BinAssist] Provider configuration auto-saved")
+                    
         except Exception as e:
-            self.logger.error(f"Error reverting system context: {e}")
-            QtWidgets.QMessageBox.critical(self, "Error", f"Failed to revert system context: {str(e)}")
+            log.log_error(f"[BinAssist] Error auto-saving provider config: {e}")
+    
+    def onRagPathChanged(self) -> None:
+        """Auto-save RAG database path."""
+        try:
+            path = self.rag_path_edit.text()
+            self.settings.set_string('rag_db_path', path)
+            log.log_debug(f"[BinAssist] RAG path auto-saved: {path}")
+        except Exception as e:
+            log.log_error(f"[BinAssist] Error auto-saving RAG path: {e}")
+    
+    def onRlhfPathChanged(self) -> None:
+        """Auto-save RLHF database path."""
+        try:
+            path = self.rlhf_path_edit.text()
+            self.settings.set_string('rlhf_db_path', path)
+            log.log_debug(f"[BinAssist] RLHF path auto-saved: {path}")
+        except Exception as e:
+            log.log_error(f"[BinAssist] Error auto-saving RLHF path: {e}")
+    
+    def onAnalysisOptionChanged(self) -> None:
+        """Auto-save analysis options when they change."""
+        try:
+            # Save IL level
+            il_level_text = self.il_level_combo.currentText()
+            il_level_map = {
+                'Assembly (ASM)': 'ASM',
+                'Low Level IL (LLIL)': 'LLIL', 
+                'Medium Level IL (MLIL)': 'MLIL',
+                'High Level IL (HLIL)': 'HLIL',
+                'Pseudo-C': 'Pseudo-C'
+            }
+            self.settings.set_string('default_il_level', il_level_map.get(il_level_text, 'HLIL'))
+            
+            # Save context lines
+            self.settings.set_integer('context_lines', self.context_spin.value())
+            
+            # Save analysis mode
+            self.settings.set_string('analysis_mode', self.analysis_mode_combo.currentText())
+            
+            # Save response verbosity
+            self.settings.set_string('response_verbosity', self.verbosity_combo.currentText())
+            
+            # Save checkboxes
+            self.settings.set_boolean('include_comments', self.include_comments_check.isChecked())
+            self.settings.set_boolean('include_imports', self.include_imports_check.isChecked())
+            self.settings.set_boolean('auto_apply_suggestions', self.auto_apply_check.isChecked())
+            self.settings.set_boolean('syntax_highlighting', self.syntax_highlight_check.isChecked())
+            self.settings.set_boolean('show_addresses', self.show_addresses_check.isChecked())
+            
+            log.log_debug("[BinAssist] Analysis options auto-saved")
+            
+        except Exception as e:
+            log.log_error(f"[BinAssist] Error auto-saving analysis options: {e}")
+    
+    def testCurrentProvider(self) -> None:
+        """
+        Test the current provider configuration with a simple query.
+        """
+        log.log_info(f"[BinAssist] testCurrentProvider called")
+        try:
+            # Temporarily save current provider config
+            current_config = {
+                'name': self.provider_name_edit.text(),
+                'provider_type': self.provider_type_combo.currentText(),
+                'base_url': self.provider_url_edit.text(),
+                'api_key': self.provider_key_edit.text(),
+                'model': self.provider_model_edit.text(),
+                'max_tokens': self.provider_tokens_spin.value()
+            }
+            
+            log.log_debug(f"[BinAssist] Current provider config: {current_config}")
+            
+            # Validate required fields
+            if not current_config['name'] or not current_config['base_url'] or not current_config['model']:
+                QtWidgets.QMessageBox.warning(self, "Test Failed", "Please fill in Name, Base URL, and Model fields.")
+                return
+            
+            if current_config['provider_type'] in ['openai', 'anthropic'] and not current_config['api_key']:
+                QtWidgets.QMessageBox.warning(self, "Test Failed", "API Key is required for this provider type.")
+                return
+            
+            # Disable test button and show progress
+            self.test_provider_btn.setText("Testing...")
+            self.test_provider_btn.setEnabled(False)
+            QtWidgets.QApplication.processEvents()
+            
+            # Create a temporary client for testing
+            self._test_provider_connectivity(current_config)
+            
+        except Exception as e:
+            log.log_error(f"[BinAssist] Error testing provider: {e}")
+            QtWidgets.QMessageBox.critical(self, "Test Error", f"Test failed with error: {str(e)}")
+            
+        finally:
+            # Re-enable test button
+            self.test_provider_btn.setText("Test")
+            self.test_provider_btn.setEnabled(True)
+    
+    def _test_provider_connectivity(self, config: dict) -> None:
+        """
+        Test provider connectivity using the provider system.
+        
+        This method delegates to the provider's own test_connectivity method,
+        following proper OOP principles instead of duplicating provider logic.
+        """
+        try:
+            log.log_info(f"[BinAssist] _test_provider_connectivity starting for: {config}")
+            
+            from .core.api_provider.factory import provider_registry
+            from .core.api_provider.config import APIProviderConfig, ProviderType
+            
+            log.log_debug(f"[BinAssist] Imported provider_registry: {provider_registry}")
+            log.log_debug(f"[BinAssist] Registry type: {type(provider_registry)}")
+            log.log_debug(f"[BinAssist] Registry factories: {getattr(provider_registry, '_factories', 'No _factories attr')}")
+            
+            # Convert dict config to APIProviderConfig
+            log.log_debug(f"[BinAssist] Converting provider_type '{config['provider_type']}' to enum")
+            provider_type = ProviderType(config['provider_type'])
+            log.log_debug(f"[BinAssist] Provider type enum: {provider_type}")
+            
+            api_config = APIProviderConfig(
+                name=config['name'],
+                provider_type=provider_type,
+                api_key=config['api_key'],
+                base_url=config['base_url'],
+                model=config['model'],
+                max_tokens=config.get('max_tokens', 1000),
+                timeout=config.get('timeout', 30)
+            )
+            
+            # Create provider instance
+            log.log_info(f"[BinAssist] Creating provider for testing: {config['name']}")
+            log.log_debug(f"[BinAssist] Supported provider types: {provider_registry.get_supported_types()}")
+            log.log_debug(f"[BinAssist] Is {provider_type} supported: {provider_registry.is_supported(provider_type)}")
+            provider = provider_registry.create_provider(api_config)
+            
+            # Test connectivity using provider's method
+            log.log_info(f"[BinAssist] Testing connectivity for provider: {config['name']}")
+            response_text = provider.test_connectivity()
+            
+            # Cleanup
+            provider.close()
+            
+            # Check response
+            if response_text and response_text.strip():
+                QtWidgets.QMessageBox.information(
+                    self, "Test Successful", 
+                    f"✅ Provider test successful!\n\nResponse: {response_text[:100]}..."
+                )
+                log.log_info(f"[BinAssist] Provider test successful: {config['name']}")
+            else:
+                QtWidgets.QMessageBox.warning(
+                    self, "Test Warning", 
+                    "⚠️ Connection successful but received empty response."
+                )
+                
+        except Exception as e:
+            error_msg = str(e)
+            if "401" in error_msg or "authentication" in error_msg.lower():
+                QtWidgets.QMessageBox.critical(
+                    self, "Test Failed", 
+                    "❌ Authentication failed. Please check your API key."
+                )
+            elif "404" in error_msg or "not found" in error_msg.lower():
+                QtWidgets.QMessageBox.critical(
+                    self, "Test Failed", 
+                    "❌ Model or endpoint not found. Please check the Base URL and Model name."
+                )
+            elif "timeout" in error_msg.lower():
+                QtWidgets.QMessageBox.critical(
+                    self, "Test Failed", 
+                    "❌ Connection timed out. Please check the Base URL and network connection."
+                )
+            else:
+                QtWidgets.QMessageBox.critical(
+                    self, "Test Failed", 
+                    f"❌ Test failed: {error_msg[:200]}..."
+                )
+            
+            log.log_error(f"[BinAssist] Provider test failed: {e}")
 
     def onApplyActionsClicked(self) -> None:
         """
-        Applies the selected actions from the actions table.
+        Applies the selected actions from the actions table using ToolService.
         """
         for row in range(self.actions_table.rowCount()):
             checkbox_widget = self.actions_table.cellWidget(row, 0)
@@ -1113,14 +1423,14 @@ class BinAssistWidget(SidebarWidget):
                 action = action_item.text()
                 description = description_item.text()
                 
-                handler_name = f"handle_{action.replace(' ', '_')}"
-                handler = getattr(ToolCalling, handler_name, None)
-                
-                if handler:
-                    handler(self.bv, self.actions_table, self.offset_addr, description, row)
-                else:
-                    print(f"Unknown action: {action}")
-                    self.actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem("Failed: Unknown action"))
+                # Use ToolService for action execution
+                try:
+                    self.tool_service.handle_action_for_ui(
+                        self.bv, self.actions_table, self.offset_addr, action, description, row
+                    )
+                except Exception as e:
+                    log.log_error(f"[BinAssist] Action execution failed: {e}")
+                    self.actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem(f"Error: {str(e)}"))
 
         # Update the analysis database
         self.bv.update_analysis()
@@ -1135,13 +1445,20 @@ class BinAssistWidget(SidebarWidget):
         Parameters:
             response (str): The response to be displayed.
         """
-        html_resp = markdown.markdown(response["response"], extensions=['fenced_code'])
-        html_resp += self._generate_feedback_buttons()
-        self.response = response["response"]
-        self.text_box.setHtml(html_resp)
-        if(not self.LlmApi.isRunning()):
-            # Revert the button back to "Explain"
-            self.submit_button.setText(self.submit_label)
+        try:
+            # Check if this is the streaming completion signal
+            if isinstance(response, dict) and response.get("streaming_complete"):
+                log.log_info("[BinAssist] Received streaming completion signal in display_response - reverting button")
+                self._revert_button_state("display_response_completion")
+                return
+                
+            html_resp = markdown.markdown(response["response"], extensions=['fenced_code'])
+            html_resp += self._generate_feedback_buttons()
+            self.response = response["response"]
+            self.text_box.setHtml(html_resp)
+        except Exception as e:
+            log.log_error(f"[BinAssist] Error displaying response: {e}")
+            # Button reversion is now handled by specific completion signals only
 
 
     def display_custom_response(self, response) -> None:
@@ -1151,18 +1468,25 @@ class BinAssistWidget(SidebarWidget):
         Parameters:
             response (str): The custom response to be displayed.
         """
-        # Update session log with response
-        self.session_log[-1]["assistant"] = response["response"]
-        # Rebuild and display the full conversation history
-        full_conversation = "\n".join([f"---\n### User:\n{entry['user']}\n\n---\n### Assistant:\n{entry['assistant']}" for entry in self.session_log])
+        try:
+            # Check if this is the streaming completion signal
+            if isinstance(response, dict) and response.get("streaming_complete"):
+                log.log_info("[BinAssist] Received streaming completion signal in display_custom_response - reverting button")
+                self._revert_button_state("display_custom_response_completion")
+                return
+                
+            # Update session log with response
+            self.session_log[-1]["assistant"] = response["response"]
+            # Rebuild and display the full conversation history
+            full_conversation = "\n".join([f"---\n### User:\n{entry['user']}\n\n---\n### Assistant:\n{entry['assistant']}" for entry in self.session_log])
 
-        html_resp = markdown.markdown(full_conversation, extensions=['fenced_code'])
-        html_resp += self._generate_feedback_buttons()
-        self.response = response["response"]
-        self.query_response_browser.setHtml(html_resp)
-        if(not self.LlmApi.isRunning()):
-            # Revert the button back to "Explain"
-            self.submit_button.setText(self.submit_label)
+            html_resp = markdown.markdown(full_conversation, extensions=['fenced_code'])
+            html_resp += self._generate_feedback_buttons()
+            self.response = response["response"]
+            self.query_response_browser.setHtml(html_resp)
+        except Exception as e:
+            log.log_error(f"[BinAssist] Error displaying custom response: {e}")
+            # Button reversion is now handled by specific completion signals only
 
     def display_analyze_response(self, response) -> None:
         """
@@ -1171,47 +1495,118 @@ class BinAssistWidget(SidebarWidget):
         Parameters:
             response (str): The JSON response to be displayed.
         """
-        actions = {'tool_calls':[]}
-        for it in response["response"]:
-            actions['tool_calls'].append({'name':it.function.name, 'arguments':json.loads(it.function.arguments)})
+        try:
+            # Check if this is the streaming completion signal
+            if isinstance(response, dict) and response.get("streaming_complete"):
+                log.log_info("[BinAssist] Received streaming completion signal - reverting button")
+                self._revert_button_state("display_analyze_response_completion")
+                return
             
-        # Populate the table with the parsed actions
-        for idx, action in enumerate(actions.get("tool_calls", [])):
+            log.log_debug("[BinAssist] Processing analyze response for actions table")
+            actions = {'tool_calls':[]}
+            for it in response["response"]:
+                actions['tool_calls'].append({'name':it.function.name, 'arguments':json.loads(it.function.arguments)})
+                
+            # Populate the table with the parsed actions
+            for idx, action in enumerate(actions.get("tool_calls", [])):
 
-            # Only populate tool calls we support.
-            function_names = [fn_dict["function"]["name"] for fn_dict in ToolCalling.FN_TEMPLATES if fn_dict["type"] == "function"]
-            if action["name"] not in function_names: continue
+                # Only populate tool calls we support.
+                tool_definitions = self.tool_service.get_tool_definitions()
+                function_names = [fn_dict["function"]["name"] for fn_dict in tool_definitions if fn_dict["type"] == "function"]
+                if action["name"] not in function_names: continue
 
-            self.actions_table.insertRow(idx)
+                self.actions_table.insertRow(idx)
 
-            # Create a checkbox and center it in the "Select" column
-            select_checkbox = QtWidgets.QCheckBox()
-            select_widget = QtWidgets.QWidget()
-            select_layout = QtWidgets.QHBoxLayout(select_widget)
-            select_layout.addWidget(select_checkbox)
-            select_layout.setAlignment(QtCore.Qt.AlignCenter)
-            select_layout.setContentsMargins(0, 0, 0, 0)
-            self.actions_table.setCellWidget(idx, 0, select_widget)
+                # Create a checkbox and center it in the "Select" column
+                select_checkbox = QtWidgets.QCheckBox()
+                select_widget = QtWidgets.QWidget()
+                select_layout = QtWidgets.QHBoxLayout(select_widget)
+                select_layout.addWidget(select_checkbox)
+                select_layout.setAlignment(QtCore.Qt.AlignCenter)
+                select_layout.setContentsMargins(0, 0, 0, 0)
+                self.actions_table.setCellWidget(idx, 0, select_widget)
 
-            # Insert the action description in the "Action" column
-            action_item = QtWidgets.QTableWidgetItem(self._format_action(action))
-            self.actions_table.setItem(idx, 1, action_item)
+                # Insert the action description in the "Action" column
+                action_item = QtWidgets.QTableWidgetItem(self._format_action(action))
+                self.actions_table.setItem(idx, 1, action_item)
 
-            # Insert the action description in the "Description" column
-            action_item = QtWidgets.QTableWidgetItem(self._format_description(action))
-            self.actions_table.setItem(idx, 2, action_item)
+                # Insert the action description in the "Description" column
+                action_item = QtWidgets.QTableWidgetItem(self._format_description(action))
+                self.actions_table.setItem(idx, 2, action_item)
 
-            # Leave the "Status" column empty for now
-            status_item = QtWidgets.QTableWidgetItem("")
-            self.actions_table.setItem(idx, 3, status_item)
+                # Leave the "Status" column empty for now
+                status_item = QtWidgets.QTableWidgetItem("")
+                self.actions_table.setItem(idx, 3, status_item)
 
-        # Resize columns to fit the content
-        self.actions_table.resizeColumnsToContents()
-        if(not self.LlmApi.isRunning()):
-            # Revert the button back to "Explain"
-            self.submit_button.setText(self.submit_label)
+            # Resize columns to fit the content
+            self.actions_table.resizeColumnsToContents()
+            log.log_debug(f"[BinAssist] Actions table populated with {len(actions.get('tool_calls', []))} actions")
+            
+        except Exception as e:
+            log.log_error(f"[BinAssist] Error displaying analyze response: {e}")
+            # Only revert button on error, not on normal streaming updates
 
+    def _revert_button_state(self, caller="unknown") -> None:
+        """
+        Safely revert button state back to original label.
+        This method includes safety checks and error handling.
+        """
+        try:
+            log.log_info(f"[BinAssist] _revert_button_state called by: {caller}")
+            # Stop the timeout timer
+            if hasattr(self, 'button_timeout_timer'):
+                self.button_timeout_timer.stop()
+                
+            # Log thread status but don't block button revert
+            if hasattr(self, 'LlmApi'):
+                is_running = self.LlmApi.isRunning()
+                log.log_debug(f"[BinAssist] Thread status check: isRunning={is_running}")
+                # Don't return early - let button revert anyway since response was received
+                
+            # Safely revert button text
+            if hasattr(self, 'submit_button') and hasattr(self, 'submit_label'):
+                current_text = self.submit_button.text()
+                target_text = self.submit_label
+                log.log_debug(f"[BinAssist] Button state: current='{current_text}', target='{target_text}'")
+                
+                if current_text != target_text:
+                    self.submit_button.setText(target_text)
+                    log.log_info(f"[BinAssist] Button successfully reverted from '{current_text}' to '{target_text}'")
+                else:
+                    log.log_debug(f"[BinAssist] Button already in correct state: '{current_text}'")
+                    
+        except Exception as e:
+            log.log_error(f"[BinAssist] Error reverting button state: {e}")
+            # Last resort - try to set to common labels
+            try:
+                if hasattr(self, 'submit_button'):
+                    current_text = self.submit_button.text()
+                    if current_text == "Stop":
+                        # Try to guess the original label
+                        self.submit_button.setText("Submit")
+                        log.log_debug("[BinAssist] Button reverted to default 'Submit'")
+            except:
+                pass  # Give up gracefully
 
+    def _handle_button_timeout(self) -> None:
+        """
+        Handle button timeout - force revert button state if query takes too long.
+        This prevents the plugin from hanging indefinitely.
+        """
+        log.log_warning("[BinAssist] Button timeout reached - forcing button state reset")
+        
+        try:
+            # Force stop all threads
+            if hasattr(self, 'LlmApi'):
+                self.LlmApi.stop_threads()
+                
+            # Force revert button
+            if hasattr(self, 'submit_button') and hasattr(self, 'submit_label'):
+                self.submit_button.setText(self.submit_label)
+                log.log_info("[BinAssist] Button forcibly reverted due to timeout")
+                
+        except Exception as e:
+            log.log_error(f"[BinAssist] Error in timeout handler: {e}")
 
     def _format_action(self, action: dict) -> str:
         return f"{action['name'].replace('_',' ')}"
@@ -1287,14 +1682,30 @@ class BinAssistWidget(SidebarWidget):
         Handles the event when the 'Thumbs Up' feedback is given.
         """
         print("RLHF Upvote")
-        self.LlmApi.store_feedback(self.settings.get_string('binassist.model'), self.request,self.response, 1)
+        # Get the current active provider's model
+        active_provider_name = self.settings.get_string('active_provider')
+        providers = self.settings.get_json('api_providers', [])
+        current_model = 'unknown'
+        for provider in providers:
+            if provider.get('name') == active_provider_name:
+                current_model = provider.get('model', 'unknown')
+                break
+        self.LlmApi.store_feedback(current_model, self.request, self.response, 1)
 
     def handleThumbsDown(self) -> None:
         """
         Handles the event when the 'Thumbs Down' feedback is given.
         """
         print("RLHF Downvote")
-        self.LlmApi.store_feedback(self.settings.get_string('binassist.model'), self.request, self.response, 0)
+        # Get the current active provider's model
+        active_provider_name = self.settings.get_string('active_provider')
+        providers = self.settings.get_json('api_providers', [])
+        current_model = 'unknown'
+        for provider in providers:
+            if provider.get('name') == active_provider_name:
+                current_model = provider.get('model', 'unknown')
+                break
+        self.LlmApi.store_feedback(current_model, self.request, self.response, 0)
 
     def notifyOffsetChanged(self, offset) -> None:
         """
@@ -1330,6 +1741,8 @@ class BinAssistWidget(SidebarWidget):
                 )
 
     def contextMenuEvent(self, event) -> None:
+        """Handle context menu event."""
+        _ = event  # Event parameter required by Qt but not used
         self.m_contextMenuManager.show(self.m_menu, self.actionHandler)
 
 class BinAssistWidgetType(SidebarWidgetType):

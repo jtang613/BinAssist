@@ -1,20 +1,20 @@
 import json
 import openai
-from binaryninja import Settings
+from .core.settings import get_settings_manager
 import requests
 import urllib3
 
 class EmbeddingService:
     def __init__(self):
-        self.settings = Settings()
+        self.settings = get_settings_manager()
         self.api_provider = self.get_active_provider()
 
     def get_active_provider(self):
         """
         Returns the currently active API provider.
         """
-        active_name = self.settings.get_string('binassist.active_provider')
-        providers = json.loads(self.settings.get_json('binassist.api_providers'))
+        active_name = self.settings.get_string('active_provider')
+        providers = self.settings.get_json('api_providers', [])
         return next((p for p in providers if p['api___name'] == active_name), None)
 
     def get_embedding(self, text):

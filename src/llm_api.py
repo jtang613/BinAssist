@@ -1,5 +1,4 @@
-from binaryninja import BackgroundTaskThread, BinaryView
-from binaryninja.settings import Settings
+from binaryninja import BackgroundTaskThread, BinaryView, log
 from binaryninja.function import Function, DisassemblySettings
 from binaryninja.enums import DisassemblyOption
 from binaryninja.lineardisassembly import LinearViewObject, LinearViewCursor, LinearDisassemblyLine
@@ -9,12 +8,12 @@ from PySide6 import QtWidgets
 from openai import OpenAI
 from .threads import StreamingThread
 from .rag import RAG
-from .toolcalling import ToolCalling
+from .core.services.tool_service import ToolService
+from .core.settings import get_settings_manager
 from typing import List
 import sqlite3
 import httpx
 import json
-import logging
 
 http_client = httpx.Client(verify=False)
 
@@ -35,7 +34,7 @@ class LlmApi:
     '''
 
     FUNCTION_PROMPT = '''
-    USE THE PROVIDED TOOLS WHEN NECESSARY. YOU ALWAYS RESPOND WITH TOOL CALLS WHEN POSSIBLE.\n
+    Use the available tools to perform the requested actions. When you identify functions, variables, or types that should be renamed or retyped, use the appropriate tools to make those changes.\n
     '''
 
     FORMAT_PROMPT = '''
@@ -56,30 +55,36 @@ class LlmApi:
         """
         Initializes the LlmApi instance, setting up settings and preparing the database for feedback storage.
         """
-        self.logger = logging.getLogger("binassist.llm_api")
-        self.logger.info("Initializing LlmApi")
+        log.log_info("[BinAssist] Initializing LlmApi")
         
         try:
-            self.settings = Settings()
-            self.logger.debug("Settings initialized")
+            self.settings = get_settings_manager()
+            log.log_debug("[BinAssist] Settings initialized with SQLite backend")
             
             self.threads = []  # Keep a list of active threads
             self.thread = None
-            self.logger.debug("Thread management initialized")
+            log.log_debug("[BinAssist] Thread management initialized")
             
             self.initialize_database()
-            self.logger.debug("Database initialized")
+            log.log_debug("[BinAssist] Database initialized")
             
-            self.rag = RAG(self.settings.get_string('binassist.rag_db_path'))
-            self.logger.debug("RAG system initialized")
+            self.rag = RAG(self.settings.get_string('rag_db_path'))
+            log.log_debug("[BinAssist] RAG system initialized")
+            
+            self.tool_service = ToolService()
+            log.log_debug("[BinAssist] Tool service initialized")
             
             self.api_provider = self.get_active_provider()
-            self.logger.debug(f"Active provider: {self.api_provider.get('provider_name', 'unknown')}")
+            if self.api_provider:
+                log.log_debug(f"[BinAssist] Active provider: {self.api_provider.get('api___name', 'unknown')}")
+            else:
+                log.log_warn("[BinAssist] No active provider found, creating default provider")
+                self._create_default_provider()
             
-            self.logger.info("LlmApi initialization completed successfully")
+            log.log_info("[BinAssist] LlmApi initialization completed successfully")
         except Exception as e:
-            self.logger.error(f"Error during LlmApi initialization: {type(e).__name__}: {e}")
-            self.logger.exception("Full traceback:")
+            log.log_error(f"[BinAssist] Error during LlmApi initialization: {type(e).__name__}: {e}")
+            # Exception details already logged above
             raise
 
     def get_active_provider(self):
@@ -87,31 +92,87 @@ class LlmApi:
         Returns the currently active API provider using simple settings.
         """
         try:
-            active_name = self.settings.get_string('binassist.active_provider')
+            active_name = self.settings.get_string('active_provider')
+            providers = self.settings.get_json('api_providers', [])
             
-            # Map provider names to their setting prefixes  
-            provider_map = {
-                'GPT-4o-Mini': 'provider1',
-                'Claude-3.5-Sonnet': 'provider2',
-                'o4-mini': 'provider3'
-            }
+            # Find the active provider
+            for provider in providers:
+                if provider.get('name') == active_name:
+                    return {
+                        'api___name': provider.get('name', ''),
+                        'provider_type': provider.get('provider_type', 'openai'),
+                        'api__host': provider.get('base_url', 'https://api.openai.com/v1'),
+                        'api_key': provider.get('api_key', ''),
+                        'api__model': provider.get('model', 'gpt-4o-mini'),
+                        'api__max_tokens': provider.get('max_tokens', 16384)
+                    }
             
-            prefix = provider_map.get(active_name, 'provider1')
-            
-            return {
-                'api___name': self.settings.get_string(f'binassist.{prefix}_name'),
-                'provider_type': self.settings.get_string(f'binassist.{prefix}_type'),
-                'api__host': self.settings.get_string(f'binassist.{prefix}_host'),
-                'api_key': self.settings.get_string(f'binassist.{prefix}_key'),
-                'api__model': self.settings.get_string(f'binassist.{prefix}_model'),
-                'api__max_tokens': self.settings.get_integer(f'binassist.{prefix}_max_tokens')
-            }
+            # If no active provider found, return first available or default
+            if providers:
+                provider = providers[0]
+                return {
+                    'api___name': provider.get('name', ''),
+                    'provider_type': provider.get('provider_type', 'openai'),
+                    'api__host': provider.get('base_url', 'https://api.openai.com/v1'),
+                    'api_key': provider.get('api_key', ''),
+                    'api__model': provider.get('model', 'gpt-4o-mini'),
+                    'api__max_tokens': provider.get('max_tokens', 16384)
+                }
             
         except Exception as e:
-            self.logger.error(f"Error getting active provider: {e}")
-            # Return a default provider as fallback
-            return {
-                'api___name': 'GPT-4o-Mini',
+            log.log_error(f"[BinAssist] Error getting active provider: {e}")
+            return None
+    
+    def _create_default_provider(self):
+        """Create a default provider if none exists."""
+        try:
+            # Create default providers
+            default_providers = [
+                {
+                    'name': 'GPT-4o-Mini',
+                    'provider_type': 'openai',
+                    'base_url': 'https://api.openai.com/v1',
+                    'api_key': '',
+                    'model': 'gpt-4o-mini',
+                    'max_tokens': 16384,
+                    'timeout': 120,
+                    'enabled': True
+                },
+                {
+                    'name': 'Claude-3.5-Sonnet',
+                    'provider_type': 'anthropic',
+                    'base_url': 'https://api.anthropic.com',
+                    'api_key': '',
+                    'model': 'claude-3-5-sonnet-20241022',
+                    'max_tokens': 8192,
+                    'timeout': 120,
+                    'enabled': True
+                },
+                {
+                    'name': 'Ollama-Local',
+                    'provider_type': 'ollama',
+                    'base_url': 'http://localhost:11434/v1',
+                    'api_key': '',
+                    'model': 'llama3.1:8b',
+                    'max_tokens': 4096,
+                    'timeout': 120,
+                    'enabled': True
+                }
+            ]
+            
+            # Save default providers
+            self.settings.set_json('api_providers', default_providers)
+            self.settings.set_string('active_provider', 'GPT-4o-Mini')
+            
+            # Update api_provider
+            self.api_provider = self.get_active_provider()
+            log.log_info("[BinAssist] Created default providers")
+            
+        except Exception as e:
+            log.log_error(f"[BinAssist] Failed to create default provider: {e}")
+            # Return a minimal fallback
+            self.api_provider = {
+                'api___name': 'Fallback',
                 'provider_type': 'openai',
                 'api__host': 'https://api.openai.com/v1',
                 'api_key': '',
@@ -139,25 +200,50 @@ class LlmApi:
         Returns:
             The current state of the 'use_rag' setting.
         """
-        return self.settings.get_bool('binassist.use_rag')
+        return self.settings.get_boolean('use_rag')
 
-    def _create_client(self) -> OpenAI:
+    def _create_client(self):
         """
-        Creates and configures an API client based on settings.
+        Creates and configures an API provider based on settings.
 
         Returns:
-            OpenAI: Configured API client instance.
+            APIProvider: Configured API provider instance.
         """
-        self.api_provider = self.get_active_provider()
-        base_url = self.api_provider['api__host']
-        api_key = self.api_provider['api_key']
-        return OpenAI(base_url=base_url, api_key=api_key, http_client=http_client)
+        try:
+            from .core.api_provider.factory import provider_registry
+            from .core.api_provider.config import APIProviderConfig, ProviderType
+            
+            self.api_provider = self.get_active_provider()
+            
+            # Convert to APIProviderConfig
+            provider_type = ProviderType(self.api_provider['provider_type'])
+            api_config = APIProviderConfig(
+                name=self.api_provider['api___name'],
+                provider_type=provider_type,
+                api_key=self.api_provider['api_key'],
+                base_url=self.api_provider['api__host'],
+                model=self.api_provider['api__model'],
+                max_tokens=self.api_provider.get('api__max_tokens', 1000),
+                timeout=self.api_provider.get('timeout', 30)
+            )
+            
+            # Create provider using factory
+            provider = provider_registry.create_provider(api_config)
+            log.log_debug(f"[BinAssist] Created provider: {type(provider).__name__}")
+            return provider
+            
+        except Exception as e:
+            log.log_error(f"[BinAssist] Failed to create provider: {e}")
+            # Fallback to OpenAI client for compatibility
+            base_url = self.api_provider['api__host']
+            api_key = self.api_provider['api_key']
+            return OpenAI(base_url=base_url, api_key=api_key, http_client=http_client)
 
     def initialize_database(self) -> None:
         """
         Initializes the SQLite database for storing feedback, ensuring the feedback table exists.
         """
-        conn = sqlite3.connect(self.settings.get_string('binassist.rlhf_db'))
+        conn = sqlite3.connect(self.settings.get_string('rlhf_db_path'))
         c = conn.cursor()
         c.execute('''
             CREATE TABLE IF NOT EXISTS feedback (
@@ -182,7 +268,7 @@ class LlmApi:
             response (str): The model-generated response.
             feedback (int): User feedback (1 for positive, 0 for negative).
         """
-        conn = sqlite3.connect(self.settings.get_string('binassist.rlhf_db'))
+        conn = sqlite3.connect(self.settings.get_string('rlhf_db_path'))
         c = conn.cursor()
         c.execute('''
             INSERT INTO feedback (model_name, prompt_context, system_context, response, feedback)
@@ -207,9 +293,7 @@ class LlmApi:
         Returns:
             str: The query sent to the LLM.
         """
-        client = self._create_client()
-        model = self.api_provider['api__model']
-        max_tokens = self.api_provider['api__max_tokens']
+        provider = self._create_client()
         query = f"Describe the functionality of the decompiled {bv.platform.name} {bin_type} code " +\
                 f"below (represented as {il_type}). Provide a summary paragraph section followed by " +\
                 f"an analysis section that lists the functionality of each line of code. The analysis " +\
@@ -218,7 +302,14 @@ class LlmApi:
                 f"present. But only fallback to strings or log messages that are clearly function " +\
                 f"names for this function.\n```\n" +\
                 f"{addr_to_text_func(bv, addr)}\n```"
-        self.thread = self._start_thread(client, model, max_tokens, query, self.SYSTEM_PROMPT, signal)
+        
+        # Create a completion callback for regular queries too
+        def completion_callback():
+            log.log_info("[BinAssist] regular query completion callback triggered")
+            signal({"streaming_complete": True})
+            log.log_info("[BinAssist] regular query completion signal emitted")
+            
+        self.thread = self._start_thread(provider, query, self.SYSTEM_PROMPT, signal, None, completion_callback)
         return query
 
     def query(self, query, signal) -> str:
@@ -232,37 +323,47 @@ class LlmApi:
         Returns:
             str: The query sent to the LLM.
         """
-        self.logger.info(f"Starting query with length: {len(query)}")
-        self.logger.debug(f"Query preview: {query[:200]}...")
+        log.log_info(f"[BinAssist] Starting query with length: {len(query)}")
+        log.log_debug(f"[BinAssist] Query preview: {query[:200]}...")
         
         try:
-            self.logger.debug("Creating OpenAI client")
-            client = self._create_client()
-            self.logger.debug("Client created successfully")
-            
-            model = self.api_provider['api__model']
-            max_tokens = self.api_provider['api__max_tokens']
-            self.logger.debug(f"Using model: {model}, max_tokens: {max_tokens}")
+            log.log_debug("[BinAssist] Creating provider client")
+            provider = self._create_client()
+            log.log_debug("[BinAssist] Provider created successfully")
             
             if self.use_rag():
-                self.logger.debug("Using RAG - getting context")
+                log.log_debug("[BinAssist] Using RAG - getting context")
                 context = self._get_rag_context(query)
                 augmented_query = f"Context:\n{context}\n\nQuery: {query}"
-                self.logger.debug(f"RAG context length: {len(context)}, augmented query length: {len(augmented_query)}")
+                log.log_debug(f"[BinAssist] RAG context length: {len(context)}, augmented query length: {len(augmented_query)}")
                 
-                self.logger.debug("Starting thread with RAG-augmented query")
-                self.thread = self._start_thread(client, model, max_tokens, augmented_query, self.SYSTEM_PROMPT, signal)
-                self.logger.debug("Thread started successfully with RAG")
+                log.log_debug("[BinAssist] Starting thread with RAG-augmented query")
+                
+                # Create a completion callback for RAG queries too
+                def rag_completion_callback():
+                    log.log_info("[BinAssist] RAG query completion callback triggered")
+                    signal({"streaming_complete": True})
+                    log.log_info("[BinAssist] RAG query completion signal emitted")
+                    
+                self.thread = self._start_thread(provider, augmented_query, self.SYSTEM_PROMPT, signal, None, rag_completion_callback)
+                log.log_debug("[BinAssist] Thread started successfully with RAG")
                 return augmented_query
             else:
-                self.logger.debug("Starting thread without RAG")
-                self.thread = self._start_thread(client, model, max_tokens, query, self.SYSTEM_PROMPT, signal)
-                self.logger.debug("Thread started successfully without RAG")
+                log.log_debug("[BinAssist] Starting thread without RAG")
+                
+                # Create a completion callback for regular queries too
+                def regular_completion_callback():
+                    log.log_info("[BinAssist] regular query completion callback triggered")
+                    signal({"streaming_complete": True})
+                    log.log_info("[BinAssist] regular query completion signal emitted")
+                    
+                self.thread = self._start_thread(provider, query, self.SYSTEM_PROMPT, signal, None, regular_completion_callback)
+                log.log_debug("[BinAssist] Thread started successfully without RAG")
                 return query
                 
         except Exception as e:
-            self.logger.error(f"Error in query method: {type(e).__name__}: {e}")
-            self.logger.exception("Full traceback:")
+            log.log_error(f"[BinAssist] Error in query method: {type(e).__name__}: {e}")
+            # Exception details already logged above
             raise
 
     def analyze_function(self, action: str, bv, addr, bin_type, il_type, addr_to_text_func, signal) -> str:
@@ -282,22 +383,43 @@ class LlmApi:
         Returns:
             str: The query sent to the LLM.
         """
-        client = self._create_client()
-        model = self.api_provider['api__model']
-        max_tokens = self.api_provider['api__max_tokens']
+        log.log_info(f"[BinAssist] analyze_function called with action: {action}")
+        provider = self._create_client()
         code = addr_to_text_func(bv, addr)
-        prompt = ToolCalling.ACTION_PROMPTS.get(action, "").format(code=code)
+        
+        # Get prompts and tools from ToolService
+        action_prompts = self.tool_service.get_action_prompts()
+        prompt = action_prompts.get(action, "").format(code=code)
 
         if not prompt:
             raise ValueError(f"Unknown action type: {action}")
 
-        query = f"{prompt}\n{self.FUNCTION_PROMPT}{self.FORMAT_PROMPT}"
-        self.thread = self._start_thread(client, model, max_tokens, query, f"{self.SYSTEM_PROMPT}{self.FUNCTION_PROMPT}{self.FORMAT_PROMPT}", signal, ToolCalling.FN_TEMPLATES)
+        query = f"{prompt}\n{self.FUNCTION_PROMPT}"
+        tools = self.tool_service.get_tool_definitions()
+        log.log_debug(f"[BinAssist] analyze_function got {len(tools) if tools else 0} tools from tool_service")
+        # Create a completion callback that emits the completion signal
+        def completion_callback():
+            log.log_info("[BinAssist] analyze_function completion callback triggered")
+            signal({"streaming_complete": True})
+            log.log_info("[BinAssist] analyze_function completion signal emitted")
+            
+        self.thread = self._start_thread(provider, query, f"{self.SYSTEM_PROMPT}{self.FUNCTION_PROMPT}", signal, tools, completion_callback)
 
         return query
 
     def isRunning(self):
-        return self.thread.isRunning()
+        """Check if any threads are currently running."""
+        if not self.threads:
+            return False
+        
+        # Check if any thread in the list is still running
+        running_threads = [thread for thread in self.threads if thread.isRunning()]
+        
+        # Clean up finished threads
+        if len(running_threads) != len(self.threads):
+            self.threads = running_threads
+        
+        return len(running_threads) > 0
 
     def _get_rag_context(self, query: str) -> str:
         """
@@ -331,42 +453,43 @@ class LlmApi:
         """
         return self.rag.get_document_list()
 
-    def _start_thread(self, client, model, max_tokens, query, system, signal, tools=None) -> None:
+    def _start_thread(self, provider, query, system, signal, tools=None, completion_callback=None) -> None:
         """
         Starts a new thread to handle streaming responses from the LLM.
 
         Parameters:
-            client (OpenAI): The API client.
+            provider (APIProvider): The API provider instance.
             query (str): The query text.
             system (str): System context for the query.
             signal (Signal): Qt signal to update with the response.
-            tools (dict): A dictionary of available toold for the LLM to consdider.
+            tools (dict): A dictionary of available tools for the LLM to consider.
         """
         try:
-            self.logger.info(f"Starting new thread for model: {model}")
-            self.logger.debug(f"Thread parameters - max_tokens: {max_tokens}, query_length: {len(query)}, system_length: {len(system)}, tools: {tools is not None}")
+            log.log_info(f"[BinAssist] Starting new thread for provider: {type(provider).__name__}")
+            log.log_debug(f"[BinAssist] Thread parameters - query_length: {len(query)}, system_length: {len(system)}, tools: {tools is not None}")
+            log.log_debug(f"[BinAssist] Tools count: {len(tools) if tools else 0}")
             
-            self.logger.debug("Creating StreamingThread instance")
-            thread = StreamingThread(client, model, max_tokens, query, system, tools)
-            self.logger.debug("StreamingThread instance created")
+            log.log_debug("[BinAssist] Creating StreamingThread instance")
+            thread = StreamingThread(provider, query, system, tools, completion_callback)
+            log.log_debug("[BinAssist] StreamingThread instance created")
             
-            self.logger.debug("Connecting signal")
+            log.log_debug("[BinAssist] Connecting signal")
             thread.update_response.connect(signal)
-            self.logger.debug("Signal connected")
+            log.log_debug("[BinAssist] Signal connected")
             
-            self.logger.debug("Adding thread to tracking list")
+            log.log_debug("[BinAssist] Adding thread to tracking list")
             self.threads.append(thread)  # Keep track of the thread
-            self.logger.debug(f"Thread added to list. Total active threads: {len(self.threads)}")
+            log.log_debug(f"[BinAssist] Thread added to list. Total active threads: {len(self.threads)}")
             
-            self.logger.debug("Starting thread execution")
+            log.log_debug("[BinAssist] Starting thread execution")
             thread.start()
-            self.logger.info("Thread started successfully")
+            log.log_info("[BinAssist] Thread started successfully")
             
             return thread
             
         except Exception as e:
-            self.logger.error(f"Error in _start_thread: {type(e).__name__}: {e}")
-            self.logger.exception("Full traceback:")
+            log.log_error(f"[BinAssist] Error in _start_thread: {type(e).__name__}: {e}")
+            # Exception details already logged above
             raise
 
     def DataToText(self, bv: BinaryView, start_addr: int, end_addr: int) -> str:
@@ -528,3 +651,4 @@ class LlmApi:
         for thread in self.threads:
             thread.stop()
         self.threads.clear()  # Clear the list after stopping all threads
+        self.thread = None  # Reset single thread reference
