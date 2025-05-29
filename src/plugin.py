@@ -15,6 +15,8 @@ from .core.settings import get_settings_manager, migrate_from_binary_ninja_setti
 
 from .llm_api import LlmApi
 from .core.services.tool_service import ToolService
+from .core.analysis_db import AnalysisDB
+from .utils.program_utils import get_program_hash, get_function_address_string, get_function_start_address
 
 class BinAssistWidget(SidebarWidget):
     """
@@ -52,6 +54,14 @@ class BinAssistWidget(SidebarWidget):
             self.tool_service = ToolService()
             log.log_debug("[BinAssist] ToolService initialized")
             
+            # Initialize analysis database
+            try:
+                self.analysis_db = AnalysisDB()
+                log.log_debug("[BinAssist] Analysis database initialized")
+            except Exception as e:
+                log.log_error(f"[BinAssist] Failed to initialize analysis database: {e}")
+                self.analysis_db = None
+            
             self.offset_addr = 0
             self.actionHandler = UIActionHandler()
             self.actionHandler.setupActionHandler(self)
@@ -84,6 +94,17 @@ class BinAssistWidget(SidebarWidget):
             except:
                 pass
             raise
+
+    def __del__(self) -> None:
+        """
+        Destructor to properly clean up resources when the widget is destroyed.
+        """
+        try:
+            if hasattr(self, 'analysis_db') and self.analysis_db:
+                self.analysis_db.close()
+                log.log_debug("[BinAssist] Analysis database connection closed during cleanup")
+        except Exception as e:
+            log.log_error(f"[BinAssist] Error during widget cleanup: {e}")
 
     def _init_ui(self) -> None:
         """
@@ -509,8 +530,47 @@ class BinAssistWidget(SidebarWidget):
         
         general_layout.addLayout(rlhf_path_layout)
 
+        # Analysis Database Path
+        analysis_path_layout = QtWidgets.QHBoxLayout()
+        analysis_path_layout.addWidget(QtWidgets.QLabel("Analysis Cache Database Path:"))
+        
+        self.analysis_path_edit = QtWidgets.QLineEdit()
+        self.analysis_path_edit.setText(self.settings.get_string('analysis_db_path', 'binassist_analysis.db'))
+        self.analysis_path_edit.editingFinished.connect(self.onAnalysisPathChanged)
+        analysis_path_layout.addWidget(self.analysis_path_edit)
+        
+        analysis_browse_btn = QtWidgets.QPushButton("Browse")
+        analysis_browse_btn.clicked.connect(self.browseAnalysisPath)
+        analysis_browse_btn.setMaximumWidth(80)
+        analysis_path_layout.addWidget(analysis_browse_btn)
+        
+        general_layout.addLayout(analysis_path_layout)
+
+        # Analysis Cache Management
+        cache_management_layout = QtWidgets.QHBoxLayout()
+        
+        self.cache_stats_label = QtWidgets.QLabel("Cache: Loading...")
+        cache_management_layout.addWidget(self.cache_stats_label)
+        
+        cache_refresh_btn = QtWidgets.QPushButton("Refresh Stats")
+        cache_refresh_btn.clicked.connect(self.refreshCacheStats)
+        cache_refresh_btn.setMaximumWidth(100)
+        cache_management_layout.addWidget(cache_refresh_btn)
+        
+        cache_clear_btn = QtWidgets.QPushButton("Clear All Cache")
+        cache_clear_btn.clicked.connect(self.clearAllCache)
+        cache_clear_btn.setMaximumWidth(120)
+        cache_clear_btn.setStyleSheet("QPushButton { background-color: #ff6b6b; color: white; }")
+        cache_management_layout.addWidget(cache_clear_btn)
+        
+        cache_management_layout.addStretch()
+        general_layout.addLayout(cache_management_layout)
+
         general_group.setLayout(general_layout)
         layout.addWidget(general_group)
+        
+        # Refresh cache stats on initialization
+        QtCore.QTimer.singleShot(100, self.refreshCacheStats)
 
         # Initialize providers data
         self.providers = []
@@ -702,6 +762,25 @@ class BinAssistWidget(SidebarWidget):
         
         if self.submit_button.text() == "Explain Function":
             self.submit_label = self.submit_button.text()
+            
+            # Check for cached explanation first
+            if self.analysis_db and self.bv:
+                program_hash = get_program_hash(self.bv)
+                function_start = get_function_start_address(self.bv, self.offset_addr)
+                function_address = get_function_address_string(function_start)
+                
+                if program_hash:
+                    log.log_debug(f"[BinAssist] Generated program hash: {program_hash[:16]}...")
+                    cached_analysis = self.analysis_db.get_analysis(program_hash, function_address)
+                    if cached_analysis:
+                        log.log_info(f"[BinAssist] Found cached explanation for {function_address}")
+                        self.display_cached_explanation(cached_analysis)
+                        return
+                    else:
+                        log.log_debug(f"[BinAssist] No cached explanation found for {function_address}")
+                else:
+                    log.log_warn("[BinAssist] Could not generate program hash for cache lookup")
+            
             # Start explanation
             datatype = self.datatype.split(':')[1]
             il_type = self.il_type.name
@@ -749,10 +828,30 @@ class BinAssistWidget(SidebarWidget):
     def onClearTextClicked(self) -> None:
         """
         Clears all text boxes when the 'Clear' button is clicked.
+        Also deletes cached explanation for the current function.
         """
         self.session_log.clear()  # Clear the session log
         self.text_box.clear()
         self.query_response_browser.clear()
+        
+        # Delete cached explanation for current function
+        if self.analysis_db and self.bv:
+            try:
+                program_hash = get_program_hash(self.bv)
+                function_start = get_function_start_address(self.bv, self.offset_addr)
+                function_address = get_function_address_string(function_start)
+                
+                if program_hash and function_address:
+                    deleted = self.analysis_db.delete_analysis(program_hash, function_address)
+                    if deleted:
+                        log.log_info(f"[BinAssist] Deleted cached explanation for {function_address}")
+                    else:
+                        log.log_debug(f"[BinAssist] No cached explanation to delete for {function_address}")
+                else:
+                    log.log_warn("[BinAssist] Could not delete cached explanation: missing program hash or function address")
+                    
+            except Exception as e:
+                log.log_error(f"[BinAssist] Error deleting cached explanation: {e}")
 
     def onSubmitQueryClicked(self) -> None:
         """
@@ -870,6 +969,8 @@ class BinAssistWidget(SidebarWidget):
                         action = fn_name.split(':')[0].replace(' ', '_')
                         
                         log.log_debug(f"[BinAssist] Calling LlmApi.analyze_function for action: {action}")
+                        # Store action for caching later
+                        self.current_analysis_action = action
                         # Trigger LLM query and store request
                         self.request = self.LlmApi.analyze_function(
                             action, self.bv, self.offset_addr, datatype, il_type, func, self.display_analyze_response
@@ -916,8 +1017,29 @@ class BinAssistWidget(SidebarWidget):
     def onAnalyzeClearClicked(self) -> None:
         """
         Event for the 'Analyze Clear' button.
+        Clears the actions table and deletes cached analysis for the current function.
         """
+        # Clear the actions table
         self.actions_table.setRowCount(0)
+        
+        # Delete cached analysis for current function
+        if self.analysis_db and self.bv:
+            try:
+                program_hash = get_program_hash(self.bv)
+                function_start = get_function_start_address(self.bv, self.offset_addr)
+                function_address = get_function_address_string(function_start)
+                
+                if program_hash and function_address:
+                    deleted = self.analysis_db.delete_analysis(program_hash, function_address)
+                    if deleted:
+                        log.log_info(f"[BinAssist] Deleted cached analysis for {function_address}")
+                    else:
+                        log.log_debug(f"[BinAssist] No cached analysis to delete for {function_address}")
+                else:
+                    log.log_warn("[BinAssist] Could not delete cached analysis: missing program hash or function address")
+                    
+            except Exception as e:
+                log.log_error(f"[BinAssist] Error deleting cached analysis: {e}")
 
     def loadProvidersFromSettings(self) -> None:
         """
@@ -1246,6 +1368,88 @@ class BinAssistWidget(SidebarWidget):
             log.log_debug(f"[BinAssist] RLHF path auto-saved: {path}")
         except Exception as e:
             log.log_error(f"[BinAssist] Error auto-saving RLHF path: {e}")
+
+    def onAnalysisPathChanged(self) -> None:
+        """Auto-save analysis database path."""
+        try:
+            path = self.analysis_path_edit.text()
+            self.settings.set_string('analysis_db_path', path)
+            log.log_debug(f"[BinAssist] Analysis database path auto-saved: {path}")
+            
+            # Reinitialize analysis database with new path
+            if hasattr(self, 'analysis_db') and self.analysis_db:
+                self.analysis_db.close()
+            
+            try:
+                self.analysis_db = AnalysisDB()
+                log.log_info("[BinAssist] Analysis database reinitialized with new path")
+                self.refreshCacheStats()
+            except Exception as db_error:
+                log.log_error(f"[BinAssist] Failed to reinitialize analysis database: {db_error}")
+                self.analysis_db = None
+                
+        except Exception as e:
+            log.log_error(f"[BinAssist] Error auto-saving analysis database path: {e}")
+
+    def browseAnalysisPath(self) -> None:
+        """Browse for analysis database path."""
+        try:
+            current_path = self.analysis_path_edit.text()
+            file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self, 
+                "Select Analysis Database Path", 
+                current_path,
+                "SQLite Database (*.db);;All Files (*)"
+            )
+            if file_path:
+                self.analysis_path_edit.setText(file_path)
+                self.onAnalysisPathChanged()
+        except Exception as e:
+            log.log_error(f"[BinAssist] Error browsing analysis database path: {e}")
+
+    def refreshCacheStats(self) -> None:
+        """Refresh cache statistics display."""
+        try:
+            if self.analysis_db:
+                analysis_count = self.analysis_db.get_analysis_count()
+                context_count = self.analysis_db.get_context_count()
+                self.cache_stats_label.setText(f"Cache: {analysis_count} analyses, {context_count} contexts")
+                log.log_debug(f"[BinAssist] Cache stats refreshed: {analysis_count} analyses, {context_count} contexts")
+            else:
+                self.cache_stats_label.setText("Cache: Database not available")
+        except Exception as e:
+            log.log_error(f"[BinAssist] Error refreshing cache stats: {e}")
+            self.cache_stats_label.setText("Cache: Error loading stats")
+
+    def clearAllCache(self) -> None:
+        """Clear all cached analysis and context data."""
+        try:
+            reply = QtWidgets.QMessageBox.question(
+                self, 
+                "Clear All Cache",
+                "Are you sure you want to clear all cached analysis results and contexts?\n\nThis action cannot be undone.",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No
+            )
+            
+            if reply == QtWidgets.QMessageBox.Yes:
+                if self.analysis_db:
+                    analysis_cleared = self.analysis_db.clear_all_analysis()
+                    context_cleared = self.analysis_db.clear_all_contexts()
+                    
+                    if analysis_cleared and context_cleared:
+                        log.log_info("[BinAssist] All cache data cleared successfully")
+                        QtWidgets.QMessageBox.information(self, "Cache Cleared", "All cached data has been cleared successfully.")
+                    else:
+                        log.log_warn("[BinAssist] Some cache data may not have been cleared")
+                        QtWidgets.QMessageBox.warning(self, "Cache Clear Warning", "Some cached data may not have been cleared. Check logs for details.")
+                    
+                    self.refreshCacheStats()
+                else:
+                    QtWidgets.QMessageBox.warning(self, "Cache Clear Error", "Analysis database is not available.")
+        except Exception as e:
+            log.log_error(f"[BinAssist] Error clearing cache: {e}")
+            QtWidgets.QMessageBox.critical(self, "Cache Clear Error", f"An error occurred while clearing cache: {str(e)}")
     
     def onAnalysisOptionChanged(self) -> None:
         """Auto-save analysis options when they change."""
@@ -1413,30 +1617,74 @@ class BinAssistWidget(SidebarWidget):
         """
         Applies the selected actions from the actions table using ToolService.
         """
-        for row in range(self.actions_table.rowCount()):
+        log.log_info("[BinAssist] onApplyActionsClicked triggered")
+        
+        total_rows = self.actions_table.rowCount()
+        log.log_debug(f"[BinAssist] Actions table has {total_rows} rows")
+        
+        if total_rows == 0:
+            log.log_warn("[BinAssist] No actions available in table to apply")
+            return
+            
+        checked_count = 0
+        applied_count = 0
+        
+        for row in range(total_rows):
+            log.log_debug(f"[BinAssist] Processing row {row}")
+            
             checkbox_widget = self.actions_table.cellWidget(row, 0)
+            if checkbox_widget is None:
+                log.log_warn(f"[BinAssist] Row {row}: No checkbox widget found")
+                continue
+                
             checkbox = checkbox_widget.findChild(QtWidgets.QCheckBox)
+            if checkbox is None:
+                log.log_warn(f"[BinAssist] Row {row}: No checkbox found in widget")
+                continue
+                
             if checkbox.isChecked():
+                checked_count += 1
+                log.log_info(f"[BinAssist] Row {row}: Checkbox is checked, processing action")
+                
                 action_item = self.actions_table.item(row, 1)
                 description_item = self.actions_table.item(row, 2)
+                
+                if action_item is None or description_item is None:
+                    log.log_error(f"[BinAssist] Row {row}: Missing action or description item")
+                    continue
                 
                 action = action_item.text()
                 description = description_item.text()
                 
+                # Convert action name back to underscore format (UI displays with spaces for readability)
+                action_name = action.replace(' ', '_')
+                
+                log.log_info(f"[BinAssist] Row {row}: Applying action '{action}' (converted to '{action_name}') with description '{description}'")
+                
                 # Use ToolService for action execution
                 try:
+                    log.log_debug(f"[BinAssist] Row {row}: Calling tool_service.handle_action_for_ui")
                     self.tool_service.handle_action_for_ui(
-                        self.bv, self.actions_table, self.offset_addr, action, description, row
+                        self.bv, self.actions_table, self.offset_addr, action_name, description, row
                     )
+                    applied_count += 1
+                    log.log_info(f"[BinAssist] Row {row}: Action applied successfully")
                 except Exception as e:
-                    log.log_error(f"[BinAssist] Action execution failed: {e}")
+                    log.log_error(f"[BinAssist] Row {row}: Action execution failed: {e}")
                     self.actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem(f"Error: {str(e)}"))
+            else:
+                log.log_debug(f"[BinAssist] Row {row}: Checkbox not checked, skipping")
+
+        log.log_info(f"[BinAssist] Apply Actions completed: {checked_count} actions checked, {applied_count} actions applied")
 
         # Update the analysis database
+        log.log_debug("[BinAssist] Updating Binary Ninja analysis database")
         self.bv.update_analysis()
+        log.log_debug("[BinAssist] Analysis database update completed")
 
         # Resize columns to fit the content
         self.actions_table.resizeColumnsToContents()
+        log.log_debug("[BinAssist] Actions table columns resized")
 
     def display_response(self, response) -> None:
         """
@@ -1449,6 +1697,30 @@ class BinAssistWidget(SidebarWidget):
             # Check if this is the streaming completion signal
             if isinstance(response, dict) and response.get("streaming_complete"):
                 log.log_info("[BinAssist] Received streaming completion signal in display_response - reverting button")
+                
+                # Cache the final response when streaming completes
+                if self.analysis_db and self.bv and hasattr(self, 'response') and self.response:
+                    try:
+                        program_hash = get_program_hash(self.bv)
+                        function_start = get_function_start_address(self.bv, self.offset_addr)
+                        function_address = get_function_address_string(function_start)
+                        
+                        if program_hash and function_address:
+                            # Create a query string for the explanation cache
+                            query = "explain_function"
+                            
+                            # Store the final response text
+                            success = self.analysis_db.upsert_analysis(program_hash, function_address, query, self.response)
+                            if success:
+                                log.log_info(f"[BinAssist] Cached explanation result for {function_address}")
+                            else:
+                                log.log_warn(f"[BinAssist] Failed to cache explanation result for {function_address}")
+                        else:
+                            log.log_warn("[BinAssist] Could not cache explanation: missing program hash or function address")
+                            
+                    except Exception as cache_error:
+                        log.log_error(f"[BinAssist] Error caching explanation result: {cache_error}")
+                
                 self._revert_button_state("display_response_completion")
                 return
                 
@@ -1495,10 +1767,11 @@ class BinAssistWidget(SidebarWidget):
         Parameters:
             response (str): The JSON response to be displayed.
         """
+        log.log_info("[BinAssist] display_analyze_response called")
         try:
             # Check if this is the streaming completion signal
             if isinstance(response, dict) and response.get("streaming_complete"):
-                log.log_info("[BinAssist] Received streaming completion signal - reverting button")
+                log.log_info("[BinAssist] Received streaming completion signal in display_analyze_response - reverting button")
                 self._revert_button_state("display_analyze_response_completion")
                 return
             
@@ -1542,9 +1815,85 @@ class BinAssistWidget(SidebarWidget):
             self.actions_table.resizeColumnsToContents()
             log.log_debug(f"[BinAssist] Actions table populated with {len(actions.get('tool_calls', []))} actions")
             
+            
         except Exception as e:
             log.log_error(f"[BinAssist] Error displaying analyze response: {e}")
             # Only revert button on error, not on normal streaming updates
+
+    def checkAndDisplayCachedAnalysis(self) -> None:
+        """
+        Check for cached analysis for the current function and display it if found.
+        This is called when navigating between functions.
+        """
+        try:
+            if not self.analysis_db or not self.bv:
+                return
+                
+            program_hash = get_program_hash(self.bv)
+            function_start = get_function_start_address(self.bv, self.offset_addr)
+            function_address = get_function_address_string(function_start)
+            
+            if not program_hash or not function_address:
+                log.log_debug("[BinAssist] Cannot check cache: missing program hash or function address")
+                return
+                
+            log.log_debug(f"[BinAssist] Checking cache for function at {function_address}")
+            
+            # Look for any cached analysis for this function (regardless of action type)
+            cached_analysis = self.analysis_db.get_analysis(program_hash, function_address)
+            
+            if cached_analysis:
+                log.log_info(f"[BinAssist] Found cached analysis for function at {function_address}")
+                
+                # Check what type of cached analysis we have
+                if cached_analysis.query == "explain_function":
+                    # Auto-display cached explanation in the Explain tab
+                    self.display_cached_explanation(cached_analysis)
+                    log.log_debug("[BinAssist] Auto-displayed cached explanation during navigation")
+                else:
+                    # For function analysis, just clear the actions table without auto-displaying
+                    self.actions_table.setRowCount(0)
+                
+            else:
+                log.log_debug(f"[BinAssist] No cached analysis found for function at {function_address}")
+                
+                # Clear the response window and actions table when no cache available
+                self.text_box.clear()
+                self.actions_table.setRowCount(0)
+                
+        except Exception as e:
+            log.log_error(f"[BinAssist] Error checking cached analysis: {e}")
+
+    def display_cached_explanation(self, cached_analysis) -> None:
+        """
+        Display cached explanation results in the text box.
+        
+        Parameters:
+            cached_analysis: Analysis object containing cached query and response
+        """
+        try:
+            log.log_info(f"[BinAssist] Displaying cached explanation from {cached_analysis.timestamp}")
+            
+            # Validate cached response
+            if not cached_analysis.response:
+                log.log_error("[BinAssist] Cached analysis has empty response")
+                return
+            
+            # The response is stored as plain text, no JSON parsing needed
+            response_text = cached_analysis.response
+            
+            # Display in the text box
+            import markdown
+            html_resp = markdown.markdown(response_text, extensions=['fenced_code'])
+            html_resp += self._generate_feedback_buttons()
+            
+            self.text_box.setHtml(html_resp)
+            self.response = response_text
+            
+            log.log_debug("[BinAssist] Cached explanation displayed successfully")
+            
+        except Exception as e:
+            log.log_error(f"[BinAssist] Error displaying cached explanation: {e}")
 
     def _revert_button_state(self, caller="unknown") -> None:
         """
@@ -1716,6 +2065,9 @@ class BinAssistWidget(SidebarWidget):
         """
         self.offset.setText(hex(offset))
         self.offset_addr = offset
+        
+        # Check for cached analysis when navigating to a new function
+        self.checkAndDisplayCachedAnalysis()
 
     def notifyViewChanged(self, view_frame) -> None:
         """
@@ -1739,6 +2091,9 @@ class BinAssistWidget(SidebarWidget):
                 "#addr to include the current hex address.\n" + \
                 "#range(start, end) to include the linearview data in a given range."
                 )
+            
+            # Check for cached analysis when view changes (new binary loaded)
+            self.checkAndDisplayCachedAnalysis()
 
     def contextMenuEvent(self, event) -> None:
         """Handle context menu event."""

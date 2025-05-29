@@ -6,12 +6,13 @@ and integrate their tools and resources with BinAssist's analysis capabilities.
 """
 
 from .client import MCPClient
-from .config import MCPConfig
+from .config import MCPConfig, MCPServerConfig
 from .exceptions import MCPError, MCPConnectionError, MCPTimeoutError
 
 __all__ = [
     'MCPClient',
-    'MCPConfig', 
+    'MCPConfig',
+    'MCPServerConfig', 
     'MCPError',
     'MCPConnectionError',
     'MCPTimeoutError'

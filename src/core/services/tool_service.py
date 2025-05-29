@@ -11,7 +11,7 @@ from ..models.tool_call import ToolCall, ToolResult
 
 # Import Binary Ninja modules for tool implementations
 import binaryninja as bn
-from binaryninja import BinaryView
+from binaryninja import BinaryView, log
 from binaryninja.types import StructureBuilder, Type, TypeClass
 from binaryninja.highlevelil import HighLevelILOperation, HighLevelILInstruction
 from PySide6 import QtWidgets
@@ -459,42 +459,68 @@ class ToolService(BaseService):
     def handle_action_for_ui(self, bv: BinaryView, actions_table: QtWidgets.QTableWidget, 
                            offset_addr: int, tool_name: str, description: str, row: int) -> None:
         """Handle tool execution for UI Actions table (preserving toolcalling.py behavior)."""
+        log.log_info(f"[BinAssist] ToolService.handle_action_for_ui called: tool_name='{tool_name}', description='{description}', row={row}, offset_addr=0x{offset_addr:x}")
+        
         try:
             if tool_name == "rename_function":
+                log.log_debug(f"[BinAssist] Processing rename_function action")
                 new_name = description.strip()
+                log.log_debug(f"[BinAssist] Extracted new_name: '{new_name}'")
                 result = self._handle_rename_function(bv, offset_addr, new_name=new_name)
+                log.log_debug(f"[BinAssist] rename_function result: {result}")
                 if result["success"]:
                     actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem("Applied"))
+                    log.log_info(f"[BinAssist] rename_function applied successfully")
                 else:
                     actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem(f"Failed: {result['error']}"))
+                    log.log_warn(f"[BinAssist] rename_function failed: {result['error']}")
                     
             elif tool_name == "rename_variable":
+                log.log_debug(f"[BinAssist] Processing rename_variable action")
                 var_name, new_name = description.split(' -> ')
                 func_name = bv.get_functions_containing(offset_addr)[0].name if bv.get_functions_containing(offset_addr) else ""
+                log.log_debug(f"[BinAssist] Extracted var_name: '{var_name}', new_name: '{new_name}', func_name: '{func_name}'")
                 result = self._handle_rename_variable(bv, offset_addr, func_name=func_name, var_name=var_name, new_name=new_name)
+                log.log_debug(f"[BinAssist] rename_variable result: {result}")
                 if result["success"]:
                     actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem("Applied"))
+                    log.log_info(f"[BinAssist] rename_variable applied successfully")
                 else:
                     actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem(f"Failed: {result['error']}"))
+                    log.log_warn(f"[BinAssist] rename_variable failed: {result['error']}")
                     
             elif tool_name == "retype_variable":
+                log.log_debug(f"[BinAssist] Processing retype_variable action")
                 var_name, new_type = description.split(' -> ')
                 func_name = bv.get_functions_containing(offset_addr)[0].name if bv.get_functions_containing(offset_addr) else ""
+                log.log_debug(f"[BinAssist] Extracted var_name: '{var_name}', new_type: '{new_type}', func_name: '{func_name}'")
                 result = self._handle_retype_variable(bv, offset_addr, func_name=func_name, var_name=var_name, new_type=new_type)
+                log.log_debug(f"[BinAssist] retype_variable result: {result}")
                 if result["success"]:
                     actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem("Applied"))
+                    log.log_info(f"[BinAssist] retype_variable applied successfully")
                 else:
                     actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem(f"Failed: {result['error']}"))
+                    log.log_warn(f"[BinAssist] retype_variable failed: {result['error']}")
                     
             elif tool_name == "auto_create_struct":
+                log.log_debug(f"[BinAssist] Processing auto_create_struct action")
                 variable_name = description
                 func_name = bv.get_functions_containing(offset_addr)[0].name if bv.get_functions_containing(offset_addr) else ""
+                log.log_debug(f"[BinAssist] Extracted variable_name: '{variable_name}', func_name: '{func_name}'")
                 result = self._handle_auto_create_struct(bv, offset_addr, func_name=func_name, var_name=variable_name)
+                log.log_debug(f"[BinAssist] auto_create_struct result: {result}")
                 if result["success"]:
                     actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem("Applied"))
+                    log.log_info(f"[BinAssist] auto_create_struct applied successfully")
                 else:
                     actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem(f"Failed: {result['error']}"))
+                    log.log_warn(f"[BinAssist] auto_create_struct failed: {result['error']}")
+            else:
+                log.log_error(f"[BinAssist] Unknown tool_name: '{tool_name}'")
+                actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem(f"Error: Unknown action '{tool_name}'"))
                     
         except Exception as e:
+            log.log_error(f"[BinAssist] Exception in handle_action_for_ui: {e}")
             actions_table.setItem(row, 3, QtWidgets.QTableWidgetItem(f"Error: {str(e)}"))
             self.handle_error(e, f"UI tool execution: {tool_name}")
