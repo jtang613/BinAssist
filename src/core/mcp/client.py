@@ -468,14 +468,31 @@ class MCPConnection:
         try:
             log.log_info(f"[BinAssist] Calling tool '{tool_name}' with arguments: {arguments}")
             
-            # Use SDK to call tool
-            result = await self.session.call_tool(tool_name, arguments)
+            # Use SDK to call tool - session.call_tool expects direct parameters
+            result = await self.session.call_tool(
+                name=tool_name,
+                arguments=arguments or {}
+            )
+            log.log_info(f"[BinAssist] Tool '{tool_name}' executed successfully")
             
-            log.log_debug(f"[BinAssist] Tool call result: {result}")
-            return result
+            # Extract content from result
+            if hasattr(result, 'content') and result.content:
+                # Return the first content item if available
+                if len(result.content) > 0:
+                    content_item = result.content[0]
+                    if hasattr(content_item, 'text'):
+                        return content_item.text
+                    else:
+                        return str(content_item)
+                else:
+                    return "Tool executed successfully"
+            else:
+                return "Tool executed successfully"
                 
         except Exception as e:
             log.log_error(f"[BinAssist] Tool call failed: {e}")
+            import traceback
+            log.log_error(f"[BinAssist] Full traceback: {traceback.format_exc()}")
             raise MCPToolError(f"Tool call failed: {e}")
     
     async def get_resource(self, uri: str) -> Any:

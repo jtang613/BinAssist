@@ -366,6 +366,54 @@ class LlmApi:
             # Exception details already logged above
             raise
 
+    def query_with_tools(self, query, signal, tools=None, mcp_service=None) -> str:
+        """
+        Sends a custom query to the LLM with optional tool support.
+
+        Parameters:
+            query (str): The query text.
+            signal (Signal): Qt signal to handle the response asynchronously.
+            tools (list): Optional list of tools in OpenAI format for the LLM to use.
+            mcp_service: Shared MCP service instance for tool execution.
+
+        Returns:
+            str: The query sent to the LLM.
+        """
+        log.log_info(f"[BinAssist] Starting query with tools. Query length: {len(query)}, Tools: {len(tools) if tools else 0}")
+        log.log_debug(f"[BinAssist] Query preview: {query[:200]}...")
+        
+        try:
+            log.log_debug("[BinAssist] Creating provider client")
+            provider = self._create_client()
+            log.log_debug("[BinAssist] Provider created successfully")
+            
+            # Create completion callback
+            def tool_completion_callback():
+                log.log_info("[BinAssist] Tool-enabled query completion callback triggered")
+                signal({"streaming_complete": True})
+                log.log_info("[BinAssist] Tool-enabled query completion signal emitted")
+            
+            if self.use_rag():
+                log.log_debug("[BinAssist] Starting thread with RAG and tools")
+                
+                # Use similar RAG logic but with tools
+                augmented_query = self.rag.augment_query(query)
+                log.log_debug(f"[BinAssist] RAG augmented query length: {len(augmented_query)}")
+                
+                self.thread = self._start_thread(provider, augmented_query, self.SYSTEM_PROMPT, signal, tools, tool_completion_callback, mcp_service)
+                log.log_debug("[BinAssist] Thread started successfully with RAG and tools")
+                return augmented_query
+            else:
+                log.log_debug("[BinAssist] Starting thread with tools (no RAG)")
+                    
+                self.thread = self._start_thread(provider, query, self.SYSTEM_PROMPT, signal, tools, tool_completion_callback, mcp_service)
+                log.log_debug("[BinAssist] Thread started successfully with tools")
+                return query
+                
+        except Exception as e:
+            log.log_error(f"[BinAssist] Error in query_with_tools method: {type(e).__name__}: {e}")
+            raise
+
     def analyze_function(self, action: str, bv, addr, bin_type, il_type, addr_to_text_func, signal) -> str:
         """
         Analyzes the function at a specific address and il_type using the LLM to produce a set of
@@ -453,7 +501,7 @@ class LlmApi:
         """
         return self.rag.get_document_list()
 
-    def _start_thread(self, provider, query, system, signal, tools=None, completion_callback=None) -> None:
+    def _start_thread(self, provider, query, system, signal, tools=None, completion_callback=None, mcp_service=None) -> None:
         """
         Starts a new thread to handle streaming responses from the LLM.
 
@@ -463,6 +511,7 @@ class LlmApi:
             system (str): System context for the query.
             signal (Signal): Qt signal to update with the response.
             tools (dict): A dictionary of available tools for the LLM to consider.
+            mcp_service: Shared MCP service instance for tool execution.
         """
         try:
             log.log_info(f"[BinAssist] Starting new thread for provider: {type(provider).__name__}")
@@ -470,7 +519,7 @@ class LlmApi:
             log.log_debug(f"[BinAssist] Tools count: {len(tools) if tools else 0}")
             
             log.log_debug("[BinAssist] Creating StreamingThread instance")
-            thread = StreamingThread(provider, query, system, tools, completion_callback)
+            thread = StreamingThread(provider, query, system, tools, completion_callback, mcp_service)
             log.log_debug("[BinAssist] StreamingThread instance created")
             
             log.log_debug("[BinAssist] Connecting signal")

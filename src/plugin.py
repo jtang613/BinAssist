@@ -7,6 +7,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 import markdown
 import json
 import re
+from typing import Optional, List, Dict, Any
 
 # BinAssist plugin uses Binary Ninja's native logging interface
 
@@ -171,11 +172,27 @@ class BinAssistWidget(SidebarWidget):
         self.query_response_browser.setOpenLinks(False)
         self.query_response_browser.anchorClicked.connect(self.onAnchorClicked)
 
+        # Create checkbox layout for horizontal arrangement
+        checkbox_layout = QtWidgets.QHBoxLayout()
+        
         # Create and add the 'Use RAG' checkbox
         self.use_rag_checkbox = QtWidgets.QCheckBox("Use RAG")
         self.use_rag_checkbox.setChecked(self.settings.get_boolean('use_rag'))
         self.use_rag_checkbox.stateChanged.connect(self.onUseRAGChanged)
-        layout.addWidget(self.use_rag_checkbox)
+        checkbox_layout.addWidget(self.use_rag_checkbox)
+        
+        # Create and add the 'Use MCP Tools' checkbox (gated behind having enabled servers)
+        if self.hasMCPServersEnabled():
+            self.use_mcp_tools_checkbox = QtWidgets.QCheckBox("Use MCP Tools")
+            self.use_mcp_tools_checkbox.setChecked(self.settings.get_boolean('use_mcp_tools', False))
+            self.use_mcp_tools_checkbox.stateChanged.connect(self.onUseMCPToolsChanged)
+            checkbox_layout.addWidget(self.use_mcp_tools_checkbox)
+        else:
+            # No enabled MCP servers, don't show the checkbox
+            self.use_mcp_tools_checkbox = None
+        
+        checkbox_layout.addStretch()  # Push checkboxes to the left
+        layout.addLayout(checkbox_layout)
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         splitter.addWidget(self.query_response_browser)
@@ -801,6 +818,89 @@ class BinAssistWidget(SidebarWidget):
     def onUseRAGChanged(self, state):
         self.settings.set_boolean('use_rag', state == QtCore.Qt.Checked)
 
+    def onUseMCPToolsChanged(self, state):
+        """Handle changes to the 'Use MCP Tools' checkbox."""
+        # Use the direct checkbox state instead of comparing enum values
+        if hasattr(self, 'use_mcp_tools_checkbox') and self.use_mcp_tools_checkbox is not None:
+            enabled = self.use_mcp_tools_checkbox.isChecked()
+        else:
+            # Fallback to state comparison if checkbox not available
+            enabled = state == QtCore.Qt.Checked.value
+        
+        self.settings.set_boolean('use_mcp_tools', enabled)
+        log.log_info(f"[BinAssist] MCP Tools enabled: {enabled}")
+    
+    def _get_mcp_tools_if_enabled(self) -> Optional[List[Dict[str, Any]]]:
+        """Get MCP tools if enabled and available."""
+        try:
+            # ===================================================================
+            # DEBUG LOGGING: Check MCP Tools checkbox state
+            # ===================================================================
+            log.log_info("=" * 60)
+            log.log_info("[BinAssist] 🔍 MCP TOOLS CHECKBOX DEBUG INFO")
+            log.log_info("=" * 60)
+            
+            # Check if checkbox attribute exists
+            has_checkbox_attr = hasattr(self, 'use_mcp_tools_checkbox')
+            log.log_info(f"[BinAssist] 📦 Has use_mcp_tools_checkbox attribute: {has_checkbox_attr}")
+            
+            if has_checkbox_attr:
+                checkbox_is_none = self.use_mcp_tools_checkbox is None
+                log.log_info(f"[BinAssist] 🔘 Checkbox is None: {checkbox_is_none}")
+                
+                if not checkbox_is_none:
+                    checkbox_is_checked = self.use_mcp_tools_checkbox.isChecked()
+                    log.log_info(f"[BinAssist] ✅ Checkbox is checked: {checkbox_is_checked}")
+                    
+                    # Also check the settings value
+                    settings_value = self.settings.get_boolean('use_mcp_tools', False)
+                    log.log_info(f"[BinAssist] ⚙️  Settings 'use_mcp_tools' value: {settings_value}")
+                else:
+                    log.log_info("[BinAssist] ❌ Checkbox is None - checkbox was not created")
+            else:
+                log.log_info("[BinAssist] ❌ No use_mcp_tools_checkbox attribute found")
+            
+            # Check if MCP servers are enabled
+            has_enabled_servers = self.hasMCPServersEnabled()
+            log.log_info(f"[BinAssist] 🖥️  Has enabled MCP servers: {has_enabled_servers}")
+            
+            log.log_info("=" * 60)
+            
+            # Check if MCP tools checkbox exists and is enabled
+            if (hasattr(self, 'use_mcp_tools_checkbox') and 
+                self.use_mcp_tools_checkbox is not None and 
+                self.use_mcp_tools_checkbox.isChecked()):
+                
+                log.log_info("[BinAssist] ✅ MCP Tools checkbox is enabled, getting tools")
+                
+                # Use shared MCP service
+                mcp_service = self._get_shared_mcp_service()
+                log.log_info("[BinAssist] ♻️  Using shared MCP service")
+                
+                # Get tools from MCP service
+                log.log_info("[BinAssist] 🔧 Getting tools from MCP service")
+                tools = mcp_service.get_tools_for_llm()
+                log.log_info(f"[BinAssist] 📋 Retrieved {len(tools)} MCP tools from service")
+                
+                if tools:
+                    log.log_info("[BinAssist] ✅ Returning tools to caller")
+                    for i, tool in enumerate(tools):
+                        tool_name = tool.get('function', {}).get('name', 'Unknown')
+                        log.log_debug(f"[BinAssist] 🔨 Tool {i+1}: {tool_name}")
+                else:
+                    log.log_info("[BinAssist] ❌ No tools returned from MCP service")
+                
+                return tools if tools else None
+            else:
+                log.log_info("[BinAssist] ❌ MCP Tools checkbox not enabled or not available")
+                return None
+                
+        except Exception as e:
+            log.log_error(f"[BinAssist] 💥 Error getting MCP tools: {e}")
+            import traceback
+            log.log_error(f"[BinAssist] 📋 Full traceback: {traceback.format_exc()}")
+            return None
+
     def onRAGInitClicked(self):
         file_dialog = QtWidgets.QFileDialog()
         markdown_files, _ = file_dialog.getOpenFileNames(self, "Select Markdown Files", "", "Markdown Files (*.md)")
@@ -960,11 +1060,42 @@ class BinAssistWidget(SidebarWidget):
                 query = self._process_custom_query(query)
                 log.log_debug(f"[BinAssist] Processed query length: {len(query)}")
                 
+                # ===================================================================
+                # DEBUG LOGGING: Check MCP tools inclusion
+                # ===================================================================
+                log.log_info("=" * 60)
+                log.log_info("[BinAssist] 🔍 CHECKING MCP TOOLS FOR QUERY")
+                log.log_info("=" * 60)
+                
+                # Check if MCP tools should be included
+                mcp_tools = self._get_mcp_tools_if_enabled()
+                
+                log.log_info("=" * 60)
+                log.log_info("[BinAssist] 📊 MCP TOOLS QUERY DECISION")
+                log.log_info("=" * 60)
+                log.log_info(f"[BinAssist] 📋 MCP tools for this query: {len(mcp_tools) if mcp_tools else 0}")
+                if mcp_tools:
+                    log.log_info("[BinAssist] ✅ Will use query_with_tools method")
+                    for i, tool in enumerate(mcp_tools):
+                        tool_name = tool.get('function', {}).get('name', 'Unknown')
+                        log.log_info(f"[BinAssist] 🔨 Tool {i+1}: {tool_name}")
+                else:
+                    log.log_info("[BinAssist] ❌ Will use standard query method (no MCP tools)")
+                log.log_info("=" * 60)
+                
                 self.session_log.append({"user": query, "assistant": "Awaiting response..."})
 
                 # Prepend the session log to the query for context
                 full_query = "\n".join([f"User: {entry['user']}\nAssistant: {entry['assistant']}" for entry in self.session_log]) + f"\nUser: {query}"
                 log.log_debug(f"[BinAssist] Full query length: {len(full_query)}")
+
+                # Determine which query method to use based on MCP tools availability
+                if mcp_tools:
+                    log.log_info(f"[BinAssist] Using query_with_tools method with {len(mcp_tools)} tools")
+                    query_method = self.LlmApi.query_with_tools
+                else:
+                    log.log_info("[BinAssist] Using standard query method (no MCP tools)")
+                    query_method = self.LlmApi.query
 
                 # Update system context if modified
                 if hasattr(self, 'system_context_edit'):
@@ -975,22 +1106,37 @@ class BinAssistWidget(SidebarWidget):
                         self.LlmApi.SYSTEM_PROMPT = current_context
                         
                         # Store the running request
-                        log.log_debug("[BinAssist] Calling LlmApi.query with custom context")
-                        self.request = self.LlmApi.query(full_query, self.display_custom_response)
+                        if mcp_tools:
+                            log.log_debug("[BinAssist] Calling query_with_tools with custom context")
+                            shared_mcp_service = self._get_shared_mcp_service()
+                            self.request = query_method(full_query, self.display_custom_response, mcp_tools, shared_mcp_service)
+                        else:
+                            log.log_debug("[BinAssist] Calling query with custom context")
+                            self.request = query_method(full_query, self.display_custom_response)
                         
                         # Restore original prompt
                         self.LlmApi.SYSTEM_PROMPT = original_prompt
-                        log.log_debug("[BinAssist] LlmApi.query call completed with custom context")
+                        log.log_debug("[BinAssist] Query call completed with custom context")
                     else:
                         # Store the running request
-                        log.log_debug("[BinAssist] Calling LlmApi.query (else branch)")
-                        self.request = self.LlmApi.query(full_query, self.display_custom_response)
-                        log.log_debug("[BinAssist] LlmApi.query call completed (else branch)")
+                        if mcp_tools:
+                            log.log_debug("[BinAssist] Calling query_with_tools (else branch)")
+                            shared_mcp_service = self._get_shared_mcp_service()
+                            self.request = query_method(full_query, self.display_custom_response, mcp_tools, shared_mcp_service)
+                        else:
+                            log.log_debug("[BinAssist] Calling query (else branch)")
+                            self.request = query_method(full_query, self.display_custom_response)
+                        log.log_debug("[BinAssist] Query call completed (else branch)")
                 else:
                     # Store the running request
-                    log.log_debug("[BinAssist] Calling LlmApi.query (main else)")
-                    self.request = self.LlmApi.query(full_query, self.display_custom_response)
-                    log.log_debug("[BinAssist] LlmApi.query call completed (main else)")
+                    if mcp_tools:
+                        log.log_debug("[BinAssist] Calling query_with_tools (main else)")
+                        shared_mcp_service = self._get_shared_mcp_service()
+                        self.request = query_method(full_query, self.display_custom_response, mcp_tools, shared_mcp_service)
+                    else:
+                        log.log_debug("[BinAssist] Calling query (main else)")
+                        self.request = query_method(full_query, self.display_custom_response)
+                    log.log_debug("[BinAssist] Query call completed (main else)")
 
                 # Update button to Stop
                 self.submit_button.setText("Stop")
@@ -1700,10 +1846,63 @@ class BinAssistWidget(SidebarWidget):
             log.log_error(f"[BinAssist] Provider test failed: {e}")
 
     # MCP Server Management Methods
-    def loadMCPServersFromSettings(self) -> None:
-        """Load MCP servers from settings."""
+    def _get_shared_mcp_service(self):
+        """Get shared MCPService instance for both Settings and Custom Query."""
+        if not hasattr(self, 'mcp_service'):
+            from .core.mcp.service import MCPService
+            self.mcp_service = MCPService(self.settings)
+            self.mcp_service.load_from_settings()
+        return self.mcp_service
+    
+    def hasMCPServersEnabled(self) -> bool:
+        """Check if there are any enabled MCP servers configured using MCPService."""
         try:
-            self.mcp_servers = self.settings.get_json('mcp_servers', [])
+            # Use shared MCP service
+            mcp_service = self._get_shared_mcp_service()
+            
+            # Use MCPService to check for enabled servers
+            if hasattr(mcp_service, 'config') and mcp_service.config:
+                return any(server.enabled for server in mcp_service.config.servers)
+            else:
+                # Fallback to direct settings access if service not properly initialized
+                servers = self.settings.get_json('mcp_servers', [])
+                return any(server.get('enabled', True) for server in servers)
+        except Exception as e:
+            log.log_error(f"[BinAssist] Error checking MCP servers: {e}")
+            return False
+    
+    def refreshMCPToolsCheckboxVisibility(self) -> None:
+        """Refresh the visibility of the MCP Tools checkbox based on server availability."""
+        try:
+            has_enabled_servers = self.hasMCPServersEnabled()
+            
+            # If checkbox exists but shouldn't (no enabled servers)
+            if hasattr(self, 'use_mcp_tools_checkbox') and self.use_mcp_tools_checkbox is not None and not has_enabled_servers:
+                self.use_mcp_tools_checkbox.setVisible(False)
+                self.use_mcp_tools_checkbox = None
+                log.log_info("[BinAssist] MCP Tools checkbox hidden - no enabled servers")
+            
+            # If checkbox doesn't exist but should (has enabled servers)
+            elif (not hasattr(self, 'use_mcp_tools_checkbox') or self.use_mcp_tools_checkbox is None) and has_enabled_servers:
+                # We would need to recreate the checkbox layout, which is complex
+                # For now, just log that a restart is needed
+                log.log_info("[BinAssist] MCP Tools checkbox should be shown - please restart BinAssist to see it")
+                
+        except Exception as e:
+            log.log_error(f"[BinAssist] Error refreshing MCP Tools checkbox: {e}")
+    
+    def loadMCPServersFromSettings(self) -> None:
+        """Load MCP servers from settings using MCPService."""
+        try:
+            # Use shared MCP service
+            mcp_service = self._get_shared_mcp_service()
+            
+            # Convert MCPService config to local format for UI compatibility
+            if hasattr(mcp_service, 'config') and mcp_service.config:
+                self.mcp_servers = [server.to_dict() for server in mcp_service.config.servers]
+            else:
+                # Fallback to direct settings access
+                self.mcp_servers = self.settings.get_json('mcp_servers', [])
             self.updateMCPServersList()
             
             # Select first server if available
@@ -1863,8 +2062,34 @@ class BinAssistWidget(SidebarWidget):
             QtWidgets.QMessageBox.critical(self, "Error", f"Failed to save MCP server: {str(e)}")
 
     def saveMCPServersToSettings(self) -> None:
-        """Save MCP servers to settings."""
-        self.settings.set_json('mcp_servers', self.mcp_servers)
+        """Save MCP servers to settings using MCPService."""
+        try:
+            # Use shared MCP service
+            mcp_service = self._get_shared_mcp_service()
+            
+            # Update MCPService config with local changes
+            from .core.mcp.config import MCPConfig, MCPServerConfig
+            server_configs = []
+            for server_data in self.mcp_servers:
+                try:
+                    server_config = MCPServerConfig.from_dict(server_data)
+                    server_configs.append(server_config)
+                except Exception as e:
+                    log.log_error(f"[BinAssist] Failed to create server config from {server_data}: {e}")
+            
+            # Update service config and save
+            mcp_service.config = MCPConfig(servers=server_configs)
+            mcp_service.save_to_settings()
+            
+            log.log_info(f"[BinAssist] Saved {len(server_configs)} MCP servers via MCPService")
+            
+        except Exception as e:
+            log.log_error(f"[BinAssist] Error saving MCP servers via MCPService: {e}")
+            # Fallback to direct settings save
+            self.settings.set_json('mcp_servers', self.mcp_servers)
+        
+        # Refresh the MCP Tools checkbox visibility in case server availability changed
+        self.refreshMCPToolsCheckboxVisibility()
 
     def clearMCPServerForm(self) -> None:
         """Clear the MCP server configuration form."""
@@ -1931,14 +2156,12 @@ class BinAssistWidget(SidebarWidget):
             self.test_button.setEnabled(False)
             QtWidgets.QApplication.processEvents()
             
-            # Test connection using MCP service
-            log.log_info("[BinAssist] Initializing MCP service for testing")
-            if not hasattr(self, 'mcp_service'):
-                from .core.mcp.service import MCPService
-                self.mcp_service = MCPService(self.settings)
+            # Test connection using shared MCP service
+            log.log_info("[BinAssist] Using shared MCP service for testing")
+            mcp_service = self._get_shared_mcp_service()
                 
             log.log_info(f"[BinAssist] Starting MCP test for server: {server_config.name} ({server_config.transport_type})")
-            result = self.mcp_service.test_connection_sync(server_config)
+            result = mcp_service.test_connection_sync(server_config)
             log.log_info(f"[BinAssist] MCP test completed with result: {result}")
             
             # Show results
