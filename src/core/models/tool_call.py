@@ -14,6 +14,7 @@ class ToolCall:
     
     Attributes:
         id: Unique identifier for the tool call
+        call_id: Call identifier used for linking responses (OpenAI format)
         name: Name of the tool/function to call
         arguments: Arguments to pass to the tool (as dict)
         metadata: Additional metadata
@@ -21,6 +22,7 @@ class ToolCall:
     id: str
     name: str
     arguments: Dict[str, Any]
+    call_id: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
     
     def to_dict(self) -> Dict[str, Any]:

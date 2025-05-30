@@ -103,12 +103,20 @@ class OpenAIProvider(APIProvider, ChatProvider, FunctionCallingProvider):
         log.log_debug(f"[BinAssist] Model {model_name} detected as reasoning model: {is_reasoning}")
         return is_reasoning
     
-    def _prepare_messages(self, messages: List[ChatMessage]) -> List[Dict[str, Any]]:
-        """Convert BinAssist ChatMessage objects to OpenAI message format."""
+    def _prepare_messages(self, messages: List) -> List[Dict[str, Any]]:
+        """Convert BinAssist ChatMessage objects and raw dicts to OpenAI message format."""
         log.log_debug(f"[BinAssist] Converting {len(messages)} messages to OpenAI format")
         
         openai_messages = []
         for msg in messages:
+            # Handle raw dictionary messages (like function_call_output)
+            if isinstance(msg, dict):
+                log.log_debug(f"[BinAssist] Processing raw dict message: {msg.get('type', 'unknown')}")
+                # Pass through raw dict messages directly - they're already in API format
+                openai_messages.append(msg)
+                continue
+            
+            # Handle ChatMessage objects
             openai_msg = {
                 "role": msg.role.value,  # Convert enum to string value
                 "content": msg.content
@@ -116,23 +124,38 @@ class OpenAIProvider(APIProvider, ChatProvider, FunctionCallingProvider):
             
             # Add tool calls if present
             if hasattr(msg, 'tool_calls') and msg.tool_calls:
-                openai_msg["tool_calls"] = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
+                import json
+                tool_calls_list = []
+                for tc in msg.tool_calls:
+                    # Get arguments and ensure they're a JSON string
+                    args = getattr(tc, 'arguments', getattr(tc, 'function_arguments', {}))
+                    if isinstance(args, dict):
+                        args_str = json.dumps(args)
+                    else:
+                        args_str = str(args) if args else '{}'
+                    
+                    tool_call_dict = {
+                        "id": getattr(tc, 'id', 'unknown_id'),
+                        "type": "function", 
                         "function": {
-                            "name": tc.function_name,
-                            "arguments": tc.function_arguments
+                            "name": getattr(tc, 'name', getattr(tc, 'function_name', 'unknown_function')),
+                            "arguments": args_str
                         }
                     }
-                    for tc in msg.tool_calls
-                ]
+                    tool_calls_list.append(tool_call_dict)
+                
+                openai_msg["tool_calls"] = tool_calls_list
             
             # Add tool call id if this is a tool response
             if hasattr(msg, 'tool_call_id') and msg.tool_call_id:
                 openai_msg["tool_call_id"] = msg.tool_call_id
             
             openai_messages.append(openai_msg)
+        
+        # Debug: Log the final message structure being sent to API
+        log.log_info("[BinAssist] 🔍 FINAL API MESSAGES DEBUG:")
+        for i, msg in enumerate(openai_messages):
+            log.log_info(f"[BinAssist] API Message {i}: {msg}")
         
         log.log_debug(f"[BinAssist] Converted messages successfully")
         return openai_messages
@@ -338,6 +361,7 @@ class OpenAIProvider(APIProvider, ChatProvider, FunctionCallingProvider):
                     
                     tool_call = ToolCall(
                         id=tc.id,
+                        call_id=tc.id,  # For OpenAI, call_id is the same as id
                         name=tc.function.name,
                         arguments=arguments
                     )

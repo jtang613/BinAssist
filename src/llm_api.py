@@ -519,7 +519,7 @@ class LlmApi:
             log.log_debug(f"[BinAssist] Tools count: {len(tools) if tools else 0}")
             
             log.log_debug("[BinAssist] Creating StreamingThread instance")
-            thread = StreamingThread(provider, query, system, tools, completion_callback, mcp_service)
+            thread = StreamingThread(provider, query, system, tools, completion_callback, mcp_service, self.settings)
             log.log_debug("[BinAssist] StreamingThread instance created")
             
             log.log_debug("[BinAssist] Connecting signal")
@@ -701,3 +701,26 @@ class LlmApi:
             thread.stop()
         self.threads.clear()  # Clear the list after stopping all threads
         self.thread = None  # Reset single thread reference
+
+    def continue_paused_execution(self):
+        """
+        Continue tool execution for any paused threads.
+        """
+        try:
+            paused_threads = [thread for thread in self.threads if getattr(thread, 'conversation_paused', False)]
+            
+            if not paused_threads:
+                log.log_warn("[BinAssist] No paused threads found to continue")
+                return False
+                
+            if len(paused_threads) > 1:
+                log.log_warn(f"[BinAssist] Multiple paused threads found ({len(paused_threads)}), continuing the first one")
+                
+            thread = paused_threads[0]
+            log.log_info(f"[BinAssist] Continuing paused thread")
+            thread.continue_tool_execution()
+            return True
+            
+        except Exception as e:
+            log.log_error(f"[BinAssist] Error continuing paused execution: {e}")
+            return False

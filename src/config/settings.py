@@ -103,6 +103,14 @@ class BinAssistSettings(Settings):
                 'type': 'boolean',
                 'default': False
             },
+            'binassist.max_tool_calls': {
+                'title': 'Maximum Tool Calls',
+                'description': 'Maximum number of tool calls per query sequence (1-50).',
+                'type': 'number',
+                'default': 10,
+                'minValue': 1,
+                'maxValue': 50
+            },
             'binassist.ui_settings': {
                 'title': 'UI Settings',
                 'description': 'UI-specific settings (internal)',

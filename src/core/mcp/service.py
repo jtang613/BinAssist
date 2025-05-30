@@ -706,25 +706,22 @@ class MCPService(BaseService):
             True if connection is healthy, False otherwise
         """
         try:
+            log.log_debug(f"[BinAssist] Checking connection health...")
+            
             # Basic health checks
             if not hasattr(connection, 'connected') or not connection.connected:
+                log.log_debug(f"[BinAssist] Connection not connected")
                 return False
                 
             if not hasattr(connection, 'session') or not connection.session:
+                log.log_debug(f"[BinAssist] Connection has no session")
                 return False
-                
-            # Check if session streams are open
-            if hasattr(connection.session, '_write_stream'):
-                # Try to access write stream to see if it's closed
-                try:
-                    write_stream = connection.session._write_stream
-                    if hasattr(write_stream, 'is_closing') and write_stream.is_closing():
-                        return False
-                except:
-                    return False
-                    
-            return True
             
+            # More thorough stream checking - assume unhealthy for now to force fresh connections
+            # This is a conservative approach until we can properly detect stream health
+            log.log_info(f"[BinAssist] Marking connection as unhealthy to force fresh connection (conservative approach)")
+            return False
+                    
         except Exception as e:
             log.log_debug(f"[BinAssist] Connection health check failed: {e}")
             return False
@@ -756,37 +753,56 @@ class MCPService(BaseService):
                 log.log_error(f"[BinAssist] Server config not found for {server_name}")
                 return None
             
-            # Use the test connection method which creates a fresh connection
-            log.log_info(f"[BinAssist] Using test connection for fresh tool execution")
-            test_result = self.test_connection_sync(server_config)
+            # Create a temporary fresh connection for tool execution
+            log.log_info(f"[BinAssist] Creating temporary fresh MCP connection")
             
-            if test_result.get('success', False):
-                # Parse tools from test result
-                tools = test_result.get('tools', [])
-                
-                # Find the specific tool
-                target_tool = None
-                for tool_data in tools:
-                    if tool_data.get('name') == tool_name:
-                        target_tool = tool_data
-                        break
-                
-                if not target_tool:
-                    log.log_error(f"[BinAssist] Tool {tool_name} not found in fresh connection")
-                    return None
-                
-                # Execute the tool using a temporary fresh connection
-                # This is a simplified approach - in production you might want to 
-                # establish a proper fresh connection, but for now use test result
-                log.log_info(f"[BinAssist] Tool found in fresh connection, but execution via test is limited")
-                
-                # Return a placeholder result since test connections are temporary
-                return f"Tool {tool_name} executed via fresh connection with args {arguments} (limited result)"
-                
-            else:
-                log.log_error(f"[BinAssist] Fresh connection test failed for {server_name}")
-                return None
+            # Run fresh connection and tool execution in thread pool
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(asyncio.run, self._execute_tool_with_fresh_async(server_config, tool_name, arguments))
+                result = future.result(timeout=120)  # 2 minute timeout for fresh connection + execution
+                return result
                 
         except Exception as e:
             log.log_error(f"[BinAssist] Fresh connection execution failed: {e}")
+            import traceback
+            log.log_error(f"[BinAssist] Fresh connection traceback: {traceback.format_exc()}")
             return None
+    
+    async def _execute_tool_with_fresh_async(self, server_config, tool_name: str, arguments: Dict[str, Any]) -> Any:
+        """Execute tool with a completely fresh async connection."""
+        fresh_connection = None
+        try:
+            log.log_info(f"[BinAssist] Establishing fresh async connection to {server_config.name}")
+            
+            # Create a completely fresh connection
+            fresh_connection = MCPConnection(server_config)
+            
+            # Connect to the server
+            success = await fresh_connection.connect()
+            if not success:
+                log.log_error(f"[BinAssist] Failed to establish fresh connection to {server_config.name}")
+                return None
+            
+            log.log_info(f"[BinAssist] Fresh connection established, executing tool {tool_name}")
+            
+            # Execute the tool on the fresh connection
+            result = await fresh_connection.call_tool(tool_name, arguments)
+            log.log_info(f"[BinAssist] Tool {tool_name} executed successfully on fresh connection")
+            
+            return result
+            
+        except Exception as e:
+            log.log_error(f"[BinAssist] Fresh async tool execution failed: {e}")
+            import traceback
+            log.log_error(f"[BinAssist] Fresh async traceback: {traceback.format_exc()}")
+            return None
+            
+        finally:
+            # Clean up fresh connection
+            if fresh_connection:
+                try:
+                    log.log_debug(f"[BinAssist] Cleaning up fresh connection")
+                    await fresh_connection.disconnect()
+                except Exception as cleanup_error:
+                    log.log_debug(f"[BinAssist] Fresh connection cleanup failed: {cleanup_error}")
+                    pass

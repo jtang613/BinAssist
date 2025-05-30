@@ -131,6 +131,9 @@ class BinAssistWidget(SidebarWidget):
 
         self.submit_button = None
         self.submit_label = None
+        
+        # Tool execution state
+        self.continue_tool_execution = False
 
         layout = QtWidgets.QVBoxLayout()
         layout.addWidget(self.tabs)
@@ -449,6 +452,28 @@ class BinAssistWidget(SidebarWidget):
         
         mcp_group.setLayout(mcp_layout)
         layout.addWidget(mcp_group)
+
+        # Tool Execution Section
+        tool_execution_group = QtWidgets.QGroupBox("Tool Execution")
+        tool_execution_layout = QtWidgets.QFormLayout()
+        
+        # Max Tool Calls setting
+        self.max_tool_calls_spinbox = QtWidgets.QSpinBox()
+        self.max_tool_calls_spinbox.setMinimum(1)
+        self.max_tool_calls_spinbox.setMaximum(50)
+        self.max_tool_calls_spinbox.setValue(self.settings.get_integer('binassist.max_tool_calls'))
+        self.max_tool_calls_spinbox.valueChanged.connect(self.onMaxToolCallsChanged)
+        
+        tool_execution_layout.addRow("Maximum Tool Calls:", self.max_tool_calls_spinbox)
+        
+        # Add help text
+        help_label = QtWidgets.QLabel("Maximum number of tool calls per query sequence.\nWhen reached, execution pauses and you can click 'Continue' to resume.")
+        help_label.setStyleSheet("color: gray; font-size: 10px;")
+        help_label.setWordWrap(True)
+        tool_execution_layout.addRow("", help_label)
+        
+        tool_execution_group.setLayout(tool_execution_layout)
+        layout.addWidget(tool_execution_group)
 
         # System Context Section
         system_context_group = QtWidgets.QGroupBox("System Context")
@@ -805,15 +830,32 @@ class BinAssistWidget(SidebarWidget):
         Returns:
             str: The text of the currently selected line.
         """
-        if self.il_type == FunctionGraphType.NormalFunctionGraph:
-            line = f"0x{addr:08x}  {bv.get_disassembly(addr)}"
-        else:
-            for inst in PythonScriptingInstance._registered_instances:
-                break
-            inst.interpreter.update_locals()
-            inst.interpreter.update_magic_variables()
-            line = PythonScriptingProvider.magic_variables['current_il_instruction'].get_value(inst)
-        return line
+        try:
+            log.log_debug(f"[BinAssist] get_line_text: il_type = {self.il_type}")
+            if self.il_type == FunctionGraphType.NormalFunctionGraph:
+                line = f"0x{addr:08x}  {bv.get_disassembly(addr)}"
+                log.log_debug(f"[BinAssist] get_line_text: Using normal function graph, line = {line}")
+            else:
+                log.log_debug("[BinAssist] get_line_text: Using IL mode")
+                inst = None
+                for inst in PythonScriptingInstance._registered_instances:
+                    break
+                if inst is None:
+                    log.log_warn("[BinAssist] get_line_text: No Python scripting instance found, using fallback")
+                    line = f"0x{addr:08x}  {bv.get_disassembly(addr)}"
+                else:
+                    inst.interpreter.update_locals()
+                    inst.interpreter.update_magic_variables()
+                    il_instruction = PythonScriptingProvider.magic_variables['current_il_instruction'].get_value(inst)
+                    log.log_debug(f"[BinAssist] get_line_text: IL instruction type = {type(il_instruction)}")
+                    # Convert IL instruction to string representation
+                    line = str(il_instruction) if il_instruction is not None else f"0x{addr:08x}  (no IL instruction)"
+                    log.log_debug(f"[BinAssist] get_line_text: IL line = {line}")
+            return line
+        except Exception as e:
+            log.log_error(f"[BinAssist] Error in get_line_text: {e}")
+            # Fallback to basic disassembly
+            return f"0x{addr:08x}  {bv.get_disassembly(addr)}"
 
     def onUseRAGChanged(self, state):
         self.settings.set_boolean('use_rag', state == QtCore.Qt.Checked)
@@ -1052,11 +1094,13 @@ class BinAssistWidget(SidebarWidget):
 
             if self.submit_button.text() == "Submit":
                 self.submit_label = self.submit_button.text()
+                log.log_debug("[BinAssist] Submit case - starting new query")
                 
                 # Start a new query
                 query = self.query_edit.toPlainText()
                 log.log_debug(f"[BinAssist] Original query length: {len(query)}")
                 
+                log.log_debug("[BinAssist] About to call _process_custom_query")
                 query = self._process_custom_query(query)
                 log.log_debug(f"[BinAssist] Processed query length: {len(query)}")
                 
@@ -1145,6 +1189,27 @@ class BinAssistWidget(SidebarWidget):
                 # Start timeout timer (5 minutes = 300000 ms)
                 self.button_timeout_timer.start(300000)  # 5 minute timeout
                 log.log_debug("[BinAssist] Button timeout timer started (5 minutes)")
+                
+            elif self.submit_button.text() == "Continue":
+                log.log_info("[BinAssist] Continue button clicked - resuming tool execution")
+                self.submit_label = "Submit"  # Will revert to Submit when done
+                
+                # Set button to Stop during continuation
+                self.submit_button.setText("Stop")
+                
+                # Continue paused tool execution
+                success = self.LlmApi.continue_paused_execution()
+                if not success:
+                    log.log_error("[BinAssist] Failed to continue paused execution")
+                    self._revert_button_state("continue_failed")
+                    self.display_custom_response({
+                        "response": "❌ No paused tool execution found to continue", 
+                        "append": True
+                    })
+                
+                # Skip the normal query processing
+                return
+                
             else:
                 log.log_debug("[BinAssist] Stopping running query")
                 # Stop the running query
@@ -1545,6 +1610,14 @@ class BinAssistWidget(SidebarWidget):
             
         except Exception as e:
             log.log_error(f"[BinAssist] Error auto-saving system context: {e}")
+
+    def onMaxToolCallsChanged(self, value) -> None:
+        """Handle max tool calls setting change."""
+        try:
+            self.settings.set_integer('binassist.max_tool_calls', value)
+            log.log_debug(f"[BinAssist] Max tool calls setting updated to: {value}")
+        except Exception as e:
+            log.log_error(f"[BinAssist] Error updating max tool calls setting: {e}")
     
     def onProviderConfigChanged(self) -> None:
         """
@@ -2341,15 +2414,33 @@ class BinAssistWidget(SidebarWidget):
                 log.log_info("[BinAssist] Received streaming completion signal in display_custom_response - reverting button")
                 self._revert_button_state("display_custom_response_completion")
                 return
-                
-            # Update session log with response
-            self.session_log[-1]["assistant"] = response["response"]
+            
+            # Check if this is a max limit reached signal
+            if isinstance(response, dict) and response.get("max_limit_reached"):
+                log.log_info("[BinAssist] Max tool calls limit reached - setting Continue button")
+                self._set_continue_button_state()
+                # Fall through to append the message
+            
+            # Handle append mode for tool execution logging
+            if isinstance(response, dict) and response.get("append"):
+                # Append to existing assistant response
+                if self.session_log and len(self.session_log) > 0:
+                    current_response = self.session_log[-1].get("assistant", "")
+                    new_text = response["response"]
+                    self.session_log[-1]["assistant"] = current_response + "\n\n" + new_text
+                else:
+                    # Fallback: create new session entry
+                    self.session_log.append({"user": "Tool execution", "assistant": response["response"]})
+            else:
+                # Normal mode: replace the assistant response
+                self.session_log[-1]["assistant"] = response["response"]
+            
             # Rebuild and display the full conversation history
             full_conversation = "\n".join([f"---\n### User:\n{entry['user']}\n\n---\n### Assistant:\n{entry['assistant']}" for entry in self.session_log])
 
             html_resp = markdown.markdown(full_conversation, extensions=['fenced_code'])
             html_resp += self._generate_feedback_buttons()
-            self.response = response["response"]
+            self.response = self.session_log[-1]["assistant"]  # Use the current assistant response
             self.query_response_browser.setHtml(html_resp)
         except Exception as e:
             log.log_error(f"[BinAssist] Error displaying custom response: {e}")
@@ -2501,6 +2592,9 @@ class BinAssistWidget(SidebarWidget):
             if hasattr(self, 'button_timeout_timer'):
                 self.button_timeout_timer.stop()
                 
+            # Clear continue state
+            self.continue_tool_execution = False
+                
             # Log thread status but don't block button revert
             if hasattr(self, 'LlmApi'):
                 is_running = self.LlmApi.isRunning()
@@ -2521,6 +2615,26 @@ class BinAssistWidget(SidebarWidget):
                     
         except Exception as e:
             log.log_error(f"[BinAssist] Error reverting button state: {e}")
+
+    def _set_continue_button_state(self) -> None:
+        """
+        Set button to 'Continue' state for resuming tool execution.
+        """
+        try:
+            log.log_info("[BinAssist] Setting Continue button state")
+            self.continue_tool_execution = True
+            
+            # Stop any timeout timer
+            if hasattr(self, 'button_timeout_timer'):
+                self.button_timeout_timer.stop()
+                
+            # Set button text to Continue
+            if hasattr(self, 'submit_button'):
+                self.submit_button.setText("Continue")
+                log.log_info("[BinAssist] Button set to 'Continue' state")
+                    
+        except Exception as e:
+            log.log_error(f"[BinAssist] Error setting continue button state: {e}")
             # Last resort - try to set to common labels
             try:
                 if hasattr(self, 'submit_button'):
@@ -2577,10 +2691,9 @@ class BinAssistWidget(SidebarWidget):
         Returns:
             str: The processed query with placeholders replaced by actual binary data.
         """
-        func = self.get_func_text()
+        log.log_debug("[BinAssist] _process_custom_query: Starting placeholder processing")
 
-        line = self.get_line_text(self.bv, self.offset_addr)
-
+        # Handle #range placeholder
         match = re.search(r'#range\(0x([0-9a-fA-F]+), 0x([0-9a-fA-F]+)\)', query)
         if match:
             range_start = int(match.group(1), 16)  # Convert hex to int
@@ -2590,9 +2703,31 @@ class BinAssistWidget(SidebarWidget):
             range_text = self.LlmApi.DataToText(self.bv, range_start, range_end)
             query = query[:range_end_offset] + f"\n```\n{range_text}\n```\n" + query[range_end_offset:]
 
-        query = query.replace("#line", f'\n```\n{line}\n```\n')
-        query = query.replace('#func', f'\n```\n{func(self.bv, self.offset_addr)}\n```\n')
-        query = query.replace("#addr", hex(self.offset_addr) or "")
+        # Handle #line placeholder (only if present)
+        if "#line" in query:
+            log.log_debug("[BinAssist] _process_custom_query: Getting line text for #line placeholder")
+            line = self.get_line_text(self.bv, self.offset_addr)
+            query = query.replace("#line", f'\n```\n{line}\n```\n')
+
+        # Handle #func placeholder (only if present)
+        if "#func" in query:
+            log.log_debug("[BinAssist] _process_custom_query: Getting func text for #func placeholder")
+            func = self.get_func_text()
+            log.log_debug(f"[BinAssist] _process_custom_query: func = {func}")
+            try:
+                func_result = func(self.bv, self.offset_addr)
+                log.log_debug(f"[BinAssist] _process_custom_query: func_result type = {type(func_result)}")
+                log.log_debug(f"[BinAssist] _process_custom_query: func_result = {func_result}")
+                query = query.replace('#func', f'\n```\n{func_result}\n```\n')
+            except Exception as e:
+                log.log_error(f"[BinAssist] Error calling func(): {e}")
+                query = query.replace('#func', f'\n```\nError getting function text: {e}\n```\n')
+
+        # Handle #addr placeholder
+        if "#addr" in query:
+            query = query.replace("#addr", hex(self.offset_addr) or "")
+        
+        log.log_debug("[BinAssist] _process_custom_query: All replacements complete")
         return query
 
     def _generate_feedback_buttons(self) -> str:
