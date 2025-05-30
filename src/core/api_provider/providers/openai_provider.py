@@ -452,7 +452,8 @@ class OpenAIProvider(APIProvider, ChatProvider, FunctionCallingProvider):
                 # Extract text content
                 if message.content:
                     result["content"] = message.content
-                    log.log_info(f"[BinAssist] 🎯 Response type: Text response ({len(message.content)} characters)")
+                    log.log_info(f"[BinAssist] 📝 Text content extracted: {len(message.content)} characters")
+                    log.log_info(f"[BinAssist] 📝 Text content preview: {repr(message.content[:200])}")
                 
                 # Extract tool calls if present
                 if message.tool_calls:
@@ -476,6 +477,16 @@ class OpenAIProvider(APIProvider, ChatProvider, FunctionCallingProvider):
                     
                     result["tool_calls"] = tool_calls
                     log.log_debug(f"[BinAssist] Converted {len(tool_calls)} tool calls")
+                
+                # Log when both tool calls and text content are present
+                if result["tool_calls"] and result["content"]:
+                    log.log_info(f"[BinAssist] 🎯 OpenAI response contains BOTH tool calls ({len(result['tool_calls'])}) AND text content ({len(result['content'])} chars)")
+                elif result["tool_calls"]:
+                    log.log_info(f"[BinAssist] 🎯 OpenAI response type: Tool calls only ({len(result['tool_calls'])} calls)")
+                elif result["content"]:
+                    log.log_info(f"[BinAssist] 🎯 OpenAI response type: Text content only ({len(result['content'])} characters)")
+                else:
+                    log.log_warn(f"[BinAssist] 🎯 OpenAI response type: Empty (no tool calls or text content)")
                 
                 return result
             
@@ -510,22 +521,34 @@ class OpenAIProvider(APIProvider, ChatProvider, FunctionCallingProvider):
         """Stream a function call completion with OpenAI-specific handling."""
         from binaryninja import log
         
-        # Use function call API to get response (may contain tools OR text)
+        # Use function call API to get response (may contain tools AND/OR text)
         response_data = self.create_function_call_with_content(messages, tools, **kwargs)
         tool_calls = response_data.get('tool_calls', [])
         text_content = response_data.get('content', '')
         
+        log.log_info(f"[BinAssist] OpenAI Provider: Response contains {len(tool_calls)} tool calls and {len(text_content)} characters of text")
+        
         # Handle tool calls if present
         if tool_calls:
-            log.log_info(f"[BinAssist] Handling {len(tool_calls)} tool calls")
+            log.log_info(f"[BinAssist] OpenAI Provider: Handling {len(tool_calls)} tool calls")
+            log.log_info(f"[BinAssist] OpenAI Provider: Text content with tool calls (explanatory): {repr(text_content[:100]) if text_content else 'None'}")
+            
+            # Display explanatory text alongside tool calls if present
+            if text_content and text_handler:
+                log.log_info(f"[BinAssist] OpenAI Provider: Displaying explanatory text ({len(text_content)} chars) alongside tool calls")
+                formatted_text = f"💭 {text_content.strip()}\n"
+                text_handler(formatted_text)
+            
             response_handler(tool_calls)
+            log.log_info(f"[BinAssist] OpenAI Provider: Tool calls handled successfully")
         
-        # Handle text content if present (final response from LLM)
-        if text_content and text_handler:
-            log.log_info(f"[BinAssist] Handling text response: {len(text_content)} characters")
+        # Handle text content when there are NO tool calls (final response)
+        elif text_content and text_handler:
+            log.log_info(f"[BinAssist] OpenAI Provider: Handling final text response ({len(text_content)} characters)")
             text_handler(text_content)
+            log.log_info(f"[BinAssist] OpenAI Provider: Final text response handled successfully")
         elif text_content:
-            log.log_warn("[BinAssist] Got text content but no text handler provided")
+            log.log_warn(f"[BinAssist] OpenAI Provider: Text content available ({len(text_content)} chars) but no text_handler provided")
         
         # Call completion handler if provided  
         if completion_handler:

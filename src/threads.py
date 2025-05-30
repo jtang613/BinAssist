@@ -539,10 +539,13 @@ class StreamingThread(QtCore.QThread):
             def continue_text_response(text_content):
                 # Handle final text response from LLM
                 log.log_info(f"[BinAssist] 📝 Processing final text response: {len(text_content)} characters")
+                log.log_info(f"[BinAssist] 📝 Final text content preview: {repr(text_content[:200])}")
                 if self.running:
                     self.update_response.emit({"response": text_content, "append": True})
             
             # Call provider with updated message history
+            log.log_info(f"[BinAssist] 🚀 About to call provider.stream_function_call for continuation with {len(self.messages)} messages")
+            log.log_info(f"[BinAssist] 🚀 Text handler available: {'Yes' if continue_text_response else 'No'}")
             self.provider.stream_function_call(
                 self.messages, 
                 self.tools, 
@@ -550,6 +553,7 @@ class StreamingThread(QtCore.QThread):
                 continue_completion,
                 continue_text_response
             )
+            log.log_info(f"[BinAssist] ✅ Provider.stream_function_call for continuation completed")
             
         except Exception as e:
             log.log_error(f"[BinAssist] Error continuing conversation: {e}")

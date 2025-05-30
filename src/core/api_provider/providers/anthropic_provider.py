@@ -220,6 +220,18 @@ class AnthropicProvider(APIProvider, ChatProvider, FunctionCallingProvider):
             log.log_info(f"[BinAssist] Anthropic function call payload: {json.dumps(payload, indent=2)}")
             log.log_info(f"[BinAssist] Making function call using Anthropic SDK")
             
+            # Debug: Log the message sequence for tool call matching
+            log.log_info("[BinAssist] === ANTHROPIC MESSAGE SEQUENCE DEBUG ===")
+            for i, msg in enumerate(anthropic_messages):
+                log.log_info(f"[BinAssist] Message[{i}]: role={msg['role']}")
+                if isinstance(msg['content'], list):
+                    for j, content_block in enumerate(msg['content']):
+                        if content_block.get('type') == 'tool_use':
+                            log.log_info(f"[BinAssist]   tool_use[{j}]: id={content_block['id']}, name={content_block['name']}")
+                        elif content_block.get('type') == 'tool_result':
+                            log.log_info(f"[BinAssist]   tool_result[{j}]: tool_use_id={content_block['tool_use_id']}")
+            log.log_info("[BinAssist] === END MESSAGE SEQUENCE DEBUG ===")
+            
             # Use Anthropic SDK for function calls
             response = self._anthropic_client.messages.create(**payload)
             
@@ -232,10 +244,11 @@ class AnthropicProvider(APIProvider, ChatProvider, FunctionCallingProvider):
                     tool_call = ToolCall(
                         id=content_block.id,
                         name=content_block.name,
-                        arguments=content_block.input
+                        arguments=content_block.input,
+                        call_id=content_block.id  # Set call_id to match id for Anthropic compatibility
                     )
                     tool_calls.append(tool_call)
-                    log.log_info(f"[BinAssist] Created ToolCall: id={content_block.id}, name={content_block.name}, args={content_block.input}")
+                    log.log_info(f"[BinAssist] Created ToolCall: id={content_block.id}, call_id={content_block.id}, name={content_block.name}, args={content_block.input}")
             
             log.log_info(f"[BinAssist] Extracted {len(tool_calls)} tool calls total")
             log.log_debug(f"[BinAssist] All tool calls: {[f'{tc.name}({tc.arguments})' for tc in tool_calls]}")
@@ -256,6 +269,94 @@ class AnthropicProvider(APIProvider, ChatProvider, FunctionCallingProvider):
                 raise
             raise APIProviderError(f"Unexpected error during function call: {e}")
     
+    def create_function_call_with_content(self, messages: List[ChatMessage], 
+                                        tools: List[Dict[str, Any]], **kwargs) -> Dict[str, Any]:
+        """Create a function call completion that returns both tool calls and text content."""
+        log.log_info(f"[BinAssist] Starting Anthropic function call with content for {self.config.model} with {len(messages)} messages and {len(tools)} tools")
+        
+        try:
+            # Convert messages and tools to Anthropic format
+            anthropic_messages = self._prepare_messages(messages)
+            system_message = self._extract_system_message(messages)
+            anthropic_tools = self._convert_tools_to_anthropic(tools)
+            
+            payload = {
+                "model": self.config.model,
+                "messages": anthropic_messages,
+                "tools": anthropic_tools,
+                "max_tokens": self.config.max_tokens,
+                **kwargs
+            }
+            
+            if system_message:
+                payload["system"] = system_message
+            
+            log.log_info(f"[BinAssist] Anthropic function call with content payload: {json.dumps(payload, indent=2)}")
+            
+            # Debug: Log the message sequence for tool call matching
+            log.log_info("[BinAssist] === ANTHROPIC MESSAGE SEQUENCE DEBUG ===")
+            for i, msg in enumerate(anthropic_messages):
+                log.log_info(f"[BinAssist] Message[{i}]: role={msg['role']}")
+                if isinstance(msg['content'], list):
+                    for j, content_block in enumerate(msg['content']):
+                        if content_block.get('type') == 'tool_use':
+                            log.log_info(f"[BinAssist]   tool_use[{j}]: id={content_block['id']}, name={content_block['name']}")
+                        elif content_block.get('type') == 'tool_result':
+                            log.log_info(f"[BinAssist]   tool_result[{j}]: tool_use_id={content_block['tool_use_id']}")
+            log.log_info("[BinAssist] === END MESSAGE SEQUENCE DEBUG ===")
+            
+            # Use Anthropic SDK for function calls
+            response = self._anthropic_client.messages.create(**payload)
+            
+            log.log_info(f"[BinAssist] Function call with content response received: {response}")
+            
+            # Log raw response structure for debugging
+            log.log_info("[BinAssist] === RAW ANTHROPIC RESPONSE DEBUG ===")
+            log.log_info(f"[BinAssist] Response type: {type(response)}")
+            log.log_info(f"[BinAssist] Response content blocks: {len(response.content)}")
+            for i, content_block in enumerate(response.content):
+                log.log_info(f"[BinAssist] Content[{i}]: type={content_block.type}")
+                if content_block.type == "text":
+                    log.log_info(f"[BinAssist] Content[{i}]: text={repr(content_block.text[:200])}")
+                elif content_block.type == "tool_use":
+                    log.log_info(f"[BinAssist] Content[{i}]: tool_use id={content_block.id}, name={content_block.name}")
+            log.log_info("[BinAssist] === END RAW ANTHROPIC RESPONSE DEBUG ===")
+            
+            result = {"tool_calls": [], "content": ""}
+            
+            # Extract both tool calls and text content from response
+            for content_block in response.content:
+                if content_block.type == "tool_use":
+                    tool_call = ToolCall(
+                        id=content_block.id,
+                        name=content_block.name,
+                        arguments=content_block.input,
+                        call_id=content_block.id  # Set call_id to match id for Anthropic compatibility
+                    )
+                    result["tool_calls"].append(tool_call)
+                    log.log_info(f"[BinAssist] 🔧 Tool call extracted: id={content_block.id}, name={content_block.name}")
+                elif content_block.type == "text":
+                    result["content"] += content_block.text
+                    log.log_info(f"[BinAssist] 📝 Text content extracted: {len(content_block.text)} characters")
+            
+            log.log_info(f"[BinAssist] 🎯 Anthropic response analysis: {len(result['tool_calls'])} tool calls, {len(result['content'])} characters of text")
+            return result
+            
+        except anthropic.AuthenticationError as e:
+            log.log_error(f"[BinAssist] Authentication error during function call with content: {e}")
+            raise AuthenticationError(f"Anthropic authentication failed: {e}")
+        except anthropic.RateLimitError as e:
+            log.log_error(f"[BinAssist] Rate limit error during function call with content: {e}")
+            raise RateLimitError(f"Anthropic rate limit exceeded: {e}")
+        except anthropic.APIError as e:
+            log.log_error(f"[BinAssist] Anthropic API error during function call with content: {e}")
+            raise APIProviderError(f"Anthropic API error: {e}")
+        except Exception as e:
+            log.log_error(f"[BinAssist] Function call with content failed: {type(e).__name__}: {e}")
+            if isinstance(e, (NetworkError, APIProviderError, AuthenticationError, RateLimitError)):
+                raise
+            raise APIProviderError(f"Unexpected error during function call with content: {e}")
+    
     def stream_function_call(self, messages: List[ChatMessage], 
                            tools: List[Dict[str, Any]],
                            response_handler: Callable[[List[ToolCall]], None], 
@@ -263,15 +364,37 @@ class AnthropicProvider(APIProvider, ChatProvider, FunctionCallingProvider):
                            text_handler: Callable[[str], None] = None,
                            **kwargs) -> None:
         """Stream a function call completion."""
-        # For now, use non-streaming for function calls since streaming
-        # tool calls is more complex to implement for Anthropic
-        tool_calls = self.create_function_call(messages, tools, **kwargs)
-        log.log_info(f"[BinAssist] AnthropicProvider: About to call response_handler with {len(tool_calls)} tool calls")
-        log.log_debug(f"[BinAssist] AnthropicProvider: Tool calls being passed: {tool_calls}")
-        log.log_info(f"[BinAssist] AnthropicProvider: response_handler function is: {response_handler}")
+        log.log_info(f"[BinAssist] AnthropicProvider: Starting stream_function_call with text_handler={'available' if text_handler else 'None'}")
+        
+        # Use function call API to get response (may contain tools OR text)
+        response_data = self.create_function_call_with_content(messages, tools, **kwargs)
+        tool_calls = response_data.get('tool_calls', [])
+        text_content = response_data.get('content', '')
+        
+        log.log_info(f"[BinAssist] AnthropicProvider: Response contains {len(tool_calls)} tool calls and {len(text_content)} characters of text")
+        
         try:
-            response_handler(tool_calls)
-            log.log_info(f"[BinAssist] AnthropicProvider: response_handler call completed successfully")
+            # Handle tool calls if present
+            if tool_calls:
+                log.log_info(f"[BinAssist] AnthropicProvider: Handling {len(tool_calls)} tool calls")
+                log.log_info(f"[BinAssist] AnthropicProvider: Text content with tool calls (explanatory): {repr(text_content[:100]) if text_content else 'None'}")
+                
+                # Display explanatory text alongside tool calls if present
+                if text_content and text_handler:
+                    log.log_info(f"[BinAssist] AnthropicProvider: Displaying explanatory text ({len(text_content)} chars) alongside tool calls")
+                    formatted_text = f"💭 {text_content.strip()}\n"
+                    text_handler(formatted_text)
+                
+                response_handler(tool_calls)
+                log.log_info(f"[BinAssist] AnthropicProvider: Tool calls handled successfully")
+            
+            # Handle text content when there are NO tool calls (final response)
+            elif text_content and text_handler:
+                log.log_info(f"[BinAssist] AnthropicProvider: Handling final text response ({len(text_content)} characters)")
+                text_handler(text_content)
+                log.log_info(f"[BinAssist] AnthropicProvider: Final text response handled successfully")
+            elif text_content:
+                log.log_warn(f"[BinAssist] AnthropicProvider: Text content available ({len(text_content)} chars) but no text_handler provided")
             
             # Call completion handler if provided
             if completion_handler:
@@ -279,7 +402,7 @@ class AnthropicProvider(APIProvider, ChatProvider, FunctionCallingProvider):
                 completion_handler()
                 
         except Exception as e:
-            log.log_error(f"[BinAssist] AnthropicProvider: Error calling response_handler: {e}")
+            log.log_error(f"[BinAssist] AnthropicProvider: Error in stream_function_call: {e}")
             log.log_error(f"[BinAssist] AnthropicProvider: Exception type: {type(e)}")
             raise
     
@@ -287,7 +410,11 @@ class AnthropicProvider(APIProvider, ChatProvider, FunctionCallingProvider):
         """Convert messages to Anthropic format."""
         anthropic_messages = []
         
-        for message in messages:
+        log.log_info(f"[BinAssist] Anthropic _prepare_messages: Processing {len(messages)} messages")
+        
+        for i, message in enumerate(messages):
+            log.log_info(f"[BinAssist] Anthropic message[{i}]: role={message.role}, content_len={len(message.content) if message.content else 0}")
+            
             # Skip system messages - they're handled separately
             if message.role == MessageRole.SYSTEM:
                 continue
@@ -299,22 +426,26 @@ class AnthropicProvider(APIProvider, ChatProvider, FunctionCallingProvider):
             
             # Handle tool calls for assistant messages
             if message.tool_calls:
+                log.log_info(f"[BinAssist] Anthropic message[{i}]: Found {len(message.tool_calls)} tool calls")
                 content = []
                 if message.content:
                     content.append({"type": "text", "text": message.content})
                 
-                for tool_call in message.tool_calls:
-                    content.append({
+                for j, tool_call in enumerate(message.tool_calls):
+                    tool_use_block = {
                         "type": "tool_use",
                         "id": tool_call.id,
                         "name": tool_call.name,
                         "input": tool_call.arguments
-                    })
+                    }
+                    content.append(tool_use_block)
+                    log.log_info(f"[BinAssist] Anthropic tool_use[{j}]: id={tool_call.id}, name={tool_call.name}")
                 
                 anthropic_msg["content"] = content
             
             # Handle tool responses
             if message.role == MessageRole.TOOL:
+                log.log_info(f"[BinAssist] Anthropic message[{i}]: Tool result with tool_call_id={message.tool_call_id}")
                 anthropic_msg = {
                     "role": "user",
                     "content": [
@@ -327,7 +458,9 @@ class AnthropicProvider(APIProvider, ChatProvider, FunctionCallingProvider):
                 }
             
             anthropic_messages.append(anthropic_msg)
+            log.log_info(f"[BinAssist] Anthropic message[{i}]: Converted to {anthropic_msg['role']}")
         
+        log.log_info(f"[BinAssist] Anthropic _prepare_messages: Generated {len(anthropic_messages)} anthropic messages")
         return anthropic_messages
     
     def _extract_system_message(self, messages: List[ChatMessage]) -> str:
