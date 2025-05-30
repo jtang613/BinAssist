@@ -540,7 +540,7 @@ class StreamingThread(QtCore.QThread):
                 # Handle final text response from LLM
                 log.log_info(f"[BinAssist] 📝 Processing final text response: {len(text_content)} characters")
                 if self.running:
-                    self.update_response.emit({"response": text_content})
+                    self.update_response.emit({"response": text_content, "append": True})
             
             # Call provider with updated message history
             self.provider.stream_function_call(

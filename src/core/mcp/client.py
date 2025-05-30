@@ -477,13 +477,20 @@ class MCPConnection:
             
             # Extract content from result
             if hasattr(result, 'content') and result.content:
-                # Return the first content item if available
-                if len(result.content) > 0:
-                    content_item = result.content[0]
+                # Process all content items, not just the first one
+                content_parts = []
+                for content_item in result.content:
                     if hasattr(content_item, 'text'):
-                        return content_item.text
+                        content_parts.append(content_item.text)
                     else:
-                        return str(content_item)
+                        content_parts.append(str(content_item))
+                
+                # Join all content parts
+                if len(content_parts) == 1:
+                    return content_parts[0]
+                elif len(content_parts) > 1:
+                    log.log_info(f"[BinAssist] Tool returned {len(content_parts)} content items, joining them")
+                    return '\n'.join(content_parts)
                 else:
                     return "Tool executed successfully"
             else:

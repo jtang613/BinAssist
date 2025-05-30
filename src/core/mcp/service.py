@@ -446,13 +446,21 @@ class MCPService(BaseService):
                     
                     # Extract content from result
                     if hasattr(result, 'content') and result.content:
-                        # Return the first content item if available
                         if len(result.content) > 0:
-                            content_item = result.content[0]
-                            if hasattr(content_item, 'text'):
-                                return content_item.text
+                            # Process all content items, not just the first one
+                            content_parts = []
+                            for content_item in result.content:
+                                if hasattr(content_item, 'text'):
+                                    content_parts.append(content_item.text)
+                                else:
+                                    content_parts.append(str(content_item))
+                            
+                            # Join all content parts
+                            if len(content_parts) == 1:
+                                return content_parts[0]
                             else:
-                                return str(content_item)
+                                log.log_info(f"[BinAssist] Tool returned {len(content_parts)} content items, joining them")
+                                return '\n'.join(content_parts)
                         else:
                             return "Tool executed successfully"
                     else:

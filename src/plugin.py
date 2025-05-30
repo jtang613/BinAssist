@@ -375,38 +375,36 @@ class BinAssistWidget(SidebarWidget):
         mcp_group = QtWidgets.QGroupBox("MCP Servers")
         mcp_layout = QtWidgets.QVBoxLayout()
         
-        # MCP servers management
-        mcp_controls_layout = QtWidgets.QHBoxLayout()
+        # MCP servers management (similar to API Providers layout)
+        mcp_mgmt_layout = QtWidgets.QHBoxLayout()
         
         self.mcp_servers_list = QtWidgets.QListWidget()
         self.mcp_servers_list.setMaximumHeight(150)
         self.mcp_servers_list.currentRowChanged.connect(self.onMCPServerSelected)
-        mcp_layout.addWidget(self.mcp_servers_list)
+        mcp_mgmt_layout.addWidget(self.mcp_servers_list)
+        
+        # MCP server management buttons (to the right of the list)
+        mcp_buttons_layout = QtWidgets.QVBoxLayout()
         
         mcp_add_btn = QtWidgets.QPushButton("Add")
         mcp_add_btn.clicked.connect(self.addMCPServer)
-        mcp_add_btn.setMaximumWidth(80)
-        mcp_controls_layout.addWidget(mcp_add_btn)
+        mcp_buttons_layout.addWidget(mcp_add_btn)
         
         mcp_remove_btn = QtWidgets.QPushButton("Remove")
         mcp_remove_btn.clicked.connect(self.removeMCPServer)
-        mcp_remove_btn.setMaximumWidth(80)
-        mcp_controls_layout.addWidget(mcp_remove_btn)
+        mcp_buttons_layout.addWidget(mcp_remove_btn)
         
         mcp_duplicate_btn = QtWidgets.QPushButton("Duplicate")
         mcp_duplicate_btn.clicked.connect(self.duplicateMCPServer)
-        mcp_duplicate_btn.setMaximumWidth(80)
-        mcp_controls_layout.addWidget(mcp_duplicate_btn)
+        mcp_buttons_layout.addWidget(mcp_duplicate_btn)
         
-        mcp_test_btn = QtWidgets.QPushButton("Test")
-        mcp_test_btn.clicked.connect(self.testMCPServer)
-        mcp_test_btn.setMaximumWidth(80)
-        mcp_controls_layout.addWidget(mcp_test_btn)
+        mcp_buttons_layout.addStretch()
+        mcp_mgmt_layout.addLayout(mcp_buttons_layout)
         
-        mcp_controls_layout.addStretch()
-        mcp_layout.addLayout(mcp_controls_layout)
+        mcp_layout.addLayout(mcp_mgmt_layout)
         
         # MCP server configuration form
+        self.mcp_config_group = QtWidgets.QGroupBox("MCP Server Configuration")
         mcp_form_layout = QtWidgets.QFormLayout()
         
         self.mcp_enabled_checkbox = QtWidgets.QCheckBox()
@@ -440,40 +438,26 @@ class BinAssistWidget(SidebarWidget):
         self.mcp_timeout_spin.setSuffix(" seconds")
         mcp_form_layout.addRow("Timeout:", self.mcp_timeout_spin)
         
-        mcp_layout.addLayout(mcp_form_layout)
+        # MCP action buttons (similar to API Providers)
+        mcp_server_buttons_layout = QtWidgets.QHBoxLayout()
+        mcp_server_buttons_layout.addStretch()
         
-        # MCP save button
-        mcp_save_layout = QtWidgets.QHBoxLayout()
+        mcp_test_btn = QtWidgets.QPushButton("Test")
+        mcp_test_btn.clicked.connect(self.testMCPServer)
+        mcp_test_btn.setMaximumWidth(80)
+        mcp_server_buttons_layout.addWidget(mcp_test_btn)
+        
         mcp_save_btn = QtWidgets.QPushButton("Save MCP Server")
         mcp_save_btn.clicked.connect(self.saveMCPServer)
-        mcp_save_layout.addWidget(mcp_save_btn)
-        mcp_save_layout.addStretch()
-        mcp_layout.addLayout(mcp_save_layout)
+        mcp_server_buttons_layout.addWidget(mcp_save_btn)
+        
+        self.mcp_config_group.setLayout(mcp_form_layout)
+        mcp_layout.addWidget(self.mcp_config_group)
+        mcp_layout.addLayout(mcp_server_buttons_layout)
         
         mcp_group.setLayout(mcp_layout)
         layout.addWidget(mcp_group)
 
-        # Tool Execution Section
-        tool_execution_group = QtWidgets.QGroupBox("Tool Execution")
-        tool_execution_layout = QtWidgets.QFormLayout()
-        
-        # Max Tool Calls setting
-        self.max_tool_calls_spinbox = QtWidgets.QSpinBox()
-        self.max_tool_calls_spinbox.setMinimum(1)
-        self.max_tool_calls_spinbox.setMaximum(50)
-        self.max_tool_calls_spinbox.setValue(self.settings.get_integer('binassist.max_tool_calls'))
-        self.max_tool_calls_spinbox.valueChanged.connect(self.onMaxToolCallsChanged)
-        
-        tool_execution_layout.addRow("Maximum Tool Calls:", self.max_tool_calls_spinbox)
-        
-        # Add help text
-        help_label = QtWidgets.QLabel("Maximum number of tool calls per query sequence.\nWhen reached, execution pauses and you can click 'Continue' to resume.")
-        help_label.setStyleSheet("color: gray; font-size: 10px;")
-        help_label.setWordWrap(True)
-        tool_execution_layout.addRow("", help_label)
-        
-        tool_execution_group.setLayout(tool_execution_layout)
-        layout.addWidget(tool_execution_group)
 
         # System Context Section
         system_context_group = QtWidgets.QGroupBox("System Context")
@@ -542,6 +526,20 @@ class BinAssistWidget(SidebarWidget):
         context_layout.addWidget(self.context_spin)
         context_layout.addStretch()
         analysis_layout.addLayout(context_layout)
+        
+        # Max Tool Calls setting
+        max_tool_calls_layout = QtWidgets.QHBoxLayout()
+        max_tool_calls_label = QtWidgets.QLabel("Maximum Tool Calls:")
+        self.max_tool_calls_spinbox = QtWidgets.QSpinBox()
+        self.max_tool_calls_spinbox.setMinimum(1)
+        self.max_tool_calls_spinbox.setMaximum(50)
+        self.max_tool_calls_spinbox.setValue(self.settings.get_integer('binassist.max_tool_calls'))
+        self.max_tool_calls_spinbox.setToolTip("Maximum number of tool calls per query sequence.\nWhen reached, execution pauses and you can click 'Continue' to resume.")
+        self.max_tool_calls_spinbox.valueChanged.connect(self.onMaxToolCallsChanged)
+        max_tool_calls_layout.addWidget(max_tool_calls_label)
+        max_tool_calls_layout.addWidget(self.max_tool_calls_spinbox)
+        max_tool_calls_layout.addStretch()
+        analysis_layout.addLayout(max_tool_calls_layout)
 
         # Analysis Mode
         mode_layout = QtWidgets.QHBoxLayout()
