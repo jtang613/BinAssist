@@ -6,7 +6,7 @@ from binaryninja.highlevelil import HighLevelILOperation, HighLevelILInstruction
 from binaryninja.types import StructureType, Type, TypeClass
 from PySide6 import QtWidgets
 from openai import OpenAI
-from .threads import StreamingThread
+from .threads import StreamingThread, ProposalThread
 from .rag import RAG
 from .core.services.tool_service import ToolService
 from .core.settings import get_settings_manager
@@ -309,7 +309,7 @@ class LlmApi:
             signal({"streaming_complete": True})
             log.log_info("[BinAssist] regular query completion signal emitted")
             
-        self.thread = self._start_thread(provider, query, self.SYSTEM_PROMPT, signal, None, completion_callback)
+        self.thread = self._start_thread(provider, query, self.SYSTEM_PROMPT, signal, None, completion_callback, None, bv, addr)
         return query
 
     def query(self, query, signal) -> str:
@@ -451,7 +451,9 @@ class LlmApi:
             signal({"streaming_complete": True})
             log.log_info("[BinAssist] analyze_function completion signal emitted")
             
-        self.thread = self._start_thread(provider, query, f"{self.SYSTEM_PROMPT}{self.FUNCTION_PROMPT}", signal, tools, completion_callback)
+        # For analyze_function, we want tool call PROPOSALS, not execution
+        # So we'll create a special thread that captures tool calls without executing them
+        self.thread = self._start_thread_for_proposals(provider, query, f"{self.SYSTEM_PROMPT}{self.FUNCTION_PROMPT}", signal, tools, completion_callback, bv, addr)
 
         return query
 
@@ -501,7 +503,7 @@ class LlmApi:
         """
         return self.rag.get_document_list()
 
-    def _start_thread(self, provider, query, system, signal, tools=None, completion_callback=None, mcp_service=None) -> None:
+    def _start_thread(self, provider, query, system, signal, tools=None, completion_callback=None, mcp_service=None, bv=None, addr=None) -> None:
         """
         Starts a new thread to handle streaming responses from the LLM.
 
@@ -519,7 +521,7 @@ class LlmApi:
             log.log_debug(f"[BinAssist] Tools count: {len(tools) if tools else 0}")
             
             log.log_debug("[BinAssist] Creating StreamingThread instance")
-            thread = StreamingThread(provider, query, system, tools, completion_callback, mcp_service, self.settings)
+            thread = StreamingThread(provider, query, system, tools, completion_callback, mcp_service, self.tool_service, self.settings, bv, addr)
             log.log_debug("[BinAssist] StreamingThread instance created")
             
             log.log_debug("[BinAssist] Connecting signal")
@@ -539,6 +541,27 @@ class LlmApi:
         except Exception as e:
             log.log_error(f"[BinAssist] Error in _start_thread: {type(e).__name__}: {e}")
             # Exception details already logged above
+            raise
+    
+    def _start_thread_for_proposals(self, provider, query, system, signal, tools=None, completion_callback=None, bv=None, addr=None) -> None:
+        """
+        Starts a thread to get tool call proposals without executing them.
+        This is used for the Actions tab to populate the actions table.
+        """
+        try:
+            log.log_info(f"[BinAssist] Starting proposals thread for provider: {type(provider).__name__}")
+            
+            # Create a custom thread that captures tool calls without executing them
+            thread = ProposalThread(provider, query, system, tools, completion_callback, signal, self.settings, bv, addr)
+            thread.update_response.connect(signal)
+            
+            self.threads.append(thread)
+            thread.start()
+            
+            log.log_info(f"[BinAssist] Proposals thread started successfully")
+            
+        except Exception as e:
+            log.log_error(f"[BinAssist] Failed to start proposals thread: {e}")
             raise
 
     def DataToText(self, bv: BinaryView, start_addr: int, end_addr: int) -> str:

@@ -89,6 +89,18 @@ class ToolService(BaseService):
         """
         return list(self._tools.keys())
     
+    def has_tool(self, tool_name: str) -> bool:
+        """
+        Check if a tool with the given name is available.
+        
+        Args:
+            tool_name: Name of the tool to check
+            
+        Returns:
+            True if the tool exists, False otherwise
+        """
+        return tool_name in self._tools
+    
     def execute_tool(self, tool_call: ToolCall, bv, address: int = None) -> ToolResult:
         """
         Execute a tool call.

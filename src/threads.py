@@ -19,7 +19,7 @@ class StreamingThread(QtCore.QThread):
     update_response = QtCore.Signal(dict)
     streaming_finished = QtCore.Signal()
 
-    def __init__(self, provider, query: str, system: str, tools=None, completion_callback=None, mcp_service=None, settings=None) -> None:
+    def __init__(self, provider, query: str, system: str, tools=None, completion_callback=None, mcp_service=None, tool_service=None, settings=None, bv=None, addr=None) -> None:
         """
         Initializes the thread with the necessary parameters for making a streaming API call.
 
@@ -28,8 +28,11 @@ class StreamingThread(QtCore.QThread):
             query (str): The user's query to be processed.
             system (str): System-level instructions or context for the API call.
             tools (list): A list of tools that the LLM can call during the response.
-            mcp_service: Shared MCP service instance for tool execution.
+            mcp_service: Shared MCP service instance for MCP tool execution.
+            tool_service: Tool service instance for native Binary Ninja tool execution.
             settings: Settings instance to use (if None, creates new one).
+            bv: Binary view context for native tool execution.
+            addr: Address context for native tool execution.
         """
         super().__init__()
         
@@ -47,6 +50,9 @@ class StreamingThread(QtCore.QThread):
             self.completion_callback = completion_callback
             self.running = True
             self.mcp_service = mcp_service  # Shared MCP service instance
+            self.tool_service = tool_service  # Native Binary Ninja tool service
+            self.bv = bv  # Binary view context for native tools
+            self.addr = addr  # Address context for native tools
             
             # Tool execution state
             self.messages = []  # Conversation history for tool execution
@@ -340,12 +346,15 @@ class StreamingThread(QtCore.QThread):
         
         tool_results = []
         
-        # Use the shared MCP service instance passed to the thread
-        if not self.mcp_service:
-            log.log_error("[BinAssist] No MCP service provided to thread, cannot execute tools")
-            raise Exception("No MCP service available for tool execution")
+        # Check that we have at least one tool execution service available
+        has_mcp = self.mcp_service is not None
+        has_native = self.tool_service is not None
         
-        mcp_service = self.mcp_service
+        if not has_mcp and not has_native:
+            log.log_error("[BinAssist] No tool execution services available (neither MCP nor native tool service)")
+            raise Exception("No tool execution services available")
+        
+        log.log_info(f"[BinAssist] Tool execution services available: MCP={has_mcp}, Native={has_native}")
         
         # Execute each tool call
         for i, tool_call in enumerate(tool_calls):
@@ -374,8 +383,38 @@ class StreamingThread(QtCore.QThread):
                         log.log_warn(f"[BinAssist] Failed to parse tool arguments as JSON: {tool_args}")
                         tool_args = {}
                 
-                # Execute tool via MCP service
-                result = mcp_service.execute_tool_sync(tool_name, tool_args)
+                # Determine which service to use for this tool
+                result = None
+                service_used = None
+                
+                # First, try native tool service if available
+                if self.tool_service and self.tool_service.has_tool(tool_name):
+                    log.log_info(f"[BinAssist] Executing {tool_name} via native tool service")
+                    service_used = "native"
+                    
+                    # Convert to ToolCall object if needed
+                    if not hasattr(tool_call, 'name'):
+                        from .core.models.tool_call import ToolCall
+                        tool_call_obj = ToolCall(
+                            id=tool_id,
+                            name=tool_name,
+                            arguments=tool_args
+                        )
+                    else:
+                        tool_call_obj = tool_call
+                    
+                    # Execute via native tool service using available context
+                    tool_result = self.tool_service.execute_tool(tool_call_obj, bv=self.bv, address=self.addr)
+                    result = tool_result.result if tool_result.success else f"Error: {tool_result.error}"
+                    
+                # Fall back to MCP service if available and tool not found in native service
+                elif self.mcp_service:
+                    log.log_info(f"[BinAssist] Executing {tool_name} via MCP service")
+                    service_used = "MCP"
+                    result = self.mcp_service.execute_tool_sync(tool_name, tool_args)
+                
+                else:
+                    raise Exception(f"Tool '{tool_name}' not found in any available service")
                 
                 log.log_info(f"[BinAssist] ✅ Tool {tool_name} executed successfully with ID {tool_id}")
                 
@@ -732,3 +771,79 @@ class StreamingThread(QtCore.QThread):
                 "response": f"❌ Error continuing tool execution: {str(e)}", 
                 "append": True
             })
+
+
+class ProposalThread(QtCore.QThread):
+    """
+    Thread for getting tool call proposals without executing them.
+    Used by the Actions tab to populate the actions table.
+    """
+    
+    update_response = QtCore.Signal(dict)
+    
+    def __init__(self, provider, query: str, system: str, tools=None, completion_callback=None, signal=None, settings=None, bv=None, addr=None) -> None:
+        super().__init__()
+        
+        self.provider = provider
+        self.query = query
+        self.system = system
+        self.tools = tools
+        self.completion_callback = completion_callback
+        self.signal = signal
+        self.settings = settings if settings is not None else Settings()
+        self.bv = bv
+        self.addr = addr
+        self.running = True
+        
+        log.log_info(f"[BinAssist] ProposalThread initialized for provider: {provider.config.name}")
+    
+    def run(self):
+        """Get tool call proposals from LLM without executing them."""
+        try:
+            log.log_info("[BinAssist] ProposalThread starting tool call proposal request")
+            
+            # Create messages for the LLM request
+            from .core.models.chat_message import ChatMessage, MessageRole
+            
+            messages = []
+            if self.system:
+                messages.append(ChatMessage(role=MessageRole.SYSTEM, content=self.system))
+            messages.append(ChatMessage(role=MessageRole.USER, content=self.query))
+            
+            # Use the provider to get tool call proposals
+            tool_calls = self.provider.create_function_call(messages, self.tools)
+            
+            log.log_info(f"[BinAssist] ProposalThread received {len(tool_calls)} tool call proposals")
+            
+            # Convert tool calls to the format expected by display_analyze_response
+            # The callback expects: response["response"] to be a list with .function.name and .function.arguments
+            class MockFunction:
+                def __init__(self, name, arguments):
+                    self.name = name
+                    self.arguments = json.dumps(arguments)
+            
+            class MockToolCall:
+                def __init__(self, name, arguments):
+                    self.function = MockFunction(name, arguments)
+            
+            # Convert our tool calls to the expected format
+            mock_tool_calls = []
+            for tool_call in tool_calls:
+                mock_tool_calls.append(MockToolCall(tool_call.name, tool_call.arguments))
+            
+            # Emit the tool call proposals in the expected format
+            response = {"response": mock_tool_calls}
+            self.update_response.emit(response)
+            
+            # Call completion callback
+            if self.completion_callback:
+                self.completion_callback()
+                
+            log.log_info("[BinAssist] ProposalThread completed successfully")
+            
+        except Exception as e:
+            log.log_error(f"[BinAssist] Error in ProposalThread: {type(e).__name__}: {e}")
+            # Emit error response
+            error_response = {"response": f"❌ Failed to get tool proposals: {str(e)}"}
+            self.update_response.emit(error_response)
+            raise
