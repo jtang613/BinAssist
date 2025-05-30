@@ -345,31 +345,28 @@ class MCPService(BaseService):
         Synchronous tool execution for Custom Query integration.
         
         Args:
-            tool_name: Name of the tool (may have mcp_ prefix)
+            tool_name: Name of the tool
             arguments: Tool arguments
             
         Returns:
             Tool execution result
         """
-        # Strip mcp_ prefix if present
-        actual_tool_name = tool_name.replace("mcp_", "", 1) if tool_name.startswith("mcp_") else tool_name
-        
-        log.log_info(f"[BinAssist] Executing tool: {actual_tool_name} with arguments: {arguments}")
+        log.log_info(f"[BinAssist] Executing tool: {tool_name} with arguments: {arguments}")
         
         # Check managed connections first
         if self._managed_connections:
             for server_name, connection in self._managed_connections.items():
                 if hasattr(connection, 'connected') and connection.connected:
-                    if actual_tool_name in connection.tools:
-                        log.log_info(f"[BinAssist] Found tool '{actual_tool_name}' on server '{server_name}'")
+                    if tool_name in connection.tools:
+                        log.log_info(f"[BinAssist] Found tool '{tool_name}' on server '{server_name}'")
                         
                         # Check if connection is healthy before executing
                         if self._is_connection_healthy(connection):
-                            return self._execute_tool_on_connection(connection, actual_tool_name, arguments)
+                            return self._execute_tool_on_connection(connection, tool_name, arguments)
                         else:
                             log.log_warn(f"[BinAssist] Connection to {server_name} is not healthy, attempting fresh connection")
                             # Try to get a fresh connection for this tool
-                            fresh_result = self._execute_tool_with_fresh_connection(server_name, actual_tool_name, arguments)
+                            fresh_result = self._execute_tool_with_fresh_connection(server_name, tool_name, arguments)
                             if fresh_result is not None:
                                 return fresh_result
         
@@ -378,22 +375,22 @@ class MCPService(BaseService):
             if not connection_info.is_connected:
                 continue
                 
-            if actual_tool_name in connection_info.tools:
+            if tool_name in connection_info.tools:
                 # Get the actual connection object
                 if hasattr(connection_info, 'connection') and connection_info.connection:
-                    log.log_info(f"[BinAssist] Found tool '{actual_tool_name}' on legacy connection")
+                    log.log_info(f"[BinAssist] Found tool '{tool_name}' on legacy connection")
                     
                     # Check if connection is healthy
                     if self._is_connection_healthy(connection_info.connection):
-                        return self._execute_tool_on_connection(connection_info.connection, actual_tool_name, arguments)
+                        return self._execute_tool_on_connection(connection_info.connection, tool_name, arguments)
                     else:
                         log.log_warn(f"[BinAssist] Legacy connection is not healthy, attempting fresh connection")
                         server_name = connection_info.server_config.name
-                        fresh_result = self._execute_tool_with_fresh_connection(server_name, actual_tool_name, arguments)
+                        fresh_result = self._execute_tool_with_fresh_connection(server_name, tool_name, arguments)
                         if fresh_result is not None:
                             return fresh_result
         
-        raise MCPToolError(f"Tool '{actual_tool_name}' not found in any connected server")
+        raise MCPToolError(f"Tool '{tool_name}' not found in any connected server")
     
     def _execute_tool_on_connection(self, connection: MCPConnection, tool_name: str, arguments: Dict[str, Any]) -> Any:
         """

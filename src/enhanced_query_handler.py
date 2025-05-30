@@ -338,8 +338,8 @@ class EnhancedQueryHandler:
                     
                     log.log_info(f"[BinAssist] Executing tool: {tool_name} with args: {arguments}")
                     
-                    # Check if this is an MCP tool
-                    if tool_name.startswith("mcp_") and self.mcp_integration:
+                    # Execute MCP tool
+                    if self.mcp_integration:
                         result = self._execute_mcp_tool(tool_name, arguments)
                         tool_results.append(result)
                         
@@ -353,8 +353,8 @@ class EnhancedQueryHandler:
                             "content": log_entry
                         })
                     else:
-                        # Handle native Binary Ninja tools if needed
-                        result = {"success": False, "error": "Native tool execution not implemented in enhanced handler"}
+                        # No MCP integration available
+                        result = {"success": False, "error": "MCP integration not available"}
                         tool_results.append(result)
                         
                 except Exception as e:

@@ -265,7 +265,14 @@ class StreamingThread(QtCore.QThread):
             if self.tools:
                 # Use function calling
                 log.log_debug("[BinAssist] Calling stream_function_call with completion handler")
-                self.provider.stream_function_call(messages, self.tools, handle_function_call_response, handle_completion)
+                
+                def handle_text_response(text_content):
+                    # Handle initial text response from LLM (if no tools are called)
+                    log.log_info(f"[BinAssist] 📝 Processing initial text response: {len(text_content)} characters")
+                    if self.running:
+                        self.update_response.emit({"response": text_content})
+                
+                self.provider.stream_function_call(messages, self.tools, handle_function_call_response, handle_completion, handle_text_response)
                 log.log_debug("[BinAssist] stream_function_call returned")
             else:
                 # Use regular streaming  
@@ -529,12 +536,19 @@ class StreamingThread(QtCore.QThread):
             def continue_completion():
                 self._handle_completion_recursive()
             
+            def continue_text_response(text_content):
+                # Handle final text response from LLM
+                log.log_info(f"[BinAssist] 📝 Processing final text response: {len(text_content)} characters")
+                if self.running:
+                    self.update_response.emit({"response": text_content})
+            
             # Call provider with updated message history
             self.provider.stream_function_call(
                 self.messages, 
                 self.tools, 
                 continue_function_call_response, 
-                continue_completion
+                continue_completion,
+                continue_text_response
             )
             
         except Exception as e:
@@ -565,6 +579,12 @@ class StreamingThread(QtCore.QThread):
     
     def _handle_function_call_response_recursive(self, tool_calls):
         """Handle function call response recursively for continued tool execution."""
+        # Check if there are no tool calls - this means the LLM is done
+        if not tool_calls:
+            log.log_info("[BinAssist] LLM returned 0 tool calls - conversation complete, calling completion")
+            self._handle_completion_recursive()
+            return
+        
         # Check tool execution limit
         if self.tool_execution_count >= self.max_tool_executions:
             log.log_warn(f"[BinAssist] Maximum tool executions ({self.max_tool_executions}) reached, pausing")
@@ -605,6 +625,9 @@ class StreamingThread(QtCore.QThread):
         """Handle completion for recursive tool execution."""
         log.log_info("[BinAssist] 🏁 Recursive tool execution completed")
         
+        # Clean up conversation: remove tool result messages while keeping assistant tool calls
+        self._cleanup_conversation_history()
+        
         # Call the original completion callback if available
         if self.running and self.completion_callback:
             try:
@@ -613,6 +636,40 @@ class StreamingThread(QtCore.QThread):
                 log.log_error(f"[BinAssist] Error in recursive completion callback: {e}")
         
         log.log_info("[BinAssist] Tool execution workflow completed")
+    
+    def _cleanup_conversation_history(self):
+        """
+        Clean up conversation history by removing tool result messages while keeping assistant tool calls.
+        This provides a cleaner chat history that shows what tools were used without cluttering 
+        with verbose tool outputs.
+        """
+        if not hasattr(self, 'messages') or not self.messages:
+            return
+        
+        from .core.models.chat_message import MessageRole
+        
+        original_count = len(self.messages)
+        
+        # Keep all messages except tool result messages (role=TOOL)
+        cleaned_messages = []
+        removed_count = 0
+        
+        for msg in self.messages:
+            if hasattr(msg, 'role') and msg.role == MessageRole.TOOL:
+                # Remove tool result messages
+                removed_count += 1
+                log.log_debug(f"[BinAssist] Removing tool result message: tool_call_id={getattr(msg, 'tool_call_id', 'unknown')}")
+            else:
+                # Keep system, user, and assistant messages (including those with tool_calls)
+                cleaned_messages.append(msg)
+        
+        self.messages = cleaned_messages
+        
+        if removed_count > 0:
+            log.log_info(f"[BinAssist] 🧹 Cleaned conversation history: removed {removed_count} tool result messages, kept {len(cleaned_messages)} messages")
+            log.log_info(f"[BinAssist] 📝 Final conversation: {original_count} → {len(self.messages)} messages")
+        else:
+            log.log_debug("[BinAssist] No tool result messages to clean from conversation history")
     
     def continue_tool_execution(self):
         """
@@ -644,12 +701,19 @@ class StreamingThread(QtCore.QThread):
                 def continue_completion():
                     self._handle_completion_recursive()
                 
+                def continue_text_response_from_pause(text_content):
+                    # Handle text response when continuing from pause
+                    log.log_info(f"[BinAssist] 📝 Processing text response from pause: {len(text_content)} characters")
+                    if self.running:
+                        self.update_response.emit({"response": text_content, "append": True})
+                
                 # Call provider to continue the conversation
                 self.provider.stream_function_call(
                     self.messages, 
                     self.tools, 
                     continue_function_call_response, 
-                    continue_completion
+                    continue_completion,
+                    continue_text_response_from_pause
                 )
             else:
                 log.log_warn("[BinAssist] No conversation state to continue")

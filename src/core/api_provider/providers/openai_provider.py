@@ -8,6 +8,7 @@ the official OpenAI Python client library.
 from typing import List, Dict, Any, Callable, Optional
 import json
 import threading
+import time
 
 try:
     from openai import OpenAI
@@ -389,18 +390,144 @@ class OpenAIProvider(APIProvider, ChatProvider, FunctionCallingProvider):
                 raise
             raise APIProviderError(f"Unexpected error during function call: {e}")
     
+    def create_function_call_with_content(self, messages: List[ChatMessage], 
+                                        tools: List[Dict[str, Any]], **kwargs) -> Dict[str, Any]:
+        """Create a function call completion that returns both tool calls and text content."""
+        log.log_info(f"[BinAssist] Starting function call with content for {self.config.model} with {len(messages)} messages and {len(tools)} tools")
+        
+        try:
+            # Reset stop event for this request
+            self.reset_stop_event()
+            
+            def _make_request():
+                log.log_debug("[BinAssist] Making function call request with content")
+                
+                # Convert BinAssist messages to OpenAI format
+                openai_messages = self._prepare_messages(messages)
+                
+                # Prepare kwargs with model-specific handling
+                completion_kwargs = {
+                    "model": self.config.model,
+                    "messages": openai_messages,
+                    "tools": tools,
+                    **kwargs
+                }
+                
+                # Handle different token field names based on model type
+                if self._is_reasoning_model():
+                    completion_kwargs["max_completion_tokens"] = self.config.max_tokens
+                    log.log_debug(f"[BinAssist] Using max_completion_tokens={self.config.max_tokens} for o* model")
+                else:
+                    completion_kwargs["max_tokens"] = self.config.max_tokens
+                    log.log_debug(f"[BinAssist] Using max_tokens={self.config.max_tokens} for regular model")
+                
+                # Enhanced logging for OpenAI request
+                log.log_info("=" * 60)
+                log.log_info("[BinAssist] 🏁 LLM REQUEST COMPLETION")
+                log.log_info("=" * 60)
+                log.log_info(f"[BinAssist] 📊 Final response length: {len(openai_messages)}")
+                log.log_info(f"[BinAssist] 🔧 Tools were available: {tools is not None}")
+                log.log_info("=" * 60)
+                
+                # Make the actual API call
+                if self._is_reasoning_model():
+                    timeout_msg = "may take up to 3 minutes"
+                else:
+                    timeout_msg = "may take up to 2 minutes"
+                log.log_info(f"[BinAssist] Sending function call request to OpenAI for {self.config.model} ({timeout_msg})")
+                start_time = time.time()
+                
+                response = self._openai_client.chat.completions.create(**completion_kwargs)
+                
+                elapsed = time.time() - start_time
+                log.log_info(f"[BinAssist] Received function call response from OpenAI (took {elapsed:.1f}s)")
+                
+                if not response.choices:
+                    log.log_warn("[BinAssist] Empty response from OpenAI")
+                    return {"tool_calls": [], "content": ""}
+                
+                message = response.choices[0].message
+                result = {"tool_calls": [], "content": ""}
+                
+                # Extract text content
+                if message.content:
+                    result["content"] = message.content
+                    log.log_info(f"[BinAssist] 🎯 Response type: Text response ({len(message.content)} characters)")
+                
+                # Extract tool calls if present
+                if message.tool_calls:
+                    log.log_info(f"[BinAssist] 🔧 Tool calls received: {len(message.tool_calls)}")
+                    tool_calls = []
+                    for tc in message.tool_calls:
+                        # Parse arguments from JSON string to dict
+                        try:
+                            arguments = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                        except json.JSONDecodeError:
+                            log.log_warn(f"[BinAssist] Failed to parse tool call arguments: {tc.function.arguments}")
+                            arguments = {}
+                        
+                        tool_call = ToolCall(
+                            id=tc.id,
+                            call_id=tc.id,  # For OpenAI, call_id is the same as id
+                            name=tc.function.name,
+                            arguments=arguments
+                        )
+                        tool_calls.append(tool_call)
+                    
+                    result["tool_calls"] = tool_calls
+                    log.log_debug(f"[BinAssist] Converted {len(tool_calls)} tool calls")
+                
+                return result
+            
+            result = self._retry_handler.retry(_make_request)
+            tool_count = len(result.get('tool_calls', []))
+            content_length = len(result.get('content', ''))
+            log.log_info(f"[BinAssist] Function call with content successful: {tool_count} tool calls, {content_length} content chars")
+            return result
+            
+        except openai.AuthenticationError as e:
+            log.log_error(f"[BinAssist] Authentication error: {e}")
+            raise AuthenticationError(f"OpenAI authentication failed: {e}")
+        except openai.RateLimitError as e:
+            log.log_error(f"[BinAssist] Rate limit error: {e}")
+            raise RateLimitError(f"OpenAI rate limit exceeded: {e}")
+        except openai.APIConnectionError as e:
+            log.log_error(f"[BinAssist] Connection error: {e}")
+            raise NetworkError(f"OpenAI connection failed: {e}")
+        except Exception as e:
+            log.log_error(f"[BinAssist] Unexpected error: {e}")
+            # Re-raise known error types without wrapping
+            if isinstance(e, (NetworkError, APIProviderError, AuthenticationError, RateLimitError)):
+                raise
+            raise APIProviderError(f"Unexpected error during function call with content: {e}")
+    
     def stream_function_call(self, messages: List[ChatMessage], 
                            tools: List[Dict[str, Any]],
                            response_handler: Callable[[List[ToolCall]], None], 
                            completion_handler: Callable[[], None] = None,
+                           text_handler: Callable[[str], None] = None,
                            **kwargs) -> None:
         """Stream a function call completion with OpenAI-specific handling."""
-        # Use non-streaming for function calls since streaming tool calls is complex
-        tool_calls = self.create_function_call(messages, tools, **kwargs)
-        response_handler(tool_calls)
+        from binaryninja import log
+        
+        # Use function call API to get response (may contain tools OR text)
+        response_data = self.create_function_call_with_content(messages, tools, **kwargs)
+        tool_calls = response_data.get('tool_calls', [])
+        text_content = response_data.get('content', '')
+        
+        # Handle tool calls if present
+        if tool_calls:
+            log.log_info(f"[BinAssist] Handling {len(tool_calls)} tool calls")
+            response_handler(tool_calls)
+        
+        # Handle text content if present (final response from LLM)
+        if text_content and text_handler:
+            log.log_info(f"[BinAssist] Handling text response: {len(text_content)} characters")
+            text_handler(text_content)
+        elif text_content:
+            log.log_warn("[BinAssist] Got text content but no text handler provided")
         
         # Call completion handler if provided  
-        from binaryninja import log
         if completion_handler:
             log.log_info("[BinAssist] OpenAI provider calling completion handler")
             completion_handler()

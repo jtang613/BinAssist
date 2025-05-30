@@ -26,12 +26,12 @@ class MCPTool:
     schema: Dict[str, Any]
     server_name: str
     
-    def to_llm_format(self, prefix: str = "mcp_") -> Dict[str, Any]:
+    def to_llm_format(self, prefix: str = "") -> Dict[str, Any]:
         """
         Convert to OpenAI tool format for LLM integration.
         
         Args:
-            prefix: Prefix to add to tool name (default: "mcp_")
+            prefix: Prefix to add to tool name (default: no prefix)
             
         Returns:
             Tool definition in OpenAI format
@@ -40,7 +40,7 @@ class MCPTool:
             "type": "function",
             "function": {
                 "name": f"{prefix}{self.name}",
-                "description": f"[MCP:{self.server_name}] {self.description}",
+                "description": self.description,
                 "parameters": self.schema
             }
         }

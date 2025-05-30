@@ -260,6 +260,7 @@ class AnthropicProvider(APIProvider, ChatProvider, FunctionCallingProvider):
                            tools: List[Dict[str, Any]],
                            response_handler: Callable[[List[ToolCall]], None], 
                            completion_handler: Callable[[], None] = None,
+                           text_handler: Callable[[str], None] = None,
                            **kwargs) -> None:
         """Stream a function call completion."""
         # For now, use non-streaming for function calls since streaming
