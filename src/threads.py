@@ -88,7 +88,12 @@ class StreamingThread(QtCore.QThread):
             for chunk in response:
                 if not self.running:  # Stop consuming stream if interrupted
                     return
-                message_chunk = chunk.choices[0].delta.content or ""
+
+                if not chunk.choices:
+                    message_chunk = ""
+                else:
+                    message_chunk = chunk.choices[0].delta.content or ""
+
                 response_buffer += message_chunk
                 self.update_response.emit({"response":response_buffer})
 
