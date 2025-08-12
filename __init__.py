@@ -1,12 +1,7 @@
-from binaryninja import *
+#!/usr/bin/env python3
+
 from binaryninjaui import Sidebar
+from .src.views.binassist_sidebar import BinAssistSidebarWidgetType
 
-from .src.settings import BinAssistSettings
-from .src.plugin import BinAssistWidgetType
-
-# Initialize settings
-BinAssistSettings()
-
-# Initialize and register the BinAssist widget
-binAssistWidget = BinAssistWidgetType()
-Sidebar.addSidebarWidgetType(binAssistWidget)
+# Register the sidebar widget type with Binary Ninja
+Sidebar.addSidebarWidgetType(BinAssistSidebarWidgetType())

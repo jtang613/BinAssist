@@ -1,6 +1,7 @@
 openai
+anthropic
 pysqlite3
 markdown
 httpx
-chromadb
-sentence-transformers
+whoosh
+mcp

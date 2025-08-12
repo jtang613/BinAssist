@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   viewBox="0 0 32 32"
+   version="1.1"
+   id="svg6"
+   sodipodi:docname="robot.svg"
+   inkscape:version="1.4.2 (ebf0e940d0, 2025-05-08)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:cc="http://creativecommons.org/ns#"
+   xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <title
+     id="title6">BA</title>
+  <defs
+     id="defs6" />
+  <sodipodi:namedview
+     id="namedview6"
+     pagecolor="#808080"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:zoom="58.125"
+     inkscape:cx="16.008602"
+     inkscape:cy="16"
+     inkscape:window-width="3840"
+     inkscape:window-height="2086"
+     inkscape:window-x="0"
+     inkscape:window-y="0"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="svg6" />
+  <!-- Robot head outline -->
+  <rect
+     x="6"
+     y="4"
+     width="20"
+     height="24"
+     rx="2"
+     fill="#4A90E2"
+     stroke="#2171C7"
+     stroke-width="1.5"
+     id="rect1"
+     style="fill:none;stroke:#999999" />
+  <!-- Antenna -->
+  <line
+     x1="16"
+     y1="1"
+     x2="16"
+     y2="4"
+     stroke="#2171C7"
+     stroke-width="1.5"
+     id="line1"
+     style="stroke:#999999" />
+  <circle
+     cx="16"
+     cy="1"
+     r="1"
+     fill="#2171C7"
+     id="circle1"
+     style="fill:#999999" />
+  <!-- Eyes -->
+  <rect
+     x="9"
+     y="10"
+     width="5"
+     height="5"
+     rx="1"
+     fill="#2171C7"
+     id="rect2"
+     style="fill:#999999" />
+  <rect
+     x="18"
+     y="10"
+     width="5"
+     height="5"
+     rx="1"
+     fill="#2171C7"
+     id="rect3"
+     style="fill:#999999" />
+  <!-- Mouth -->
+  <rect
+     x="10"
+     y="19"
+     width="12"
+     height="3"
+     rx="1"
+     fill="#2171C7"
+     id="rect4"
+     style="fill:none;stroke:#999999" />
+  <!-- Display lines -->
+  <line
+     x1="8"
+     y1="24"
+     x2="24"
+     y2="24"
+     stroke="#2171C7"
+     stroke-width="1"
+     id="line5"
+     style="fill:#999999;stroke:#999999" />
+  <line
+     x1="8"
+     y1="26"
+     x2="24"
+     y2="26"
+     stroke="#2171C7"
+     stroke-width="1"
+     id="line6"
+     style="fill:#999999;stroke:#999999" />
+  <metadata
+     id="metadata6">
+    <rdf:RDF>
+      <cc:Work
+         rdf:about="">
+        <dc:title>BA</dc:title>
+      </cc:Work>
+    </rdf:RDF>
+  </metadata>
+</svg>
