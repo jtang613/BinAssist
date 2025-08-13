@@ -98,7 +98,7 @@ class ActionsTabView(QWidget):
         
         # Actions will be populated by the controller
         # Set a reasonable minimum height
-        self.available_actions_list.setMinimumHeight(120)
+        self.available_actions_list.setMinimumHeight(80)
     
     def create_bottom_row(self, parent_layout):
         bottom_row = QHBoxLayout()
