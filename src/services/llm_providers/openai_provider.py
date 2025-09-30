@@ -90,7 +90,7 @@ class OpenAIProvider(BaseLLMProvider):
                 model_name.startswith("o2") or
                 model_name.startswith("o3") or 
                 model_name.startswith("o4") or
-                model_name.startswith("o5"))
+                model_name.startswith("gpt-5"))
     
     def _prepare_messages(self, messages: List[ChatMessage]) -> List[Dict[str, Any]]:
         """Convert BinAssist ChatMessage objects to OpenAI message format."""

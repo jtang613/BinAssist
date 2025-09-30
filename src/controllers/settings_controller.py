@@ -198,13 +198,13 @@ class MCPTestWorker(QThread):
     def run(self):
         """Run MCP test in background thread"""
         server_name = self.server_config.get('name', 'Unknown')
-        
+
         try:
             log.log_info(f"Testing MCP server '{server_name}'...")
-            
+
             # Convert settings format to MCPServerConfig
-            transport_type = self.server_config.get('transport_type', 'sse')
-            
+            transport_type = self.server_config.get('transport', 'sse')
+
             # Create config based on transport type
             if transport_type == "stdio":
                 config = MCPServerConfig(
@@ -478,16 +478,16 @@ class MCPProviderDialog(QDialog):
         if self.provider_data:
             self.name_edit.setText(self.provider_data.get('name', ''))
             self.url_edit.setText(self.provider_data.get('url', ''))
-            
+
             # Set transport type
-            transport_value = self.provider_data.get('transport_type', 'sse')
+            transport_value = self.provider_data.get('transport', 'sse')
             index = self.transport_combo.findData(transport_value)
             if index >= 0:
                 self.transport_combo.setCurrentIndex(index)
-            
+
             self.command_edit.setText(self.provider_data.get('command', ''))
             self.enabled_check.setChecked(self.provider_data.get('enabled', True))
-            
+
             # Update UI based on transport type
             self.on_transport_changed()
     
@@ -496,14 +496,14 @@ class MCPProviderDialog(QDialog):
         data = {
             'name': self.name_edit.text().strip(),
             'url': self.url_edit.text().strip(),
-            'transport_type': self.transport_combo.currentData(),
+            'transport': self.transport_combo.currentData(),
             'enabled': self.enabled_check.isChecked()
         }
-        
+
         # Add command for STDIO transport
         if self.transport_combo.currentData() == "stdio":
             data['command'] = self.command_edit.text().strip()
-        
+
         return data
 
 
