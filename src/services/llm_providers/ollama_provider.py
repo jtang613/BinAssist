@@ -64,7 +64,15 @@ class OllamaProvider(BaseLLMProvider):
         
         # Remove any trailing /v1 since Ollama uses native API
         self.url = self.url.rstrip('/v1').rstrip('/')
-        
+
+        # Warn if TLS verification is disabled
+        if self.disable_tls:
+            import ssl
+            log.log_warn(f"TLS verification disabled for Ollama provider '{self.name}'")
+            # Suppress SSL warnings when verification is disabled
+            import warnings
+            warnings.filterwarnings('ignore', message='Unverified HTTPS request')
+
         log.log_info(f"Ollama provider initialized with URL: {self.url}, model: {self.model}")
     
     async def chat_completion(self, request: ChatRequest, 
@@ -99,7 +107,7 @@ class OllamaProvider(BaseLLMProvider):
             
             # Make API call
             url = f"{self.url}/api/chat"
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=30.0, verify=not self.disable_tls) as client:
                 response = await client.post(url, json=payload)
                 
                 if response.status_code != 200:
@@ -237,16 +245,16 @@ class OllamaProvider(BaseLLMProvider):
             
             # Make streaming API call
             url = f"{self.url}/api/chat"
-            
+
             # Batching variables to reduce UI update frequency (like OpenAI)
             batch_content = ""
             batch_count = 0
             BATCH_SIZE = 5  # Smaller batch size for Ollama as it might send larger chunks
-            
+
             accumulated_content = ""
             accumulated_tool_calls = []
-            
-            async with httpx.AsyncClient(timeout=60.0) as client:
+
+            async with httpx.AsyncClient(timeout=60.0, verify=not self.disable_tls) as client:
                 stream_response = client.stream("POST", url, json=payload)
                 response = await stream_response.__aenter__()
                 
@@ -425,7 +433,7 @@ class OllamaProvider(BaseLLMProvider):
                 }
                 
                 url = f"{self.url}/api/embeddings"
-                async with httpx.AsyncClient(timeout=30.0) as client:
+                async with httpx.AsyncClient(timeout=30.0, verify=not self.disable_tls) as client:
                     response = await client.post(url, json=payload)
                     
                     if response.status_code != 200:

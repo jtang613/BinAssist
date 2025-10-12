@@ -67,18 +67,40 @@ class OpenAIProvider(BaseLLMProvider):
             if self._is_reasoning_model():
                 timeout = max(timeout, 180.0)  # At least 3 minutes for o* models
                 log.log_info(f"Using extended timeout of {timeout}s for o* model: {self.model}")
-            
+
             # Handle base_url - use default if not specified or standard OpenAI URL
             base_url = None
             if self.url and self.url != 'https://api.openai.com/v1':
                 base_url = self.url
-            
-            self._client = OpenAI(
-                api_key=self.api_key,
-                base_url=base_url,
-                timeout=timeout,
-                max_retries=0  # We handle retries ourselves
-            )
+
+            # Handle TLS verification settings and create client
+            if self.disable_tls:
+                import httpx
+                import ssl
+                log.log_warn(f"TLS verification disabled for OpenAI provider '{self.name}'")
+
+                # Create SSL context that doesn't verify certificates
+                ssl_context = ssl.create_default_context()
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+
+                # Create httpx client with disabled verification
+                http_client = httpx.Client(verify=False, timeout=timeout)
+
+                self._client = OpenAI(
+                    api_key=self.api_key,
+                    base_url=base_url,
+                    timeout=timeout,
+                    max_retries=0,  # We handle retries ourselves
+                    http_client=http_client
+                )
+            else:
+                self._client = OpenAI(
+                    api_key=self.api_key,
+                    base_url=base_url,
+                    timeout=timeout,
+                    max_retries=0  # We handle retries ourselves
+                )
             
         except Exception as e:
             raise APIProviderError(f"Failed to initialize OpenAI client: {e}")
@@ -247,7 +269,12 @@ class OpenAIProvider(BaseLLMProvider):
             log.log_error(f"Rate limit error: {e}")
             raise RateLimitError(f"OpenAI rate limit exceeded: {e}")
         except openai.APIConnectionError as e:
+            import traceback
             log.log_error(f"Connection error: {e}")
+            log.log_error(f"Connection error details: {type(e).__name__}")
+            log.log_error(f"Connection error traceback: {traceback.format_exc()}")
+            if hasattr(e, '__cause__') and e.__cause__:
+                log.log_error(f"Underlying cause: {e.__cause__}")
             raise NetworkError(f"OpenAI connection failed: {e}")
         except openai.APIError as e:
             log.log_error(f"OpenAI API error: {e}")
@@ -436,7 +463,12 @@ class OpenAIProvider(BaseLLMProvider):
             log.log_error(f"Rate limit error: {e}")
             raise RateLimitError(f"OpenAI rate limit exceeded: {e}")
         except openai.APIConnectionError as e:
+            import traceback
             log.log_error(f"Connection error: {e}")
+            log.log_error(f"Connection error details: {type(e).__name__}")
+            log.log_error(f"Connection error traceback: {traceback.format_exc()}")
+            if hasattr(e, '__cause__') and e.__cause__:
+                log.log_error(f"Underlying cause: {e.__cause__}")
             raise NetworkError(f"OpenAI connection failed: {e}")
         except openai.APIError as e:
             log.log_error(f"OpenAI API error: {e}")

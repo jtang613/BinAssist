@@ -66,13 +66,35 @@ class AnthropicProvider(BaseLLMProvider):
         try:
             # Handle base_url - Anthropic client expects None for default
             base_url = None if self.url == 'https://api.anthropic.com' else self.url
-            
-            self._client = anthropic.Anthropic(
-                api_key=self.api_key,
-                base_url=base_url,
-                timeout=30.0,
-                max_retries=0  # We handle retries ourselves
-            )
+
+            # Handle TLS verification settings and create client
+            if self.disable_tls:
+                import httpx
+                import ssl
+                log.log_warn(f"TLS verification disabled for Anthropic provider '{self.name}'")
+
+                # Create SSL context that doesn't verify certificates
+                ssl_context = ssl.create_default_context()
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+
+                # Create httpx client with disabled verification
+                http_client = httpx.Client(verify=False, timeout=30.0)
+
+                self._client = anthropic.Anthropic(
+                    api_key=self.api_key,
+                    base_url=base_url,
+                    timeout=30.0,
+                    max_retries=0,  # We handle retries ourselves
+                    http_client=http_client
+                )
+            else:
+                self._client = anthropic.Anthropic(
+                    api_key=self.api_key,
+                    base_url=base_url,
+                    timeout=30.0,
+                    max_retries=0  # We handle retries ourselves
+                )
             
         except Exception as e:
             raise APIProviderError(f"Failed to initialize Anthropic client: {e}")
