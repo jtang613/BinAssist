@@ -5,13 +5,32 @@ Base LLM Provider - Abstract interface for all LLM providers
 Defines the contract that all providers must implement
 """
 
+import asyncio
+import random
 from abc import ABC, abstractmethod
 from typing import AsyncGenerator, List, Dict, Any, Optional, Callable
 from ..models.llm_models import (
-    ChatRequest, ChatResponse, EmbeddingRequest, EmbeddingResponse, 
+    ChatRequest, ChatResponse, EmbeddingRequest, EmbeddingResponse,
     ProviderCapabilities, ToolCall, ToolResult
 )
 from ..models.provider_types import ProviderType
+
+# Binary Ninja logging
+try:
+    import binaryninja
+    log = binaryninja.log.Logger(0, "BinAssist")
+except ImportError:
+    # Fallback for testing outside Binary Ninja
+    class MockLog:
+        @staticmethod
+        def log_info(msg): print(f"[BinAssist] INFO: {msg}")
+        @staticmethod
+        def log_error(msg): print(f"[BinAssist] ERROR: {msg}")
+        @staticmethod
+        def log_warn(msg): print(f"[BinAssist] WARN: {msg}")
+        @staticmethod
+        def log_debug(msg): print(f"[BinAssist] DEBUG: {msg}")
+    log = MockLog()
 
 
 class BaseLLMProvider(ABC):
@@ -23,7 +42,7 @@ class BaseLLMProvider(ABC):
     def __init__(self, config: Dict[str, Any]):
         """
         Initialize provider with configuration from settings service.
-        
+
         Args:
             config: Provider configuration dictionary containing:
                 - name: Provider name
@@ -42,7 +61,134 @@ class BaseLLMProvider(ABC):
         self.max_tokens = config.get('max_tokens', 4096)
         self.disable_tls = config.get('disable_tls', False)
         self.provider_type = config.get('provider_type', 'openai')
-    
+
+        # Rate limit retry configuration
+        self.rate_limit_max_retries = config.get('rate_limit_max_retries', 50)
+        self.rate_limit_min_delay = config.get('rate_limit_min_delay', 10.0)  # seconds
+        self.rate_limit_max_delay = config.get('rate_limit_max_delay', 30.0)  # seconds
+
+    # ===================================================================
+    # Rate Limit Retry Mechanism
+    # ===================================================================
+
+    async def _with_rate_limit_retry(self, operation_callable, *args, **kwargs):
+        """
+        Wrapper that retries an async operation when rate limit errors occur.
+
+        This method implements exponential backoff with random jitter for rate limit errors.
+        It will retry up to rate_limit_max_retries times, waiting between
+        rate_limit_min_delay and rate_limit_max_delay seconds between attempts.
+
+        Args:
+            operation_callable: Async callable to execute (e.g., self._chat_completion_impl)
+            *args: Positional arguments to pass to operation_callable
+            **kwargs: Keyword arguments to pass to operation_callable
+
+        Returns:
+            Result from operation_callable
+
+        Raises:
+            RateLimitError: If max retries exceeded
+            Other exceptions: Propagated as-is from operation_callable
+        """
+        attempt = 0
+
+        while attempt < self.rate_limit_max_retries:
+            try:
+                # Execute the operation
+                result = await operation_callable(*args, **kwargs)
+                return result
+
+            except RateLimitError as e:
+                attempt += 1
+
+                if attempt >= self.rate_limit_max_retries:
+                    log.log_error(
+                        f"Rate limit retry exhausted after {attempt} attempts for {self.name}. "
+                        f"Giving up on this request."
+                    )
+                    raise RateLimitError(
+                        f"Rate limit exceeded after {attempt} retries: {e}"
+                    )
+
+                # Calculate random delay between min and max
+                delay = random.uniform(self.rate_limit_min_delay, self.rate_limit_max_delay)
+
+                log.log_warn(
+                    f"Rate limit error on attempt {attempt}/{self.rate_limit_max_retries} "
+                    f"for {self.name}. Retrying in {delay:.1f} seconds... Error: {e}"
+                )
+
+                # Wait before retrying
+                await asyncio.sleep(delay)
+
+            except Exception as e:
+                # Non-rate-limit errors are propagated immediately
+                raise
+
+        # This should never be reached due to the raise in the loop, but just in case
+        raise RateLimitError(f"Rate limit retry mechanism failed unexpectedly")
+
+    async def _with_rate_limit_retry_stream(self, operation_callable, *args, **kwargs) -> AsyncGenerator:
+        """
+        Wrapper that retries a streaming async operation when rate limit errors occur.
+
+        This method implements exponential backoff with random jitter for rate limit errors
+        in streaming contexts. It will retry up to rate_limit_max_retries times.
+
+        Args:
+            operation_callable: Async generator callable to execute (e.g., self._chat_completion_stream_impl)
+            *args: Positional arguments to pass to operation_callable
+            **kwargs: Keyword arguments to pass to operation_callable
+
+        Yields:
+            Items from operation_callable async generator
+
+        Raises:
+            RateLimitError: If max retries exceeded
+            Other exceptions: Propagated as-is from operation_callable
+        """
+        attempt = 0
+
+        while attempt < self.rate_limit_max_retries:
+            try:
+                # Execute the streaming operation
+                async for item in operation_callable(*args, **kwargs):
+                    yield item
+
+                # If we successfully complete the stream, we're done
+                return
+
+            except RateLimitError as e:
+                attempt += 1
+
+                if attempt >= self.rate_limit_max_retries:
+                    log.log_error(
+                        f"Rate limit retry exhausted after {attempt} attempts for {self.name}. "
+                        f"Giving up on this streaming request."
+                    )
+                    raise RateLimitError(
+                        f"Rate limit exceeded after {attempt} retries: {e}"
+                    )
+
+                # Calculate random delay between min and max
+                delay = random.uniform(self.rate_limit_min_delay, self.rate_limit_max_delay)
+
+                log.log_warn(
+                    f"Rate limit error on streaming attempt {attempt}/{self.rate_limit_max_retries} "
+                    f"for {self.name}. Retrying in {delay:.1f} seconds... Error: {e}"
+                )
+
+                # Wait before retrying
+                await asyncio.sleep(delay)
+
+            except Exception as e:
+                # Non-rate-limit errors are propagated immediately
+                raise
+
+        # This should never be reached due to the raise in the loop, but just in case
+        raise RateLimitError(f"Rate limit retry mechanism failed unexpectedly for streaming")
+
     @abstractmethod
     async def chat_completion(self, request: ChatRequest, 
                             native_message_callback: Optional[Callable[[Dict[str, Any], ProviderType], None]] = None) -> ChatResponse:

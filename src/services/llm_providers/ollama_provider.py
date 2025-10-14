@@ -16,7 +16,7 @@ except ImportError:
     raise ImportError("httpx package not available. Install with: pip install httpx")
 
 from .base_provider import (
-    BaseLLMProvider, APIProviderError, AuthenticationError, 
+    BaseLLMProvider, APIProviderError, AuthenticationError,
     RateLimitError, NetworkError
 )
 from ..models.llm_models import (
@@ -75,11 +75,15 @@ class OllamaProvider(BaseLLMProvider):
 
         log.log_info(f"Ollama provider initialized with URL: {self.url}, model: {self.model}")
     
-    async def chat_completion(self, request: ChatRequest, 
+    async def chat_completion(self, request: ChatRequest,
                             native_message_callback: Optional[Callable[[Dict[str, Any], ProviderType], None]] = None) -> ChatResponse:
-        """Generate non-streaming chat completion"""
+        """Generate non-streaming chat completion with rate limit retry"""
         log.log_info(f"Ollama chat completion for {self.model} with {len(request.messages)} messages")
-        
+        return await self._with_rate_limit_retry(self._chat_completion_impl, request, native_message_callback)
+
+    async def _chat_completion_impl(self, request: ChatRequest,
+                            native_message_callback: Optional[Callable[[Dict[str, Any], ProviderType], None]] = None) -> ChatResponse:
+        """Internal implementation of chat completion"""
         try:
             # Convert messages to Ollama format
             ollama_messages = self._prepare_messages(request.messages)
@@ -118,7 +122,11 @@ class OllamaProvider(BaseLLMProvider):
                             error_msg = error_data['error']
                     except:
                         error_msg = response.text or error_msg
-                    
+
+                    # Check for rate limit errors (HTTP 429)
+                    if response.status_code == 429:
+                        raise RateLimitError(f"Ollama rate limit exceeded: {error_msg}")
+
                     raise APIProviderError(f"Ollama API error: {error_msg}")
                 
                 data = response.json()
@@ -212,11 +220,16 @@ class OllamaProvider(BaseLLMProvider):
             log.log_error(f"Chat completion failed: {e}")
             raise APIProviderError(f"Unexpected error during chat completion: {e}")
     
-    async def chat_completion_stream(self, request: ChatRequest, 
+    async def chat_completion_stream(self, request: ChatRequest,
                                    native_message_callback: Optional[Callable[[Dict[str, Any], ProviderType], None]] = None) -> AsyncGenerator[ChatResponse, None]:
-        """Generate streaming chat completion"""
+        """Generate streaming chat completion with rate limit retry"""
         log.log_info(f"Ollama streaming completion for {self.model} with {len(request.messages)} messages")
-        
+        async for response in self._with_rate_limit_retry_stream(self._chat_completion_stream_impl, request, native_message_callback):
+            yield response
+
+    async def _chat_completion_stream_impl(self, request: ChatRequest,
+                                   native_message_callback: Optional[Callable[[Dict[str, Any], ProviderType], None]] = None) -> AsyncGenerator[ChatResponse, None]:
+        """Internal implementation of streaming chat completion"""
         stream_response = None
         try:
             # Convert messages to Ollama format
@@ -269,7 +282,11 @@ class OllamaProvider(BaseLLMProvider):
                         except:
                             error_text = await response.aread()
                             error_msg = error_text.decode() if isinstance(error_text, bytes) else str(error_text)
-                        
+
+                        # Check for rate limit errors (HTTP 429)
+                        if response.status_code == 429:
+                            raise RateLimitError(f"Ollama rate limit exceeded: {error_msg}")
+
                         raise APIProviderError(f"Ollama streaming API error: {error_msg}")
                     
                     # Process streaming response

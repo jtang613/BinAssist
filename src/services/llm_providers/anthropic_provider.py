@@ -99,9 +99,14 @@ class AnthropicProvider(BaseLLMProvider):
         except Exception as e:
             raise APIProviderError(f"Failed to initialize Anthropic client: {e}")
     
-    async def chat_completion(self, request: ChatRequest, 
+    async def chat_completion(self, request: ChatRequest,
                             native_message_callback: Optional[Callable[[Dict[str, Any], ProviderType], None]] = None) -> ChatResponse:
-        """Generate non-streaming chat completion"""
+        """Generate non-streaming chat completion with rate limit retry"""
+        return await self._with_rate_limit_retry(self._chat_completion_impl, request, native_message_callback)
+
+    async def _chat_completion_impl(self, request: ChatRequest,
+                            native_message_callback: Optional[Callable[[Dict[str, Any], ProviderType], None]] = None) -> ChatResponse:
+        """Internal implementation of chat completion"""
         try:
             # Convert to Anthropic format
             anthropic_messages = self._prepare_messages(request.messages)
@@ -202,9 +207,15 @@ class AnthropicProvider(BaseLLMProvider):
         except Exception as e:
             raise APIProviderError(f"Unexpected error during chat completion: {e}")
     
-    async def chat_completion_stream(self, request: ChatRequest, 
+    async def chat_completion_stream(self, request: ChatRequest,
                                    native_message_callback: Optional[Callable[[Dict[str, Any], ProviderType], None]] = None) -> AsyncGenerator[ChatResponse, None]:
-        """Generate streaming chat completion"""
+        """Generate streaming chat completion with rate limit retry"""
+        async for response in self._with_rate_limit_retry_stream(self._chat_completion_stream_impl, request, native_message_callback):
+            yield response
+
+    async def _chat_completion_stream_impl(self, request: ChatRequest,
+                                   native_message_callback: Optional[Callable[[Dict[str, Any], ProviderType], None]] = None) -> AsyncGenerator[ChatResponse, None]:
+        """Internal implementation of streaming chat completion"""
         try:
             # Convert to Anthropic format
             anthropic_messages = self._prepare_messages(request.messages)
