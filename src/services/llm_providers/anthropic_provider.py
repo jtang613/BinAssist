@@ -117,10 +117,15 @@ class AnthropicProvider(BaseLLMProvider):
                 "model": request.model or self.model,
                 "messages": anthropic_messages,
                 "max_tokens": min(request.max_tokens, self.max_tokens),
-                "temperature": request.temperature,
-                "top_p": request.top_p,
                 "stream": False
             }
+
+            # Anthropic doesn't allow both temperature and top_p
+            # Prefer temperature if specified, otherwise use top_p
+            if request.temperature is not None:
+                payload["temperature"] = request.temperature
+            elif request.top_p is not None:
+                payload["top_p"] = request.top_p
             
             if system_message:
                 payload["system"] = system_message
@@ -226,9 +231,14 @@ class AnthropicProvider(BaseLLMProvider):
                 "model": request.model or self.model,
                 "messages": anthropic_messages,
                 "max_tokens": min(request.max_tokens, self.max_tokens),
-                "temperature": request.temperature,
-                "top_p": request.top_p,
             }
+
+            # Anthropic doesn't allow both temperature and top_p
+            # Prefer temperature if specified, otherwise use top_p
+            if request.temperature is not None:
+                payload["temperature"] = request.temperature
+            elif request.top_p is not None:
+                payload["top_p"] = request.top_p
             
             if system_message:
                 payload["system"] = system_message

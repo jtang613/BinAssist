@@ -3,5 +3,4 @@ anthropic
 pysqlite3
 markdown
 httpx
-whoosh
 mcp
