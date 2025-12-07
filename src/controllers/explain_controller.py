@@ -16,6 +16,7 @@ from ..services.mcp_tool_orchestrator import MCPToolOrchestrator
 from ..services.models.llm_models import ToolCall, ToolResult
 from ..services.rlhf_service import rlhf_service
 from ..services.models.rlhf_models import RLHFFeedbackEntry
+from ..services.debounced_renderer import DebouncedRenderer
 
 try:
     import binaryninja
@@ -67,7 +68,12 @@ class ExplainController:
             'system': None,
             'response': None
         }
-        
+
+        # Debounced rendering for streaming responses
+        self._debounced_renderer = DebouncedRenderer(
+            update_callback=self._debounced_update_callback
+        )
+
         # Connect view signals
         self._connect_signals()
     
@@ -613,13 +619,16 @@ Analyze the specific instruction/line of code below. Provide a detailed explanat
         self._tool_execution_active = False
         self._tool_call_attempts.clear()
         self._tool_call_rounds = 0  # Reset round counter
-        
+
+        # Start debounced rendering for streaming responses
+        self._debounced_renderer.start()
+
         # Initialize conversation history with the user query
         self._conversation_history = [{"role": "user", "content": query}]
-        
+
         # Show LLM processing state
         self.view.set_explanation_content("*Generating AI explanation...*")
-        
+
         # Get MCP tools if enabled
         mcp_tools = self._get_current_mcp_tools()
         
@@ -641,22 +650,59 @@ Analyze the specific instruction/line of code below. Provide a detailed explanat
             self.llm_thread.response_complete.connect(self._on_llm_response_complete)
             self.llm_thread.response_error.connect(self._on_llm_response_error)
             self.llm_thread.start()
-    
+
+    def _debounced_update_callback(self, accumulated_content: str):
+        """
+        Callback for debounced renderer - called periodically with accumulated content.
+
+        This is called every 1 second (by default) instead of on every chunk,
+        reducing UI updates by 10-40x and preventing stuttering.
+
+        We do proper markdown rendering here, but only ~10-20 times per response
+        instead of 200+ times. Even though markdown parsing is on the main thread,
+        it only happens periodically (1s intervals), keeping the UI responsive.
+
+        This matches the GhidrAssist implementation strategy.
+
+        Args:
+            accumulated_content: The accumulated response content from all deltas
+        """
+        # Check if user is near the bottom before updating
+        should_auto_scroll = self.view._should_auto_scroll_to_bottom()
+
+        # Convert markdown to HTML (happens only every 1 second, not on every delta)
+        # This is the GhidrAssist approach: periodic rendering on main thread
+        html_content = self.view.markdown_to_html(accumulated_content)
+
+        # Update with rendered HTML
+        self.view.explain_browser.setHtml(html_content)
+
+        # Auto-scroll if user was following
+        if should_auto_scroll:
+            self.view._scroll_to_bottom()
+
     def _on_llm_response_chunk(self, chunk: str):
         """Handle streaming response chunk from LLM"""
         # Initialize buffer if not exists
         if not hasattr(self, '_llm_response_buffer'):
             self._llm_response_buffer = ""
-        
+
         self._llm_response_buffer += chunk
-        
-        # Send accumulated markdown to view (view will handle HTML conversion)
-        self.view.set_explanation_content(self._llm_response_buffer)
+
+        # Feed ONLY the chunk (not the entire buffer) to debounced renderer
+        # The debouncer will accumulate the chunks and render periodically (every 1 second)
+        # instead of on every delta, reducing UI updates by 10-40x
+        self._debounced_renderer.on_delta(chunk)
     
     def _on_llm_response_complete(self):
         """Handle completion of LLM response"""
         log.log_info("LLM response completed")
-        
+
+        # Stop debounced rendering and do final render
+        # This ensures the final complete response is displayed
+        if hasattr(self, '_llm_response_buffer'):
+            self._debounced_renderer.complete(self._llm_response_buffer)
+
         # Update RLHF context with final response
         if hasattr(self, '_llm_response_buffer') and self._llm_response_buffer:
             self._update_rlhf_response(self._llm_response_buffer)
@@ -703,13 +749,17 @@ Analyze the specific instruction/line of code below. Provide a detailed explanat
     def _on_llm_response_error(self, error: str):
         """Handle LLM response error"""
         log.log_error(f"LLM query failed: {error}")
+
+        # Cancel debounced rendering
+        self._debounced_renderer.cancel()
+
         error_markdown = f"**Error:** {error}\n\n*Falling back to static analysis...*"
         self.view.set_explanation_content(error_markdown)
-        
+
         if hasattr(self, '_llm_response_buffer'):
             delattr(self, '_llm_response_buffer')
         self._cleanup_llm_thread()
-        
+
         # Reset query states
         if self.function_query_active:
             self._set_query_state("function", False)
@@ -1099,14 +1149,22 @@ Analyze the specific instruction/line of code below. Provide a detailed explanat
     def stop_function_query(self):
         """Stop the current function query"""
         log.log_info("Stop function query requested")
+
+        # Cancel debounced rendering
+        self._debounced_renderer.cancel()
+
         if self.function_query_active and hasattr(self, 'llm_thread'):
             self.llm_thread.cancel()
             self._cleanup_llm_thread()
         self._set_query_state("function", False)
-    
+
     def stop_line_query(self):
         """Stop the current line query"""
         log.log_info("Stop line query requested")
+
+        # Cancel debounced rendering
+        self._debounced_renderer.cancel()
+
         if self.line_query_active and hasattr(self, 'llm_thread'):
             self.llm_thread.cancel()
             self._cleanup_llm_thread()

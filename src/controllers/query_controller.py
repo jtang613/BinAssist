@@ -18,6 +18,7 @@ from ..services.models.llm_models import ToolCall, ToolResult
 from ..services.rlhf_service import rlhf_service
 from ..services.models.rlhf_models import RLHFFeedbackEntry
 from .chat_edit_manager import ChatEditManager
+from ..services.debounced_renderer import DebouncedRenderer
 
 try:
     import binaryninja
@@ -497,7 +498,12 @@ class QueryController:
         self._tool_results: List[ToolResult] = []
         self._continuation_complete = False
         self._tool_call_attempts = {}  # Track tool call attempts for loop prevention
-        
+
+        # Debounced rendering for streaming responses
+        self._debounced_renderer = DebouncedRenderer(
+            update_callback=self._debounced_update_callback
+        )
+
         # Connect view signals
         self._connect_signals()
         
@@ -897,6 +903,10 @@ class QueryController:
     def stop_query(self):
         """Stop the current query"""
         log.log_info("Stop query requested")
+
+        # Cancel debounced rendering
+        self._debounced_renderer.cancel()
+
         if self._query_active and hasattr(self, 'llm_thread') and self.llm_thread:
             self.llm_thread.cancel()
             self._cleanup_llm_thread()
@@ -1369,7 +1379,44 @@ class QueryController:
                     log.log_warn(f"No binary hash available for saving {role} message")
             except Exception as e:
                 log.log_error(f"Failed to persist chat message: {e}")
-    
+
+    def _debounced_update_callback(self, accumulated_content: str):
+        """
+        Callback for debounced renderer - called periodically with accumulated content.
+
+        This is called every 1 second (by default) instead of on every chunk,
+        reducing UI updates by 10-40x and preventing stuttering.
+
+        We do proper markdown rendering here, but only ~10-20 times per response
+        instead of 200+ times. Even though markdown parsing is on the main thread,
+        it only happens periodically (1s intervals), keeping the UI responsive.
+
+        This matches the GhidrAssist implementation strategy.
+
+        Args:
+            accumulated_content: The accumulated response content from all deltas
+        """
+        if not self.current_chat_id or self.current_chat_id not in self.chats:
+            return
+
+        # Format chat as markdown
+        chat = self.chats[self.current_chat_id]
+        markdown_content = self._format_chat_as_markdown(chat)
+
+        # Check if user is near the bottom before updating
+        should_auto_scroll = self.view._should_auto_scroll_to_bottom()
+
+        # Convert markdown to HTML (happens only every 1 second, not on every delta)
+        # This is the GhidrAssist approach: periodic rendering on main thread
+        html_content = self.view.markdown_to_html(markdown_content)
+
+        # Update with rendered HTML
+        self.view.query_browser.setHtml(html_content)
+
+        # Auto-scroll if user was following
+        if should_auto_scroll:
+            self.view._scroll_to_bottom()
+
     def _update_chat_display(self):
         """Update the chat display with current chat content"""
         if not self.current_chat_id or self.current_chat_id not in self.chats:
@@ -1450,10 +1497,14 @@ class QueryController:
                 
             elif role == "tool_response":
                 content += f"### 📊 Tool Response ({timestamp})\n{text}\n\n"
-                
+
+            elif role == "tool_status":
+                # Tool status messages: just success/failure indicators
+                content += f"*{text}*\n\n"
+
             elif role == "error":
                 content += f"## Error ({timestamp})\n**{text}**\n\n"
-        
+
         return content
     
     def _get_initial_chat_content(self) -> str:
@@ -1916,7 +1967,10 @@ Tool Usage Guidelines:
         self._tool_execution_active = False
         self._continuation_complete = False
         self._tool_call_attempts = {}  # Reset tool call attempt tracking
-        
+
+        # Start debounced rendering for streaming responses
+        self._debounced_renderer.start()
+
         # Create and start the LLM query thread
         native_callback = self._create_native_message_callback()
         self.llm_thread = LLMQueryThread(messages, provider_config, self.llm_factory, mcp_tools, native_callback)
@@ -1930,22 +1984,30 @@ Tool Usage Guidelines:
     def _on_llm_response_chunk(self, chunk: str):
         """Handle streaming response chunk from LLM"""
         self._llm_response_buffer += chunk
-        
-        # Update the last assistant message with accumulated response
+
+        # Feed chunk to debounced renderer instead of immediate update
+        # This accumulates chunks and renders periodically (every 1 second)
+        # instead of on every delta, reducing UI updates by 10-40x
+        self._debounced_renderer.on_delta(chunk)
+
+        # Update the last assistant message in memory (no UI update yet)
         self._update_last_assistant_message(self._llm_response_buffer)
-        self._update_chat_display()
     
     def _on_llm_response_complete(self):
         """Handle completion of LLM response"""
         log.log_info(f"LLM response complete called - tool_execution_active: {self._tool_execution_active}")
         log.log_info(f"LLM response buffer: {len(self._llm_response_buffer)} chars")
         log.log_info(f"Response content: '{self._llm_response_buffer[:200]}{'...' if len(self._llm_response_buffer) > 200 else ''}'")
-        
+
+        # Stop debounced rendering and do final render
+        # This ensures the final complete response is displayed
+        self._debounced_renderer.complete(self._llm_response_buffer)
+
         # Only complete if no tool execution is active
         if not self._tool_execution_active:
             # Check if we have content in the response buffer OR if the assistant message was already updated during streaming
             has_content = bool(self._llm_response_buffer)
-            
+
             # Check if the assistant message already has content from streaming
             if not has_content and self.current_chat_id in self.chats:
                 messages = self.chats[self.current_chat_id]["messages"]
@@ -1955,17 +2017,16 @@ Tool Usage Guidelines:
                         has_content = True
                         # Use the existing content as our response buffer for RLHF and final update
                         self._llm_response_buffer = existing_content
-            
-            # Final update of the assistant message
+
+            # Final update of the assistant message (debouncer already did the display update)
             if has_content:
                 log.log_info("Updating last assistant message with LLM response")
                 self._update_last_assistant_message(self._llm_response_buffer, final_update=True)
-                self._update_chat_display()
                 # Update RLHF context with final response
                 self._update_rlhf_response(self._llm_response_buffer)
             else:
                 log.log_debug("No LLM response content - this might be a tool-only response")
-            
+
             # Clean up
             self._cleanup_llm_thread()
             self._query_active = False
@@ -1977,14 +2038,17 @@ Tool Usage Guidelines:
     def _on_llm_response_error(self, error: str):
         """Handle LLM response error"""
         log.log_error(f"LLM query failed: {error}")
-        
+
+        # Cancel debounced rendering
+        self._debounced_renderer.cancel()
+
         # Cancel any pending tool execution
         self._tool_execution_active = False
-        
+
         error_response = f"**Error**: {error}\n\n*The LLM query failed. Please check your provider configuration and try again.*"
         self._update_last_assistant_message(error_response, final_update=True)
         self._update_chat_display()
-        
+
         # Clean up
         self._cleanup_llm_thread()
         self._query_active = False
@@ -2139,17 +2203,21 @@ Tool Usage Guidelines:
     def _on_tool_results_ready(self, results: List[ToolResult]):
         """Handle tool results ready signal - ALWAYS continue conversation"""
         self._tool_results = results
-        
+
         # Add tool response messages for each result
+        # Only show success/failure status to user, but keep full content for LLM context
         for tool_call, result in zip(self._pending_tool_calls, results):
+            # User-facing message: Just show success/failure
             if result.error:
-                tool_response_content = f"**Tool:** `{tool_call.name}` **failed**\n\n**Error:** {result.error}"
+                user_message = f"🔧 Tool `{tool_call.name}` **failed**: {result.error}"
             else:
-                tool_response_content = f"**Tool:** `{tool_call.name}` **completed successfully**\n\n{result.content}"
-            
-            # Add tool response message
-            self._add_message_to_chat(self.current_chat_id, "tool_response", tool_response_content)
-        
+                # Show success with content length instead of full content
+                content_preview = f"{len(result.content)} characters" if result.content else "no output"
+                user_message = f"✅ Tool `{tool_call.name}` **succeeded** ({content_preview})"
+
+            # Add user-facing message for display only (not saved to DB or sent to LLM)
+            self._add_message_to_chat(self.current_chat_id, "tool_status", user_message, save_to_db=False)
+
         self._update_chat_display()
         
         # ALWAYS continue LLM conversation with results (success or failure)
@@ -2177,17 +2245,20 @@ Tool Usage Guidelines:
                 mcp_tools,
                 native_callback
             )
-            
+
             # Connect signals
             self.continuation_thread.continuation_chunk.connect(self._on_continuation_chunk)
             self.continuation_thread.continuation_complete.connect(self._on_continuation_complete)
             self.continuation_thread.continuation_error.connect(self._on_continuation_error)
             self.continuation_thread.additional_tools_detected.connect(self._on_tool_calls_detected)
-            
-            # Reset continuation buffer for this new continuation session
-            if hasattr(self, '_continuation_response_buffer'):
-                delattr(self, '_continuation_response_buffer')
-            
+
+            # CRITICAL: Reset the LLM response buffer for this NEW continuation
+            # Each continuation should start fresh, not accumulate previous responses
+            self._llm_response_buffer = ""
+
+            # Restart debounced renderer for this new continuation
+            self._debounced_renderer.start()
+
             # Start thread
             self.continuation_thread.start()
             
@@ -2273,10 +2344,13 @@ Tool Usage Guidelines:
         """Handle streaming continuation chunk"""
         # Add the chunk directly to the main LLM response buffer (just like initial streaming)
         self._llm_response_buffer += chunk
-        
+
+        # Feed chunk to debounced renderer (same as initial streaming)
+        self._debounced_renderer.on_delta(chunk)
+
         # For continuation, we need to add a new assistant message or update existing one
+        # This happens in memory only - debounced renderer handles UI updates
         self._update_or_create_continuation_message(self._llm_response_buffer)
-        self._update_chat_display()
     
     def _update_or_create_continuation_message(self, content: str):
         """Update existing assistant message or create new one for continuation"""
@@ -2305,18 +2379,24 @@ Tool Usage Guidelines:
     def _on_continuation_complete(self, final_response: str):
         """Handle continuation completion - this means the LLM is truly done (no more tool calls)"""
         try:
-            # No need to add final response since streaming chunks already created/updated the assistant message
-            # Update RLHF context with final response from buffer
+            # Stop debounced rendering and do final render with full markdown
+            self._debounced_renderer.complete(self._llm_response_buffer)
+
+            # Update final assistant message and save to storage
             if self._llm_response_buffer:
+                self._update_last_assistant_message(self._llm_response_buffer, final_update=True)
                 self._update_rlhf_response(self._llm_response_buffer)
-            
-            # Just clean up and end the query - this signal means no more tool calls were detected
+
+            # Final display with full markdown rendering (not plain text)
+            self._update_chat_display()
+
+            # Clean up and end the query
             self._cleanup_continuation_thread()
             self._tool_execution_active = False
             self._query_active = False
             self._current_query_binary_hash = None
             self.view.set_query_running(False)
-            
+
         except Exception as e:
             log.log_error(f"Error handling continuation completion: {e}")
     
