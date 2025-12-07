@@ -19,6 +19,7 @@ class QueryTabView(QWidget):
     edit_mode_changed = Signal(bool)
     rag_enabled_changed = Signal(bool)
     mcp_enabled_changed = Signal(bool)
+    agentic_enabled_changed = Signal(bool)
     # RLHF feedback signals
     rlhf_feedback_requested = Signal(bool)  # True for upvote, False for downvote
     
@@ -89,7 +90,14 @@ class QueryTabView(QWidget):
         self.mcp_checkbox.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.mcp_checkbox.setChecked(False)  # Default disabled
         self.mcp_checkbox.toggled.connect(self.mcp_enabled_changed.emit)
-        
+
+        # Agentic mode checkbox (ReAct autonomous agent)
+        self.agentic_checkbox = QCheckBox("Agentic")
+        self.agentic_checkbox.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.agentic_checkbox.setChecked(False)  # Default disabled
+        self.agentic_checkbox.setToolTip("Enable ReAct autonomous agent for complex investigations")
+        self.agentic_checkbox.toggled.connect(self.agentic_enabled_changed.emit)
+
         # Size-constrained Edit button
         self.edit_save_button = QPushButton("Edit")
         self.edit_save_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -100,6 +108,7 @@ class QueryTabView(QWidget):
         top_row.addStretch()  # Push checkboxes and button to the right
         top_row.addWidget(self.rag_checkbox)
         top_row.addWidget(self.mcp_checkbox)
+        top_row.addWidget(self.agentic_checkbox)
         top_row.addWidget(self.edit_save_button)
         
         parent_layout.addLayout(top_row)
@@ -342,7 +351,15 @@ class QueryTabView(QWidget):
     def set_mcp_enabled(self, enabled):
         """Set the MCP checkbox state"""
         self.mcp_checkbox.setChecked(enabled)
-    
+
+    def is_agentic_enabled(self):
+        """Get the current state of the Agentic checkbox"""
+        return self.agentic_checkbox.isChecked()
+
+    def set_agentic_enabled(self, enabled):
+        """Set the Agentic checkbox state"""
+        self.agentic_checkbox.setChecked(enabled)
+
     def set_query_running(self, running: bool):
         """Update query running state and button text"""
         self.query_running = running

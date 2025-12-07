@@ -19,6 +19,8 @@ from ..services.rlhf_service import rlhf_service
 from ..services.models.rlhf_models import RLHFFeedbackEntry
 from .chat_edit_manager import ChatEditManager
 from ..services.debounced_renderer import DebouncedRenderer
+from .react_thread import ReActOrchestratorThread
+from ..services.models.react_models import ReActConfig, ReActResult, ReActStatus
 
 try:
     import binaryninja
@@ -504,6 +506,10 @@ class QueryController:
             update_callback=self._debounced_update_callback
         )
 
+        # ReAct (agentic mode) state
+        self._react_thread: Optional[ReActOrchestratorThread] = None
+        self._react_active = False
+
         # Connect view signals
         self._connect_signals()
         
@@ -522,6 +528,7 @@ class QueryController:
         self.view.edit_mode_changed.connect(self.on_edit_mode_changed)
         self.view.rag_enabled_changed.connect(self.on_rag_enabled_changed)
         self.view.mcp_enabled_changed.connect(self.on_mcp_enabled_changed)
+        self.view.agentic_enabled_changed.connect(self.on_agentic_enabled_changed)
     
     def set_binary_view(self, binary_view: bn.BinaryView):
         """Update the binary view for context service"""
@@ -540,9 +547,9 @@ class QueryController:
     
     def load_existing_chats(self):
         """Load existing chats from database on startup"""
-        # CRITICAL FIX: Don't reload chats during active query/tool execution
-        if self._query_active or self._tool_execution_active:
-            log.log_debug("Skipping chat reload during active query/tool execution")
+        # CRITICAL FIX: Don't reload chats during active query/tool execution/react analysis
+        if self._query_active or self._tool_execution_active or self._react_active:
+            log.log_debug("Skipping chat reload during active query/tool execution/react analysis")
             return
         
         try:
@@ -823,10 +830,15 @@ class QueryController:
     def submit_query(self, query_text: str):
         """Handle query submission with LLM integration"""
         log.log_info(f"Query submitted: {query_text[:50]}...")
-        
+
         # Expand macros in the query text
         query_text = self._expand_macros(query_text)
-        
+
+        # Route to agentic mode if enabled
+        if self.view.is_agentic_enabled():
+            self._submit_agentic_query(query_text)
+            return
+
         # Check if query is already active
         if self._query_active:
             log.log_warn("Query already active, ignoring request")
@@ -907,6 +919,13 @@ class QueryController:
         # Cancel debounced rendering
         self._debounced_renderer.cancel()
 
+        # Cancel ReAct if active
+        if self._react_active and self._react_thread:
+            self._react_thread.cancel()
+            self._cleanup_react_thread()
+            self._react_active = False
+
+        # Cancel standard query if active
         if self._query_active and hasattr(self, 'llm_thread') and self.llm_thread:
             self.llm_thread.cancel()
             self._cleanup_llm_thread()
@@ -1348,7 +1367,15 @@ class QueryController:
         """Handle MCP checkbox change"""
         log.log_info(f"MCP enabled changed to: {enabled}")
         # TODO: Update MCP settings for future queries
-    
+
+    def on_agentic_enabled_changed(self, enabled: bool):
+        """Handle Agentic mode checkbox change"""
+        log.log_info(f"Agentic mode enabled changed to: {enabled}")
+        # Agentic mode requires MCP to be enabled
+        if enabled and not self.view.is_mcp_enabled():
+            log.log_info("Enabling MCP for agentic mode")
+            self.view.set_mcp_enabled(True)
+
     def _add_message_to_chat(self, chat_id: int, role: str, content: str, save_to_db: bool = True):
         """Add a message to the specified chat"""
         if chat_id not in self.chats:
@@ -1421,10 +1448,10 @@ class QueryController:
         """Update the chat display with current chat content"""
         if not self.current_chat_id or self.current_chat_id not in self.chats:
             return
-        
+
         # Only load from native storage when not actively streaming
-        # During streaming, use in-memory messages that are being updated
-        if not self._query_active:
+        # During streaming (standard or ReAct), use in-memory messages that are being updated
+        if not self._query_active and not self._react_active:
             try:
                 self._load_chat_from_native_storage(self.current_chat_id)
             except Exception as e:
@@ -2552,3 +2579,236 @@ Tool Usage Guidelines:
                 
         except Exception as e:
             log.log_error(f"Error handling RLHF feedback: {e}")
+
+    # =========================================================================
+    # ReAct (Agentic Mode) Methods
+    # =========================================================================
+
+    def _submit_agentic_query(self, query_text: str):
+        """Handle agentic (ReAct) query submission"""
+        log.log_info(f"Agentic query submitted: {query_text[:50]}...")
+
+        # Check if query is already active
+        if self._query_active or self._react_active:
+            log.log_warn("Query already active, ignoring agentic request")
+            return
+
+        try:
+            # Get active LLM provider
+            active_provider = self.settings_service.get_active_llm_provider()
+            if not active_provider:
+                self._handle_no_llm_provider(query_text)
+                return
+
+            # Ensure we have an active chat
+            if self.current_chat_id is None:
+                self.new_chat()
+
+            # Set active state
+            self._react_active = True
+            self._current_query_binary_hash = self._get_current_binary_hash()
+            self.view.set_query_running(True)
+
+            # Add user query to chat
+            self._add_message_to_chat(self.current_chat_id, "user", query_text)
+
+            # Add placeholder for assistant response (will be filled by content chunks)
+            self._add_message_to_chat(self.current_chat_id, "assistant",
+                                      "*Initializing agentic investigation...*", save_to_db=False)
+
+            # Update display to show user query and assistant placeholder
+            self._update_chat_display()
+
+            log.log_debug(f"Agentic query: Added user message and assistant placeholder to chat {self.current_chat_id}")
+
+            # Get context and MCP tools
+            context = self.context_service.get_current_context()
+            initial_context = self._format_initial_context_for_react(context)
+
+            # MCP tools are required for agentic mode
+            mcp_tools = []
+            if self.mcp_connection_manager.ensure_connections():
+                mcp_tools = self.mcp_connection_manager.get_available_tools_for_llm()
+                log.log_info(f"Agentic mode with {len(mcp_tools)} tools available")
+            else:
+                log.log_warn("MCP connection failed for agentic mode")
+
+            # Create provider instance
+            provider = self.llm_factory.create_provider(active_provider)
+
+            # Create ReAct config
+            config = ReActConfig(
+                max_iterations=15,
+                reflection_enabled=True
+            )
+
+            # Start ReAct thread
+            self._start_react_analysis(query_text, initial_context, provider, mcp_tools, config)
+
+        except Exception as e:
+            error_msg = f"Exception in submit_agentic_query: {str(e)}"
+            log.log_error(error_msg)
+            self._handle_react_error(str(e))
+
+    def _format_initial_context_for_react(self, context: Dict[str, Any]) -> str:
+        """Format initial binary context for ReAct agent"""
+        binary_info = context.get('binary_info', {})
+        func_ctx = context.get('function_context')
+
+        ctx_str = f"""Binary: {binary_info.get('filename', 'Unknown')}
+Architecture: {binary_info.get('architecture', 'Unknown')}
+Current Offset: {context.get('offset_hex', 'N/A')}"""
+
+        if func_ctx:
+            ctx_str += f"\nCurrent Function: {func_ctx['name']} ({func_ctx['start']} - {func_ctx['end']})"
+
+        return ctx_str
+
+    def _start_react_analysis(self, objective: str, initial_context: str,
+                              provider, mcp_tools: List[Dict[str, Any]],
+                              config: ReActConfig):
+        """Start the ReAct analysis thread"""
+        log.log_info("Starting ReAct analysis thread")
+
+        # Start debounced rendering
+        self._debounced_renderer.start()
+        self._llm_response_buffer = ""
+
+        # Create and configure thread
+        self._react_thread = ReActOrchestratorThread(
+            objective=objective,
+            initial_context=initial_context,
+            llm_provider=provider,
+            mcp_orchestrator=self.mcp_orchestrator,
+            mcp_tools=mcp_tools,
+            config=config
+        )
+
+        # Connect signals
+        self._react_thread.planning_complete.connect(self._on_react_planning_complete)
+        self._react_thread.todos_updated.connect(self._on_react_todos_updated)
+        self._react_thread.iteration_started.connect(self._on_react_iteration_started)
+        self._react_thread.iteration_complete.connect(self._on_react_iteration_complete)
+        self._react_thread.finding_discovered.connect(self._on_react_finding)
+        self._react_thread.progress_update.connect(self._on_react_progress)
+        self._react_thread.content_chunk.connect(self._on_react_content_chunk)
+        self._react_thread.analysis_complete.connect(self._on_react_complete)
+        self._react_thread.analysis_error.connect(self._on_react_error)
+
+        # Start thread
+        self._react_thread.start()
+        log.log_info("ReAct analysis thread started")
+
+    def _on_react_planning_complete(self, todos_formatted: str):
+        """Handle planning phase completion"""
+        log.log_debug(f"ReAct planning complete: {todos_formatted[:100]}...")
+
+    def _on_react_todos_updated(self, todos_formatted: str):
+        """Handle todo list updates"""
+        log.log_debug(f"ReAct todos updated")
+
+    def _on_react_iteration_started(self, iteration: int, current_todo: str):
+        """Handle iteration start"""
+        log.log_debug(f"ReAct iteration {iteration} started: {current_todo[:50]}...")
+
+    def _on_react_iteration_complete(self, iteration: int, summary: str):
+        """Handle iteration completion"""
+        log.log_debug(f"ReAct iteration {iteration} complete")
+
+    def _on_react_finding(self, finding: str):
+        """Handle new finding discovered"""
+        log.log_debug(f"ReAct finding: {finding[:50]}...")
+
+    def _on_react_progress(self, message: str, iteration: int):
+        """Handle progress update"""
+        log.log_debug(f"ReAct progress: {message} (iteration {iteration})")
+
+    def _on_react_content_chunk(self, chunk: str):
+        """Handle streaming content chunk from ReAct"""
+        if not chunk:
+            return
+
+        self._llm_response_buffer += chunk
+
+        # Update the assistant message in chat (will be rendered by debounced callback)
+        if self.current_chat_id and self.current_chat_id in self.chats:
+            chat = self.chats[self.current_chat_id]
+            if chat["messages"] and chat["messages"][-1]["role"] == "assistant":
+                chat["messages"][-1]["content"] = self._llm_response_buffer
+                log.log_debug(f"Updated assistant message with {len(self._llm_response_buffer)} chars")
+            else:
+                log.log_warn("No assistant message found to update in chat")
+        else:
+            log.log_warn(f"Chat {self.current_chat_id} not found for content update")
+
+        # Feed to debounced renderer for periodic UI updates
+        self._debounced_renderer.on_delta(chunk)
+
+    def _on_react_complete(self, result: ReActResult):
+        """Handle ReAct analysis completion"""
+        log.log_info(f"ReAct complete: {result.status.value}, {result.iteration_count} iterations, {result.tool_call_count} tool calls")
+
+        # Stop debounced rendering and do final render
+        self._debounced_renderer.complete()
+
+        # Format final response with statistics
+        status_emoji = "✅" if result.status == ReActStatus.SUCCESS else "⚠️"
+        final_content = f"""{self._llm_response_buffer}
+
+---
+
+## {status_emoji} Investigation Complete
+
+| Metric | Value |
+|--------|-------|
+| Status | {result.status.value} |
+| Iterations | {result.iteration_count} |
+| Tool Calls | {result.tool_call_count} |
+| Duration | {result.duration_seconds:.1f}s |
+"""
+
+        # Update assistant message with final content
+        self._update_last_assistant_message(final_content, final_update=True)
+        self._update_chat_display()
+
+        # Cleanup
+        self._cleanup_react_thread()
+        self._react_active = False
+        self._current_query_binary_hash = None
+        self.view.set_query_running(False)
+
+    def _on_react_error(self, error: str):
+        """Handle ReAct analysis error"""
+        self._handle_react_error(error)
+
+    def _handle_react_error(self, error: str):
+        """Handle ReAct error"""
+        log.log_error(f"ReAct error: {error}")
+
+        # Cancel debounced rendering
+        self._debounced_renderer.cancel()
+
+        error_response = f"**Agentic Investigation Error:** {error}"
+        self._update_last_assistant_message(error_response, final_update=True)
+        self._update_chat_display()
+
+        # Cleanup
+        self._cleanup_react_thread()
+        self._react_active = False
+        self._current_query_binary_hash = None
+        self.view.set_query_running(False)
+
+    def _cleanup_react_thread(self):
+        """Safely cleanup the ReAct thread"""
+        if hasattr(self, '_react_thread') and self._react_thread:
+            try:
+                if self._react_thread.isRunning():
+                    # Request cancellation and wait for thread to finish
+                    self._react_thread.cancel()
+                    self._react_thread.wait(3000)  # Wait up to 3 seconds
+                # Just set to None, let Qt handle cleanup
+                self._react_thread = None
+            except Exception as e:
+                log.log_error(f"Error during ReAct thread cleanup: {e}")
+                self._react_thread = None
+        log.log_debug("ReAct thread cleaned up")
