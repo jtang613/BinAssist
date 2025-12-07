@@ -7,7 +7,11 @@ _A comprehensive LLM-powered Binary Ninja plugin for intelligent binary analysis
 
 BinAssist is an advanced LLM plugin designed to enhance binary analysis and reverse engineering workflows through intelligent automation. It leverages local and remote LLM capabilities to provide context-aware assistance throughout the binary analysis process. It supports fully agentic reverse engineering through its MCP client and MCP servers like [BinAssistMCP](https://github.com/jtang613/BinAssistMCP)
 
-The plugin supports any OpenAI v1-compatible or Anthropic API, making it compatible with popular LLM providers including Ollama, LM Studio, Open-WebUI, OpenAI, and others. Recommended models include Claude Sonnet, GPT-OSS, DeepSeek and LLaMA-based coder models for optimal performance.
+The plugin supports any OpenAI v1-compatible or Anthropic API, making it compatible with popular LLM providers including Ollama, LM Studio, Open-WebUI, OpenAI, Anthropic, and others.
+
+**Recommended models:**
+- **With Reasoning Support**: Claude Sonnet 4+, OpenAI o1/o3/gpt-5, GPT-OSS (supports extended thinking for complex analysis)
+- **General Purpose**: DeepSeek, LLaMA-based coder models, Claude Sonnet 3.5, GPT-4
 
 ## Core Features
 
@@ -17,9 +21,17 @@ The plugin supports any OpenAI v1-compatible or Anthropic API, making it compati
 - **Context-Aware**: Stores responses at a function level, allowing you to easily keep track
 - **Edit Responses**: Tweak the response as needed and save it for later
 
-### Query Tab 
+### Query Tab
 - **Interactive LLM Chat**: Direct conversation interface with the LLM
-- **Agentic Assistant**: Multi-step autonomous analysis using agent frameworks via MCP
+- **ReAct Agent**: Autonomous multi-step reasoning and analysis using the ReAct (Reasoning + Acting) framework
+  - Iterative problem-solving with reflection and self-correction
+  - Automatic tool selection and execution via MCP
+  - Step-by-step reasoning traces for transparency
+  - Up to 15 iterations with intelligent termination
+- **Extended Thinking**: Support for reasoning effort control on compatible models
+  - Configurable thinking depth (None, Low, Medium, High)
+  - Compatible with Claude Sonnet 4+, OpenAI o1/o3/gpt-5, and gpt-oss
+  - Increases analysis quality for complex reverse engineering tasks
 - **Binary Context**: Automatically includes relevant binary information in queries
 - **Flexible Prompting**: Support for custom queries and analysis requests
 - **Streaming Responses**: Real-time response generation with cancellation support
@@ -37,8 +49,13 @@ The plugin supports any OpenAI v1-compatible or Anthropic API, making it compati
 - **Tool-Based Architecture**: Uses native LLM tool calling for precise suggestions
 
 ### Advanced Capabilities
+- **ReAct Autonomous Agent**: Full implementation of the ReAct framework for multi-step analysis
+- **Extended Thinking/Reasoning Effort**: Provider-agnostic reasoning control for deeper analysis
+  - Anthropic: Extended thinking with configurable token budgets (2K-25K tokens)
+  - OpenAI: Reasoning effort levels for o1/o3/gpt-5 models
+  - Ollama: Native thinking parameter support for compatible models (gpt-oss)
 - **Function Calling**: LLM can directly interact with Binary Ninja API to navigate and modify analysis
-- **MCP Integration**: Model Context Protocol support for extensible tool integration  
+- **MCP Integration**: Model Context Protocol support for extensible tool integration
 - **RLHF Dataset Generation**: Collect interaction data to enable model fine-tuning
 - **RAG Augmentation**: Enhance queries with relevant documentation and context
 - **Async Processing**: Non-blocking UI with background LLM processing
@@ -47,6 +64,10 @@ The plugin supports any OpenAI v1-compatible or Anthropic API, making it compati
 ### Configuration & Settings
 - **Flexible API Configuration**: Support for multiple LLM providers and endpoints
 - **Model Selection**: Choose from available models for different analysis tasks
+- **Reasoning Effort Control**: Session-specific thinking depth configuration
+  - Adjustable per-query or globally in Settings tab
+  - Four levels: None (standard), Low (~2K tokens), Medium (~10K), High (~25K)
+  - Cost and latency warnings for higher levels
 - **Token Limits**: Configurable maximum tokens for cost and performance optimization
 - **Database Management**: Built-in RLHF and RAG database configuration
 - **Thread Safety**: Proper async handling for Binary Ninja's threading requirements
@@ -77,9 +98,10 @@ pip install -r requirements.txt
 2. Configure your LLM provider:
    - **API Host**: Point to your preferred API endpoint (e.g., `http://localhost:11434` for Ollama)
    - **API Key**: Set authentication key if required
-   - **Model**: Choose your preferred model (e.g., `gpt-oss:20b`)
+   - **Model**: Choose your preferred model (e.g., `gpt-oss:20b`, `claude-sonnet-4-5`, `o1-preview`)
 3. Set database paths for RLHF and RAG features
 4. Adjust token limits based on your needs
+5. Configure **Reasoning Effort** in the Settings tab for models that support extended thinking
 
 ### 3. Usage
 1. Load a binary in Binary Ninja
@@ -106,6 +128,16 @@ pip install -r requirements.txt
 1. Use the **Query** tab for free-form questions
 2. Ask about specific functions, algorithms, or analysis techniques
 3. The LLM has full context of your current binary
+
+**Agentic Analysis (ReAct):**
+1. Enable **Agentic** mode in the Query tab
+2. Enable **MCP** to provide tools for autonomous exploration
+3. Ask complex questions like "What does this binary do?" or "Find security vulnerabilities"
+4. Watch as the agent autonomously:
+   - Decompiles and analyzes functions
+   - Follows cross-references
+   - Builds understanding through iterative reasoning
+   - Provides comprehensive analysis with step-by-step traces
 
 ## Screenshot
 ![Screenshot](https://raw.githubusercontent.com/jtang613/BinAssist/refs/heads/master/res/screenshot1.png)
@@ -140,6 +172,7 @@ https://github.com/jtang613/BinAssist
 - `ExplainLLMThread`: Background processing for explanations
 - `QueryLLMThread`: Async chat processing with streaming
 - `ActionsLLMThread`: LLM tool calling for suggestion generation
+- `ReActOrchestratorThread`: Autonomous multi-step agent execution
 
 **Tools & Integration:**
 - **MCP Tools**: Native LLM tool calling for precise actions
@@ -174,7 +207,13 @@ https://github.com/jtang613/BinAssist
 ```bash
 # Ollama setup
 curl -fsSL https://ollama.ai/install.sh | sh
+
+# Pull a general-purpose model
 ollama pull llama3.1:8b
+
+# Or pull a reasoning model (recommended for complex analysis)
+ollama pull gpt-oss:20b
+
 ollama serve  # Runs on http://localhost:11434
 ```
 
@@ -230,6 +269,6 @@ We welcome contributions! Please see our contributing guidelines:
 
 This plugin is released under the **MIT License** - see LICENSE file for details.
 
-**Minimum Binary Ninja Version**: 4000
+**Minimum Binary Ninja Version**: 5000
 
 **Metadata Version**: 2

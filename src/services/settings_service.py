@@ -144,8 +144,9 @@ class SettingsService:
     def _run_migrations(self):
         """Run database migrations"""
         try:
-            from .migrations import migrate_add_provider_type
+            from .migrations import migrate_add_provider_type, migrate_add_reasoning_effort
             migrate_add_provider_type(self._db_path)
+            migrate_add_reasoning_effort(self._db_path)
         except Exception as e:
             # Migration failures shouldn't prevent plugin loading
             try:
@@ -292,17 +293,18 @@ class SettingsService:
     
     # LLM Provider Operations
     
-    def add_llm_provider(self, name: str, model: str, url: str, max_tokens: int = 4096, 
-                        api_key: str = '', disable_tls: bool = False, provider_type: str = 'openai') -> int:
+    def add_llm_provider(self, name: str, model: str, url: str, max_tokens: int = 4096,
+                        api_key: str = '', disable_tls: bool = False, provider_type: str = 'openai',
+                        reasoning_effort: str = 'none') -> int:
         """Add a new LLM provider"""
         with self._db_lock:
             conn = self._get_connection()
             try:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT INTO llm_providers (name, model, url, max_tokens, api_key, disable_tls, provider_type)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                ''', (name, model, url, max_tokens, api_key, disable_tls, provider_type))
+                    INSERT INTO llm_providers (name, model, url, max_tokens, api_key, disable_tls, provider_type, reasoning_effort)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (name, model, url, max_tokens, api_key, disable_tls, provider_type, reasoning_effort))
                 
                 provider_id = cursor.lastrowid
                 conn.commit()
@@ -323,10 +325,10 @@ class SettingsService:
             try:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    SELECT id, name, model, url, max_tokens, api_key, disable_tls, provider_type, is_active
+                    SELECT id, name, model, url, max_tokens, api_key, disable_tls, provider_type, is_active, reasoning_effort
                     FROM llm_providers ORDER BY name
                 ''')
-                
+
                 providers = []
                 for row in cursor.fetchall():
                     providers.append({
@@ -338,7 +340,8 @@ class SettingsService:
                         'api_key': row[5],
                         'disable_tls': bool(row[6]),
                         'provider_type': row[7],
-                        'is_active': bool(row[8])
+                        'is_active': bool(row[8]),
+                        'reasoning_effort': row[9] if len(row) > 9 else 'none'
                     })
                 
                 return providers
@@ -350,7 +353,7 @@ class SettingsService:
     
     def update_llm_provider(self, provider_id: int, **kwargs) -> bool:
         """Update an LLM provider"""
-        valid_fields = {'name', 'model', 'url', 'max_tokens', 'api_key', 'disable_tls', 'provider_type', 'is_active'}
+        valid_fields = {'name', 'model', 'url', 'max_tokens', 'api_key', 'disable_tls', 'provider_type', 'is_active', 'reasoning_effort'}
         update_fields = {k: v for k, v in kwargs.items() if k in valid_fields}
         
         if not update_fields:
@@ -434,10 +437,10 @@ class SettingsService:
                 
                 # First check if there's an active provider in the database
                 cursor.execute('''
-                    SELECT id, name, model, url, max_tokens, api_key, disable_tls, provider_type
+                    SELECT id, name, model, url, max_tokens, api_key, disable_tls, provider_type, reasoning_effort
                     FROM llm_providers WHERE is_active = 1 LIMIT 1
                 ''')
-                
+
                 row = cursor.fetchone()
                 if row:
                     log.log_debug(f"Found active provider in database: {row[1]}")
@@ -449,7 +452,8 @@ class SettingsService:
                         'max_tokens': row[4],
                         'api_key': row[5],
                         'disable_tls': bool(row[6]),
-                        'provider_type': row[7]
+                        'provider_type': row[7],
+                        'reasoning_effort': row[8] if len(row) > 8 else 'none'
                     }
                 
                 log.log_debug("No active provider in database, checking saved setting")
@@ -466,17 +470,17 @@ class SettingsService:
                     
                     # Check if this provider still exists and set it as active
                     cursor.execute('''
-                        SELECT id, name, model, url, max_tokens, api_key, disable_tls, provider_type
+                        SELECT id, name, model, url, max_tokens, api_key, disable_tls, provider_type, reasoning_effort
                         FROM llm_providers WHERE name = ? LIMIT 1
                     ''', (saved_provider_name,))
-                    
+
                     provider_row = cursor.fetchone()
                     if provider_row:
                         log.log_debug(f"Restoring active provider: {saved_provider_name}")
                         # Restore the active flag
                         cursor.execute('UPDATE llm_providers SET is_active = 1 WHERE name = ?', (saved_provider_name,))
                         conn.commit()
-                        
+
                         return {
                             'id': provider_row[0],
                             'name': provider_row[1],
@@ -485,7 +489,8 @@ class SettingsService:
                             'max_tokens': provider_row[4],
                             'api_key': provider_row[5],
                             'disable_tls': bool(provider_row[6]),
-                            'provider_type': provider_row[7]
+                            'provider_type': provider_row[7],
+                            'reasoning_effort': provider_row[8] if len(provider_row) > 8 else 'none'
                         }
                     else:
                         log.log_warn(f"Saved provider '{saved_provider_name}' no longer exists in database")

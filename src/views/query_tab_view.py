@@ -434,7 +434,7 @@ class QueryTabView(QWidget):
     def markdown_to_html(self, markdown_text):
         """Convert Markdown text to HTML for display"""
         try:
-            html = markdown.markdown(markdown_text, extensions=['codehilite', 'fenced_code', 'tables'])
+            html = markdown.markdown(markdown_text, extensions=['codehilite', 'fenced_code', 'tables', 'sane_lists', 'nl2br'])
             
             # Add RLHF feedback links at the bottom
             feedback_html = self._get_feedback_html()

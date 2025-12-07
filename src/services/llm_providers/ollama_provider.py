@@ -24,6 +24,7 @@ from ..models.llm_models import (
     ChatMessage, MessageRole, ToolCall, ToolResult, Usage, ProviderCapabilities
 )
 from ..models.provider_types import ProviderType
+from ..models.reasoning_models import ReasoningConfig
 
 # Binary Ninja logging
 try:
@@ -94,21 +95,34 @@ class OllamaProvider(BaseLLMProvider):
                 "messages": ollama_messages,
                 "stream": False
             }
-            
+
             # Add parameters if specified
             if request.temperature is not None:
                 payload["options"] = payload.get("options", {})
                 payload["options"]["temperature"] = request.temperature
-            
+
             if request.max_tokens:
                 payload["options"] = payload.get("options", {})
                 payload["options"]["num_predict"] = request.max_tokens
-            
-            # Add tools if present
+
+            # Add reasoning if configured (think parameter at TOP LEVEL, not in options)
+            reasoning_effort_str = self.config.get('reasoning_effort', 'none')
+            if reasoning_effort_str and reasoning_effort_str != 'none':
+                # For gpt-oss: use string value ("low", "medium", "high")
+                # For other models: use boolean (true)
+                if "gpt-oss" in self.model.lower():
+                    payload["think"] = reasoning_effort_str
+                    log.log_debug(f"Ollama gpt-oss thinking set to: {reasoning_effort_str}")
+                else:
+                    payload["think"] = True
+                    log.log_debug(f"Ollama thinking enabled (boolean) for model: {self.model}")
+
+            # Add tools if present (transform to Ollama-compatible format)
             if request.tools:
-                payload["tools"] = request.tools
+                transformed_tools = self._transform_tools_for_ollama(request.tools)
+                payload["tools"] = transformed_tools
                 payload["format"] = "json"  # Request JSON format for better tool calling
-            
+
             # Make API call
             url = f"{self.url}/api/chat"
             async with httpx.AsyncClient(timeout=30.0, verify=not self.disable_tls) as client:
@@ -241,21 +255,34 @@ class OllamaProvider(BaseLLMProvider):
                 "messages": ollama_messages,
                 "stream": True
             }
-            
+
             # Add parameters if specified
             if request.temperature is not None:
                 payload["options"] = payload.get("options", {})
                 payload["options"]["temperature"] = request.temperature
-            
+
             if request.max_tokens:
                 payload["options"] = payload.get("options", {})
                 payload["options"]["num_predict"] = request.max_tokens
-            
-            # Add tools if present
+
+            # Add reasoning if configured (think parameter at TOP LEVEL, not in options - streaming)
+            reasoning_effort_str = self.config.get('reasoning_effort', 'none')
+            if reasoning_effort_str and reasoning_effort_str != 'none':
+                # For gpt-oss: use string value ("low", "medium", "high")
+                # For other models: use boolean (true)
+                if "gpt-oss" in self.model.lower():
+                    payload["think"] = reasoning_effort_str
+                    log.log_debug(f"Ollama streaming gpt-oss thinking set to: {reasoning_effort_str}")
+                else:
+                    payload["think"] = True
+                    log.log_debug(f"Ollama streaming thinking enabled (boolean) for model: {self.model}")
+
+            # Add tools if present (transform to Ollama-compatible format)
             if request.tools:
-                payload["tools"] = request.tools
+                transformed_tools = self._transform_tools_for_ollama(request.tools)
+                payload["tools"] = transformed_tools
                 payload["format"] = "json"  # Request JSON format for better tool calling
-            
+
             # Make streaming API call
             url = f"{self.url}/api/chat"
 
@@ -569,21 +596,99 @@ class OllamaProvider(BaseLLMProvider):
         
         return ollama_messages
     
+    def _transform_tools_for_ollama(self, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Transform tool schemas from OpenAI/Pydantic format to Ollama-compatible format.
+
+        Ollama's Go template expects simple JSON Schema without complex features like anyOf.
+        This function simplifies the schema to be compatible with Ollama's expectations.
+        """
+        transformed_tools = []
+
+        for tool in tools:
+            transformed_tool = {
+                "type": tool.get("type", "function"),
+                "function": {
+                    "name": tool["function"]["name"],
+                    "description": tool["function"].get("description", ""),
+                    "parameters": self._simplify_parameters(tool["function"].get("parameters", {}))
+                }
+            }
+            transformed_tools.append(transformed_tool)
+
+        return transformed_tools
+
+    def _simplify_parameters(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Simplify parameter schema to be Ollama-compatible.
+
+        Removes anyOf/oneOf constructs and uses simple type strings.
+        """
+        simplified = {
+            "type": params.get("type", "object"),
+            "properties": {},
+            "required": params.get("required", [])
+        }
+
+        properties = params.get("properties", {})
+        for prop_name, prop_schema in properties.items():
+            simplified["properties"][prop_name] = self._simplify_property(prop_schema)
+
+        return simplified
+
+    def _simplify_property(self, prop: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Simplify a single property schema.
+
+        Handles anyOf/oneOf by extracting the primary type (ignoring null).
+        """
+        simplified = {}
+
+        # Handle anyOf/oneOf (common in Pydantic schemas for optional fields)
+        if "anyOf" in prop or "oneOf" in prop:
+            variants = prop.get("anyOf") or prop.get("oneOf")
+            # Find the first non-null type
+            for variant in variants:
+                if isinstance(variant, dict) and variant.get("type") != "null":
+                    simplified["type"] = variant.get("type")
+                    break
+            # If no non-null type found, default to string
+            if "type" not in simplified:
+                simplified["type"] = "string"
+        elif "type" in prop:
+            simplified["type"] = prop["type"]
+        else:
+            # Default to string if no type specified
+            simplified["type"] = "string"
+
+        # Copy over description and title if present
+        if "description" in prop:
+            simplified["description"] = prop["description"]
+        if "title" in prop:
+            simplified["title"] = prop["title"]
+
+        # Copy over constraints (min, max, etc.)
+        for key in ["minimum", "maximum", "minLength", "maxLength", "pattern", "enum", "default"]:
+            if key in prop:
+                simplified[key] = prop[key]
+
+        return simplified
+
     def format_tool_results_for_continuation(self, tool_calls: List[ToolCall], tool_results: List[str]) -> List[Dict[str, Any]]:
         """
         Format tool execution results for Ollama conversation continuation.
-        
+
         Based on Ollama API documentation, tool results should use the "tool" role
         with content containing the execution result.
         """
         messages = []
-        
+
         for tool_call, result in zip(tool_calls, tool_results):
             messages.append({
                 "role": "tool",
                 "content": result
             })
-        
+
         return messages
     
 

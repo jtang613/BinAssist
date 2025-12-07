@@ -26,6 +26,7 @@ from ..models.llm_models import (
     ChatMessage, MessageRole, ToolCall, ToolResult, Usage, ProviderCapabilities
 )
 from ..models.provider_types import ProviderType
+from ..models.reasoning_models import ReasoningConfig
 
 # Binary Ninja logging
 try:
@@ -120,22 +121,41 @@ class AnthropicProvider(BaseLLMProvider):
                 "stream": False
             }
 
+            # Check if extended thinking will be enabled
+            reasoning_effort = self.config.get('reasoning_effort', 'none')
+            thinking_enabled = reasoning_effort and reasoning_effort != 'none'
+
             # Anthropic doesn't allow both temperature and top_p
-            # Prefer temperature if specified, otherwise use top_p
-            if request.temperature is not None:
+            # When thinking is enabled, temperature must be 1
+            if thinking_enabled:
+                payload["temperature"] = 1
+            elif request.temperature is not None:
                 payload["temperature"] = request.temperature
             elif request.top_p is not None:
                 payload["top_p"] = request.top_p
-            
+
             if system_message:
                 payload["system"] = system_message
-            
+
             if request.tools:
                 payload["tools"] = self._convert_tools_to_anthropic(request.tools)
-            
+
             if request.stop:
                 payload["stop_sequences"] = request.stop if isinstance(request.stop, list) else [request.stop]
-            
+
+            # Add extended thinking if configured
+            if thinking_enabled:
+                reasoning_config = ReasoningConfig.from_string(reasoning_effort)
+                reasoning_config.max_tokens = min(request.max_tokens, self.max_tokens)
+
+                budget = reasoning_config.get_anthropic_budget()
+                if budget and budget > 0:
+                    payload["thinking"] = {
+                        "type": "enabled",
+                        "budget_tokens": budget
+                    }
+                    log.log_debug(f"Anthropic thinking enabled with budget: {budget} tokens (temperature=1)")
+
             # Make API call
             response = await asyncio.to_thread(self._client.messages.create, **payload)
             
@@ -233,22 +253,41 @@ class AnthropicProvider(BaseLLMProvider):
                 "max_tokens": min(request.max_tokens, self.max_tokens),
             }
 
+            # Check if extended thinking will be enabled
+            reasoning_effort = self.config.get('reasoning_effort', 'none')
+            thinking_enabled = reasoning_effort and reasoning_effort != 'none'
+
             # Anthropic doesn't allow both temperature and top_p
-            # Prefer temperature if specified, otherwise use top_p
-            if request.temperature is not None:
+            # When thinking is enabled, temperature must be 1
+            if thinking_enabled:
+                payload["temperature"] = 1
+            elif request.temperature is not None:
                 payload["temperature"] = request.temperature
             elif request.top_p is not None:
                 payload["top_p"] = request.top_p
-            
+
             if system_message:
                 payload["system"] = system_message
-            
+
             if request.tools:
                 payload["tools"] = self._convert_tools_to_anthropic(request.tools)
-            
+
             if request.stop:
                 payload["stop_sequences"] = request.stop if isinstance(request.stop, list) else [request.stop]
-            
+
+            # Add extended thinking if configured (streaming)
+            if thinking_enabled:
+                reasoning_config = ReasoningConfig.from_string(reasoning_effort)
+                reasoning_config.max_tokens = min(request.max_tokens, self.max_tokens)
+
+                budget = reasoning_config.get_anthropic_budget()
+                if budget and budget > 0:
+                    payload["thinking"] = {
+                        "type": "enabled",
+                        "budget_tokens": budget
+                    }
+                    log.log_debug(f"Anthropic streaming thinking enabled with budget: {budget} tokens (temperature=1)")
+
             # Stream response using context manager
             accumulated_content = ""
             tool_calls = []

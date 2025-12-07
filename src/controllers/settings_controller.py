@@ -326,7 +326,7 @@ class ProviderDialog(QDialog):
         # Disable TLS
         self.disable_tls_check = QCheckBox("Disable TLS Verification")
         layout.addWidget(self.disable_tls_check)
-        
+
         # Buttons
         button_layout = QHBoxLayout()
         self.ok_button = QPushButton("OK")
@@ -357,7 +357,7 @@ class ProviderDialog(QDialog):
             self.max_tokens_spin.setValue(self.provider_data.get('max_tokens', 4096))
             self.key_edit.setText(self.provider_data.get('api_key', ''))
             self.disable_tls_check.setChecked(self.provider_data.get('disable_tls', False))
-    
+
     def get_provider_data(self):
         """Get the provider data from the form"""
         return {
@@ -530,7 +530,8 @@ class SettingsController(QObject):
         self.view.llm_provider_delete_requested.connect(self.delete_llm_provider)
         self.view.llm_provider_test_requested.connect(self.test_llm_provider)
         self.view.llm_active_provider_changed.connect(self.set_active_llm_provider)
-        
+        self.view.reasoning_effort_changed.connect(self.update_reasoning_effort)
+
         # MCP Provider signals
         self.view.mcp_provider_add_requested.connect(self.add_mcp_provider)
         self.view.mcp_provider_edit_requested.connect(self.edit_mcp_provider)
@@ -585,6 +586,11 @@ class SettingsController(QObject):
                 if index >= 0:
                     self.view.active_provider_combo.setCurrentIndex(index)
                     log.log_debug(f"Set active provider combo to index {index} ({provider_name})")
+
+                    # Set reasoning effort combo to match active provider
+                    reasoning_effort = active_provider.get('reasoning_effort', 'none')
+                    self.view.set_reasoning_effort(reasoning_effort)
+                    log.log_debug(f"Set reasoning effort to: {reasoning_effort}")
                 else:
                     log.log_warn(f"Provider '{provider_name}' not found in combo box")
                     # List available providers for debugging
@@ -759,17 +765,23 @@ class SettingsController(QObject):
         if not provider_name:
             log.log_debug("Empty provider name, returning")
             return
-        
+
         try:
             # Temporarily disconnect the signal to avoid recursive calls
             self.view.active_provider_combo.currentTextChanged.disconnect()
-            
+
             success = self.service.set_active_llm_provider(provider_name)
             log.log_debug(f"set_active_llm_provider result: {success}")
-            
+
+            # Update reasoning effort combo to match new active provider
+            provider = self.service.get_active_llm_provider()
+            if provider:
+                reasoning_effort = provider.get('reasoning_effort', 'none')
+                self.view.set_reasoning_effort(reasoning_effort)
+
             # Reconnect the signal
             self.view.active_provider_combo.currentTextChanged.connect(self.set_active_llm_provider)
-            
+
         except Exception as e:
             log.log_error(f"Error setting active provider: {e}")
             # Reconnect signal even if there was an error
@@ -778,6 +790,28 @@ class SettingsController(QObject):
             except:
                 pass
             self.show_error("Failed to Set Active Provider", str(e))
+
+    def update_reasoning_effort(self, reasoning_effort: str):
+        """Handle reasoning effort change for active provider"""
+        log.log_debug(f"update_reasoning_effort called with: '{reasoning_effort}'")
+        try:
+            # Get active provider
+            provider = self.service.get_active_llm_provider()
+            if not provider:
+                log.log_warn("No active provider to update reasoning effort")
+                return
+
+            provider_id = provider.get('id')
+            if provider_id:
+                # Update the reasoning effort for the active provider
+                self.service.update_llm_provider(provider_id, reasoning_effort=reasoning_effort)
+                log.log_info(f"Updated reasoning effort to '{reasoning_effort}' for provider: {provider.get('name')}")
+            else:
+                log.log_error("Active provider has no ID")
+
+        except Exception as e:
+            log.log_error(f"Error updating reasoning effort: {e}")
+            self.show_error("Failed to Update Reasoning Effort", str(e))
     
     # MCP Provider methods
     

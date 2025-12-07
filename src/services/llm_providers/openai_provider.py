@@ -24,6 +24,7 @@ from ..models.llm_models import (
     ChatMessage, MessageRole, ToolCall, ToolResult, Usage, ProviderCapabilities
 )
 from ..models.provider_types import ProviderType
+from ..models.reasoning_models import ReasoningConfig
 
 # Binary Ninja logging
 try:
@@ -170,7 +171,7 @@ class OpenAIProvider(BaseLLMProvider):
                 "messages": openai_messages,
                 "stream": False
             }
-            
+
             # Handle different token field names based on model type
             if self._is_reasoning_model():
                 completion_kwargs["max_completion_tokens"] = min(request.max_tokens or self.max_tokens, self.max_tokens)
@@ -180,7 +181,16 @@ class OpenAIProvider(BaseLLMProvider):
                 # Add temperature if specified (only for non-reasoning models)
                 if request.temperature is not None:
                     completion_kwargs["temperature"] = request.temperature
-            
+
+            # Add reasoning effort if configured
+            reasoning_effort_str = self.config.get('reasoning_effort', 'none')
+            if reasoning_effort_str and reasoning_effort_str != 'none':
+                reasoning_config = ReasoningConfig.from_string(reasoning_effort_str)
+                effort = reasoning_config.get_openai_reasoning_effort()
+                if effort:
+                    completion_kwargs["reasoning_effort"] = effort
+                    log.log_debug(f"OpenAI reasoning_effort set to: {effort}")
+
             # Add tools if present
             if request.tools:
                 completion_kwargs["tools"] = request.tools
@@ -307,7 +317,7 @@ class OpenAIProvider(BaseLLMProvider):
                 "messages": openai_messages,
                 "stream": True
             }
-            
+
             # Handle different token field names based on model type
             if self._is_reasoning_model():
                 completion_kwargs["max_completion_tokens"] = min(request.max_tokens or self.max_tokens, self.max_tokens)
@@ -317,7 +327,16 @@ class OpenAIProvider(BaseLLMProvider):
                 # Add temperature if specified (only for non-reasoning models)
                 if request.temperature is not None:
                     completion_kwargs["temperature"] = request.temperature
-            
+
+            # Add reasoning effort if configured (streaming)
+            reasoning_effort_str = self.config.get('reasoning_effort', 'none')
+            if reasoning_effort_str and reasoning_effort_str != 'none':
+                reasoning_config = ReasoningConfig.from_string(reasoning_effort_str)
+                effort = reasoning_config.get_openai_reasoning_effort()
+                if effort:
+                    completion_kwargs["reasoning_effort"] = effort
+                    log.log_debug(f"OpenAI streaming reasoning_effort set to: {effort}")
+
             # Add tools if present
             if request.tools:
                 completion_kwargs["tools"] = request.tools

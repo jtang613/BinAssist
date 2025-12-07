@@ -144,7 +144,6 @@ class DebouncedRenderer:
         try:
             self.update_callback(content)
             self._render_count += 1
-            log.log_debug(f"DebouncedRenderer: periodic render #{self._render_count} ({len(content)} chars)")
         except Exception as e:
             log.log_warn(f"DebouncedRenderer update callback failed: {e}")
 

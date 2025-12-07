@@ -33,7 +33,7 @@
             "mcp"
         ]
     },
-    "version": "0.2.5",
+    "version": "1.0.0",
     "author": "Jason Tang",
-    "minimumbinaryninjaversion": 4000
+    "minimumbinaryninjaversion": 5000
 }

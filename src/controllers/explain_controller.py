@@ -667,19 +667,9 @@ Analyze the specific instruction/line of code below. Provide a detailed explanat
         Args:
             accumulated_content: The accumulated response content from all deltas
         """
-        # Check if user is near the bottom before updating
-        should_auto_scroll = self.view._should_auto_scroll_to_bottom()
-
-        # Convert markdown to HTML (happens only every 1 second, not on every delta)
-        # This is the GhidrAssist approach: periodic rendering on main thread
-        html_content = self.view.markdown_to_html(accumulated_content)
-
-        # Update with rendered HTML
-        self.view.explain_browser.setHtml(html_content)
-
-        # Auto-scroll if user was following
-        if should_auto_scroll:
-            self.view._scroll_to_bottom()
+        # Use set_explanation_content to properly update both markdown_content and HTML
+        # This ensures get_explanation_content() returns the correct value when saving to DB
+        self.view.set_explanation_content(accumulated_content)
 
     def _on_llm_response_chunk(self, chunk: str):
         """Handle streaming response chunk from LLM"""
@@ -724,11 +714,11 @@ Analyze the specific instruction/line of code below. Provide a detailed explanat
                         "model": self._get_current_model_name(),
                         "offset": current_offset
                     }
-                    
-                    # Save complete view content instead of just LLM response buffer
-                    complete_content = self.view.get_explanation_content()
+
+                    # Save the actual LLM response buffer (not the view content which may be stale)
+                    complete_content = self._llm_response_buffer
                     self.analysis_db.save_function_analysis(
-                        binary_hash, function_start, query_type, 
+                        binary_hash, function_start, query_type,
                         complete_content, metadata
                     )
                     log.log_info(f"Saved {query_type} analysis to database")

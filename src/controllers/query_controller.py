@@ -2609,8 +2609,12 @@ Tool Usage Guidelines:
             self._current_query_binary_hash = self._get_current_binary_hash()
             self.view.set_query_running(True)
 
-            # Add user query to chat
+            # Add user query to chat (both legacy and native formats)
             self._add_message_to_chat(self.current_chat_id, "user", query_text)
+
+            # Save user query in native format for the active provider
+            provider_type = active_provider.get('provider_type', 'anthropic')
+            self._save_user_message_native(query_text, provider_type)
 
             # Add placeholder for assistant response (will be filled by content chunks)
             self._add_message_to_chat(self.current_chat_id, "assistant",
@@ -2735,7 +2739,6 @@ Current Offset: {context.get('offset_hex', 'N/A')}"""
             chat = self.chats[self.current_chat_id]
             if chat["messages"] and chat["messages"][-1]["role"] == "assistant":
                 chat["messages"][-1]["content"] = self._llm_response_buffer
-                log.log_debug(f"Updated assistant message with {len(self._llm_response_buffer)} chars")
             else:
                 log.log_warn("No assistant message found to update in chat")
         else:

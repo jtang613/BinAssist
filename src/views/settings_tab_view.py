@@ -14,7 +14,8 @@ class SettingsTabView(QWidget):
     llm_provider_delete_requested = Signal(int)  # row index
     llm_provider_test_requested = Signal(int)  # row index
     llm_active_provider_changed = Signal(str)  # provider name
-    
+    reasoning_effort_changed = Signal(str)  # reasoning effort level
+
     mcp_provider_add_requested = Signal()
     mcp_provider_edit_requested = Signal(int)  # row index
     mcp_provider_delete_requested = Signal(int)  # row index
@@ -105,11 +106,29 @@ class SettingsTabView(QWidget):
         # Active Provider section
         active_layout = QHBoxLayout()
         active_layout.addWidget(QLabel("Active Provider:"))
-        
+
         self.active_provider_combo = QComboBox()
         self.active_provider_combo.currentTextChanged.connect(self.llm_active_provider_changed.emit)
         active_layout.addWidget(self.active_provider_combo)
-        
+
+        # Reasoning Effort dropdown
+        active_layout.addWidget(QLabel("Reasoning Effort:"))
+        self.reasoning_effort_combo = QComboBox()
+        self.reasoning_effort_combo.addItem("None", "none")
+        self.reasoning_effort_combo.addItem("Low", "low")
+        self.reasoning_effort_combo.addItem("Medium", "medium")
+        self.reasoning_effort_combo.addItem("High", "high")
+        self.reasoning_effort_combo.setToolTip(
+            "Extended thinking for complex queries\n"
+            "None: Standard response (default)\n"
+            "Low: ~2K thinking tokens\n"
+            "Medium: ~10K thinking tokens\n"
+            "High: ~25K thinking tokens\n\n"
+            "⚠️ Higher levels increase cost and latency"
+        )
+        self.reasoning_effort_combo.currentTextChanged.connect(self._on_reasoning_effort_changed)
+        active_layout.addWidget(self.reasoning_effort_combo)
+
         active_layout.addStretch()
         layout.addLayout(active_layout)
         
@@ -300,7 +319,7 @@ class SettingsTabView(QWidget):
         else:
             # For database files, use file dialog
             path, _ = QFileDialog.getOpenFileName(self, f"Select {path_type.replace('_', ' ').title()}", "", "Database files (*.db);;All files (*)")
-        
+
         if path:
             if path_type == "analysis_db":
                 self.analysis_db_path.setText(path)
@@ -308,6 +327,22 @@ class SettingsTabView(QWidget):
                 self.rlhf_db_path.setText(path)
             elif path_type == "rag_index":
                 self.rag_index_path.setText(path)
-            
+
             self.database_path_changed.emit(path_type, path)
+
+    def _on_reasoning_effort_changed(self, text):
+        """Handle reasoning effort combo change"""
+        # Get the data value (not the display text)
+        current_data = self.reasoning_effort_combo.currentData()
+        if current_data:
+            self.reasoning_effort_changed.emit(current_data)
+
+    def set_reasoning_effort(self, reasoning_effort: str):
+        """Set the reasoning effort combo to the specified value"""
+        index = self.reasoning_effort_combo.findData(reasoning_effort)
+        if index >= 0:
+            # Temporarily disconnect to avoid triggering signal
+            self.reasoning_effort_combo.currentTextChanged.disconnect(self._on_reasoning_effort_changed)
+            self.reasoning_effort_combo.setCurrentIndex(index)
+            self.reasoning_effort_combo.currentTextChanged.connect(self._on_reasoning_effort_changed)
     
