@@ -1,0 +1,417 @@
+#!/usr/bin/env python3
+
+"""
+ReAct Orchestrator
+
+Main orchestration logic for the ReAct autonomous agent.
+Coordinates planning, investigation iterations, reflection, and synthesis.
+"""
+
+import asyncio
+import time
+from typing import List, Dict, Any, Optional, Callable
+
+from .todo_list_manager import TodoListManager
+from .findings_cache import FindingsCache
+from .react_prompts import ReActPrompts
+from ..models.react_models import ReActResult, ReActStatus, ReActConfig
+from ..models.llm_models import ToolCall, ToolResult, ChatMessage, ChatRequest, MessageRole
+
+try:
+    import binaryninja
+    log = binaryninja.log.Logger(0, "BinAssist")
+except ImportError:
+    class MockLog:
+        @staticmethod
+        def log_info(msg): print(f"[BinAssist] INFO: {msg}")
+        @staticmethod
+        def log_error(msg): print(f"[BinAssist] ERROR: {msg}")
+        @staticmethod
+        def log_warn(msg): print(f"[BinAssist] WARN: {msg}")
+        @staticmethod
+        def log_debug(msg): print(f"[BinAssist] DEBUG: {msg}")
+    log = MockLog()
+
+
+class ReActOrchestrator:
+    """
+    Orchestrates ReAct autonomous agent execution.
+
+    Uses MCP tool calling infrastructure for tool execution,
+    coordinates the plan-investigate-reflect-synthesize loop.
+    """
+
+    def __init__(self,
+                 llm_provider,
+                 mcp_orchestrator,
+                 mcp_tools: List[Dict[str, Any]],
+                 config: ReActConfig = None):
+        """
+        Initialize the ReAct orchestrator.
+
+        Args:
+            llm_provider: LLM provider instance for chat completions
+            mcp_orchestrator: MCPToolOrchestrator for tool execution
+            mcp_tools: List of MCP tools in OpenAI format
+            config: ReActConfig for behavior customization
+        """
+        self.llm_provider = llm_provider
+        self.mcp_orchestrator = mcp_orchestrator
+        self.mcp_tools = mcp_tools
+        self.config = config or ReActConfig()
+
+        # State management
+        self.todo_manager = TodoListManager()
+        self.findings = FindingsCache()
+        self.cancelled = False
+        self.iteration_count = 0
+        self.tool_call_count = 0
+        self.start_time = 0.0
+
+        # Callbacks for progress updates
+        self.on_progress: Optional[Callable[[str, int], None]] = None
+        self.on_todos_updated: Optional[Callable[[str], None]] = None
+        self.on_finding: Optional[Callable[[str], None]] = None
+        self.on_iteration_start: Optional[Callable[[int, str], None]] = None
+        self.on_iteration_complete: Optional[Callable[[int, str], None]] = None
+        self.on_content: Optional[Callable[[str], None]] = None
+
+        log.log_info("ReActOrchestrator initialized")
+
+    def cancel(self):
+        """Cancel the orchestrator execution"""
+        self.cancelled = True
+        log.log_info("ReActOrchestrator cancellation requested")
+
+    async def analyze(self, objective: str, initial_context: str = "") -> ReActResult:
+        """
+        Run ReAct analysis for the given objective.
+
+        Args:
+            objective: User's question/goal
+            initial_context: Optional initial binary context
+
+        Returns:
+            ReActResult with findings and final answer
+        """
+        self.start_time = time.time()
+        self.iteration_count = 0
+        self.tool_call_count = 0
+        self.cancelled = False
+        self.findings.clear()
+        self.todo_manager.clear()
+
+        log.log_info(f"ReActOrchestrator: Starting analysis for: {objective[:50]}...")
+
+        try:
+            # Phase 1: Planning
+            if self.on_progress:
+                self.on_progress("Planning investigation...", 0)
+
+            await self._run_planning(objective, initial_context)
+
+            if self.cancelled:
+                return ReActResult.cancelled()
+
+            # Phase 2: Investigation Loop
+            while not self.cancelled:
+                self.iteration_count += 1
+
+                # Check termination conditions
+                if self.iteration_count > self.config.max_iterations:
+                    log.log_info(f"ReAct: Max iterations ({self.config.max_iterations}) reached")
+                    break
+
+                if self.todo_manager.all_complete():
+                    log.log_info("ReAct: All todos complete")
+                    break
+
+                # Mark next todo as in progress
+                current_todo = self.todo_manager.mark_current_in_progress()
+                if not current_todo:
+                    log.log_info("ReAct: No more pending todos")
+                    break
+
+                if self.on_todos_updated:
+                    self.on_todos_updated(self.todo_manager.format_for_prompt())
+
+                if self.on_iteration_start:
+                    self.on_iteration_start(self.iteration_count, current_todo.task)
+
+                # Run investigation iteration
+                iteration_result = await self._run_investigation_iteration(
+                    objective, self.iteration_count
+                )
+
+                if self.cancelled:
+                    return ReActResult.cancelled()
+
+                # Mark current todo complete
+                self.todo_manager.mark_current_complete(iteration_result)
+
+                if self.on_iteration_complete:
+                    self.on_iteration_complete(self.iteration_count, iteration_result[:200] if iteration_result else "")
+
+                # Run self-reflection (unless disabled or max iterations approaching)
+                if self.config.reflection_enabled and self.iteration_count < self.config.max_iterations:
+                    should_synthesize = await self._run_reflection(objective)
+
+                    if should_synthesize:
+                        log.log_info("ReAct: Self-reflection indicates ready to synthesize")
+                        break
+
+            # Phase 3: Synthesis
+            if self.on_progress:
+                self.on_progress("Synthesizing final answer...", self.iteration_count)
+
+            final_answer = await self._run_synthesis(objective)
+
+            # Build result
+            duration = time.time() - self.start_time
+            status = ReActStatus.SUCCESS
+            if self.iteration_count > self.config.max_iterations:
+                status = ReActStatus.MAX_ITERATIONS
+
+            log.log_info(f"ReAct: Analysis complete. Status={status.value}, "
+                        f"iterations={self.iteration_count}, tool_calls={self.tool_call_count}")
+
+            return ReActResult(
+                status=status,
+                answer=final_answer,
+                findings=self.findings.findings.copy(),
+                iteration_count=self.iteration_count,
+                tool_call_count=self.tool_call_count,
+                duration_seconds=duration,
+                iteration_summaries=self.findings.iteration_summaries.copy()
+            )
+
+        except asyncio.CancelledError:
+            log.log_info("ReAct: Analysis cancelled via asyncio")
+            return ReActResult.cancelled()
+        except Exception as e:
+            log.log_error(f"ReAct orchestrator error: {e}")
+            import traceback
+            log.log_error(traceback.format_exc())
+            return ReActResult.error(str(e))
+
+    async def _run_planning(self, objective: str, initial_context: str):
+        """Run planning phase to generate todo list"""
+        log.log_info("ReAct: Starting planning phase")
+
+        prompt = ReActPrompts.get_planning_prompt(objective, initial_context)
+
+        # Emit header before streaming
+        if self.on_content:
+            self.on_content("**Investigation Plan:**\n\n")
+
+        # Call LLM for planning (content streams during this call)
+        plan_response = await self._call_llm_no_tools(prompt)
+
+        # Emit footer after streaming
+        if self.on_content:
+            self.on_content("\n\n---\n\n")
+
+        # Parse response into todos
+        self.todo_manager.initialize_from_llm_response(plan_response)
+
+        log.log_info(f"ReAct: Created {len(self.todo_manager.todos)} investigation steps")
+
+        if self.on_todos_updated:
+            self.on_todos_updated(self.todo_manager.format_for_prompt())
+
+    async def _run_investigation_iteration(self, objective: str, iteration: int) -> str:
+        """Run a single investigation iteration with tool calling"""
+        log.log_info(f"ReAct: Starting iteration {iteration}")
+
+        remaining = self.config.max_iterations - iteration
+        prompt = ReActPrompts.get_investigation_prompt(
+            objective,
+            self.todo_manager.format_for_prompt(),
+            self.findings.format_for_prompt(),
+            iteration,
+            remaining
+        )
+
+        if self.on_progress:
+            self.on_progress(f"Investigating... (iteration {iteration})", iteration)
+
+        # Emit iteration header before streaming
+        if self.on_content:
+            self.on_content(f"\n\n**Iteration {iteration}:**\n\n")
+
+        # Call LLM with tools (content streams during this call)
+        response_text, tool_calls = await self._call_llm_with_tools(prompt)
+
+        # Execute any tool calls
+        if tool_calls:
+            # Add spacing before tool execution
+            if self.on_content:
+                self.on_content("\n\n")
+
+            tool_results = await self._execute_tools(tool_calls, iteration)
+
+            # Store findings from tool results
+            for tc, result in zip(tool_calls, tool_results):
+                # Track tool used
+                self.todo_manager.add_tool_used(tc.name)
+
+                if not result.error:
+                    self.findings.extract_from_tool_output(tc.name, result.content, iteration)
+                    if self.on_finding:
+                        preview = result.content[:100] + "..." if len(result.content) > 100 else result.content
+                        self.on_finding(f"Found via {tc.name}: {preview}")
+
+        # Store iteration summary
+        self.findings.add_iteration_summary(response_text)
+
+        return response_text
+
+    async def _run_reflection(self, objective: str) -> bool:
+        """Run self-reflection to decide if ready to synthesize"""
+        log.log_info("ReAct: Running self-reflection")
+
+        # Skip reflection if we don't have enough findings
+        if self.findings.get_findings_count() < self.config.min_findings_for_ready:
+            log.log_debug(f"ReAct: Not enough findings for reflection ({self.findings.get_findings_count()} < {self.config.min_findings_for_ready})")
+            return False
+
+        prompt = ReActPrompts.get_reflection_prompt(
+            objective,
+            self.todo_manager.format_for_prompt(),
+            self.findings.format_for_prompt()
+        )
+
+        # Don't emit reflection content (READY/CONTINUE) - it's internal state management
+        response = await self._call_llm_no_tools(prompt, emit_content=False)
+
+        # Parse response for READY or CONTINUE
+        response_upper = response.upper()
+        if "READY:" in response_upper:
+            log.log_info(f"ReAct: Self-reflection says READY")
+            return True
+        else:
+            log.log_info(f"ReAct: Self-reflection says CONTINUE")
+            return False
+
+    async def _run_synthesis(self, objective: str) -> str:
+        """Run final synthesis to generate comprehensive answer"""
+        log.log_info("ReAct: Running synthesis")
+
+        prompt = ReActPrompts.get_synthesis_prompt(
+            objective,
+            self.todo_manager.format_for_prompt(),
+            self.findings.format_detailed()
+        )
+
+        # Emit header before synthesis
+        if self.on_content:
+            self.on_content("\n\n---\n\n**Final Answer:**\n\n")
+
+        # Stream the synthesis (content streams during this call)
+        final_answer = await self._call_llm_no_tools(prompt)
+
+        return final_answer
+
+    async def _call_llm_no_tools(self, prompt: str, emit_content: bool = True) -> str:
+        """
+        Call LLM without tools (for planning, reflection, synthesis).
+
+        Args:
+            prompt: The prompt to send to the LLM
+            emit_content: If True, emit content chunks via on_content callback (default: True)
+                         Set to False for internal operations like reflection
+        """
+        messages = [
+            ChatMessage(role=MessageRole.SYSTEM, content=ReActPrompts.get_system_prompt()),
+            ChatMessage(role=MessageRole.USER, content=prompt)
+        ]
+
+        request = ChatRequest(
+            messages=messages,
+            model=self.llm_provider.model if hasattr(self.llm_provider, 'model') else '',
+            max_tokens=4096,
+            temperature=0.7,
+            stream=True
+        )
+
+        try:
+            # Stream the response and accumulate chunks
+            accumulated = ""
+            async for chunk in self.llm_provider.chat_completion_stream(request):
+                if chunk.content:
+                    accumulated += chunk.content
+                    # Emit content chunks for UI updates (unless suppressed)
+                    if emit_content and self.on_content:
+                        self.on_content(chunk.content)
+
+            return accumulated
+        except Exception as e:
+            log.log_error(f"ReAct: LLM call failed: {e}")
+            raise
+
+    async def _call_llm_with_tools(self, prompt: str) -> tuple:
+        """
+        Call LLM with tools enabled.
+
+        Returns:
+            tuple: (text_response, tool_calls)
+        """
+        messages = [
+            ChatMessage(role=MessageRole.SYSTEM, content=ReActPrompts.get_system_prompt()),
+            ChatMessage(role=MessageRole.USER, content=prompt)
+        ]
+
+        request = ChatRequest(
+            messages=messages,
+            model=self.llm_provider.model if hasattr(self.llm_provider, 'model') else '',
+            max_tokens=4096,
+            temperature=0.7,
+            stream=True,
+            tools=self.mcp_tools if self.mcp_tools else None
+        )
+
+        try:
+            # Stream the response and accumulate chunks
+            accumulated = ""
+            final_tool_calls = []
+
+            async for chunk in self.llm_provider.chat_completion_stream(request):
+                if chunk.content:
+                    accumulated += chunk.content
+                    # Emit content chunks for UI updates
+                    if self.on_content:
+                        self.on_content(chunk.content)
+
+                # Tool calls come in the final chunk
+                if hasattr(chunk, 'tool_calls') and chunk.tool_calls:
+                    final_tool_calls = chunk.tool_calls
+
+            return accumulated, final_tool_calls
+        except Exception as e:
+            log.log_error(f"ReAct: LLM call with tools failed: {e}")
+            raise
+
+    async def _execute_tools(self, tool_calls: List[ToolCall], iteration: int) -> List[ToolResult]:
+        """Execute tool calls via MCP orchestrator"""
+        self.tool_call_count += len(tool_calls)
+
+        log.log_info(f"ReAct: Executing {len(tool_calls)} tool calls in iteration {iteration}")
+
+        if self.on_content:
+            tool_names = [tc.name for tc in tool_calls]
+            self.on_content(f"*Executing tools: {', '.join(tool_names)}*\n\n")
+
+        try:
+            results = await self.mcp_orchestrator.execute_tool_calls(tool_calls)
+            return results
+        except Exception as e:
+            log.log_error(f"ReAct: Tool execution failed: {e}")
+            # Return error results for all tool calls
+            return [
+                ToolResult(
+                    tool_call_id=tc.id,
+                    content="",
+                    error=str(e)
+                )
+                for tc in tool_calls
+            ]
