@@ -68,6 +68,9 @@ class ReActOrchestrator:
         self.tool_call_count = 0
         self.start_time = 0.0
 
+        # Conversation history (maintained across iterations for context continuity)
+        self.conversation_history: List[ChatMessage] = []
+
         # Callbacks for progress updates
         self.on_progress: Optional[Callable[[str, int], None]] = None
         self.on_todos_updated: Optional[Callable[[str], None]] = None
@@ -100,6 +103,12 @@ class ReActOrchestrator:
         self.cancelled = False
         self.findings.clear()
         self.todo_manager.clear()
+
+        # Initialize conversation history with system prompt
+        self.conversation_history.clear()
+        self.conversation_history.append(
+            ChatMessage(role=MessageRole.SYSTEM, content=ReActPrompts.get_system_prompt())
+        )
 
         log.log_info(f"ReActOrchestrator: Starting analysis for: {objective[:50]}...")
 
@@ -220,7 +229,12 @@ class ReActOrchestrator:
             self.on_todos_updated(self.todo_manager.format_for_prompt())
 
     async def _run_investigation_iteration(self, objective: str, iteration: int) -> str:
-        """Run a single investigation iteration with tool calling"""
+        """
+        Run a single investigation iteration with multi-turn tool calling.
+
+        Continues calling the LLM and executing tools until the LLM provides
+        a final response (finish_reason = "stop") instead of more tool calls.
+        """
         log.log_info(f"ReAct: Starting iteration {iteration}")
 
         remaining = self.config.max_iterations - iteration
@@ -239,16 +253,36 @@ class ReActOrchestrator:
         if self.on_content:
             self.on_content(f"\n\n**Iteration {iteration}:**\n\n")
 
-        # Call LLM with tools (content streams during this call)
-        response_text, tool_calls = await self._call_llm_with_tools(prompt)
+        # Multi-turn tool calling loop - continue until LLM says "stop"
+        max_tool_rounds = 10  # Prevent infinite loops
+        tool_round = 0
+        final_response = ""
 
-        # Execute any tool calls
-        if tool_calls:
+        # First call with the investigation prompt
+        response_text, tool_calls = await self._call_llm_with_tools(prompt)
+        final_response = response_text
+
+        # Tool calling loop
+        while tool_calls and tool_round < max_tool_rounds:
+            tool_round += 1
+            log.log_info(f"ReAct: Tool round {tool_round} with {len(tool_calls)} tool calls")
+
             # Add spacing before tool execution
             if self.on_content:
                 self.on_content("\n\n")
 
+            # Execute tools
             tool_results = await self._execute_tools(tool_calls, iteration)
+
+            # Add tool results to conversation history
+            for tc, result in zip(tool_calls, tool_results):
+                tool_message = ChatMessage(
+                    role=MessageRole.TOOL,
+                    content=result.content if not result.error else f"Error: {result.error}",
+                    tool_call_id=tc.id,
+                    name=tc.name
+                )
+                self.conversation_history.append(tool_message)
 
             # Store findings from tool results
             for tc, result in zip(tool_calls, tool_results):
@@ -261,14 +295,30 @@ class ReActOrchestrator:
                         preview = result.content[:100] + "..." if len(result.content) > 100 else result.content
                         self.on_finding(f"Found via {tc.name}: {preview}")
 
-        # Store iteration summary
-        self.findings.add_iteration_summary(response_text)
+            # Continue the conversation - LLM can now make more tool calls or provide final response
+            # No explicit prompt needed - LLM sees tool results in history and continues
+            response_text, tool_calls = await self._call_llm_with_tools("")
+            final_response = response_text
 
-        return response_text
+        if tool_round >= max_tool_rounds:
+            log.log_warn(f"ReAct: Reached max tool rounds ({max_tool_rounds}) in iteration {iteration}")
+
+        # Store iteration summary
+        self.findings.add_iteration_summary(final_response)
+
+        return final_response
 
     async def _run_reflection(self, objective: str) -> bool:
-        """Run self-reflection to decide if ready to synthesize"""
-        log.log_info("ReAct: Running self-reflection")
+        """
+        Run self-reflection with adaptive planning.
+
+        Reviews progress, updates todo list based on findings,
+        and decides whether to continue or synthesize.
+
+        Returns:
+            True if ready to synthesize, False to continue investigating
+        """
+        log.log_info("ReAct: Running self-reflection with adaptive planning")
 
         # Skip reflection if we don't have enough findings
         if self.findings.get_findings_count() < self.config.min_findings_for_ready:
@@ -281,17 +331,90 @@ class ReActOrchestrator:
             self.findings.format_for_prompt()
         )
 
-        # Don't emit reflection content (READY/CONTINUE) - it's internal state management
-        response = await self._call_llm_no_tools(prompt, emit_content=False)
+        # Emit reflection header
+        if self.on_content:
+            self.on_content("\n\n**🔍 Self-Reflection:**\n\n")
 
-        # Parse response for READY or CONTINUE
-        response_upper = response.upper()
-        if "READY:" in response_upper:
-            log.log_info(f"ReAct: Self-reflection says READY")
+        # Call LLM and emit reflection content
+        response = await self._call_llm_no_tools(prompt, emit_content=True)
+
+        # Parse reflection response
+        new_tasks, tasks_to_remove, is_ready = self._parse_reflection_response(response)
+
+        # Update todo list if changes suggested
+        if new_tasks or tasks_to_remove:
+            changes_made = self.todo_manager.update_from_reflection(new_tasks, tasks_to_remove)
+
+            if changes_made:
+                log.log_info(f"ReAct: Plan updated - added {len(new_tasks)} tasks, removed {len(tasks_to_remove)} tasks")
+
+                # Emit updated todo list
+                if self.on_todos_updated:
+                    self.on_todos_updated(self.todo_manager.format_for_prompt())
+
+                # Emit plan update summary
+                if self.on_content:
+                    summary_parts = []
+                    if new_tasks:
+                        summary_parts.append(f"✅ Added {len(new_tasks)} new task(s)")
+                    if tasks_to_remove:
+                        summary_parts.append(f"🗑️ Removed {len(tasks_to_remove)} task(s)")
+                    self.on_content(f"\n\n*Plan updated: {', '.join(summary_parts)}*\n\n")
+
+        # Emit separator after reflection
+        if self.on_content:
+            self.on_content("\n---\n")
+
+        if is_ready:
+            log.log_info("ReAct: Self-reflection says READY to synthesize")
             return True
         else:
-            log.log_info(f"ReAct: Self-reflection says CONTINUE")
+            log.log_info("ReAct: Self-reflection says CONTINUE investigating")
             return False
+
+    def _parse_reflection_response(self, response: str) -> tuple[list[str], list[str], bool]:
+        """
+        Parse reflection response to extract todo updates and decision.
+
+        Returns:
+            (new_tasks, tasks_to_remove, is_ready)
+        """
+        new_tasks = []
+        tasks_to_remove = []
+        is_ready = False
+
+        # Check decision
+        response_upper = response.upper()
+        if "DECISION:" in response_upper and "READY" in response_upper.split("DECISION:")[1].split("\n")[0]:
+            is_ready = True
+
+        # Extract ADD section
+        if "ADD:" in response:
+            add_section = response.split("ADD:")[1]
+            if "REMOVE:" in add_section:
+                add_section = add_section.split("REMOVE:")[0]
+            elif "DECISION:" in add_section:
+                add_section = add_section.split("DECISION:")[0]
+
+            # Parse bullet points in ADD section
+            import re
+            add_matches = re.findall(r'^\s*[-*]\s*(.+?)$', add_section, re.MULTILINE)
+            new_tasks = [task.strip() for task in add_matches if task.strip() and len(task.strip()) > 5]
+
+        # Extract REMOVE section
+        if "REMOVE:" in response:
+            remove_section = response.split("REMOVE:")[1]
+            if "DECISION:" in remove_section:
+                remove_section = remove_section.split("DECISION:")[0]
+
+            # Parse bullet points in REMOVE section
+            import re
+            remove_matches = re.findall(r'^\s*[-*]\s*(.+?)$', remove_section, re.MULTILINE)
+            tasks_to_remove = [task.strip() for task in remove_matches if task.strip() and len(task.strip()) > 5]
+
+        log.log_debug(f"ReAct: Parsed reflection - new_tasks={len(new_tasks)}, remove={len(tasks_to_remove)}, ready={is_ready}")
+
+        return new_tasks, tasks_to_remove, is_ready
 
     async def _run_synthesis(self, objective: str) -> str:
         """Run final synthesis to generate comprehensive answer"""
@@ -321,13 +444,13 @@ class ReActOrchestrator:
             emit_content: If True, emit content chunks via on_content callback (default: True)
                          Set to False for internal operations like reflection
         """
-        messages = [
-            ChatMessage(role=MessageRole.SYSTEM, content=ReActPrompts.get_system_prompt()),
-            ChatMessage(role=MessageRole.USER, content=prompt)
-        ]
+        # Add user prompt to conversation history
+        user_message = ChatMessage(role=MessageRole.USER, content=prompt)
+        self.conversation_history.append(user_message)
 
+        # Use full conversation history for context continuity
         request = ChatRequest(
-            messages=messages,
+            messages=self.conversation_history.copy(),
             model=self.llm_provider.model if hasattr(self.llm_provider, 'model') else '',
             max_tokens=4096,
             temperature=0.7,
@@ -337,6 +460,8 @@ class ReActOrchestrator:
         try:
             # Stream the response and accumulate chunks
             accumulated = ""
+            native_content = None
+
             async for chunk in self.llm_provider.chat_completion_stream(request):
                 if chunk.content:
                     accumulated += chunk.content
@@ -344,25 +469,41 @@ class ReActOrchestrator:
                     if emit_content and self.on_content:
                         self.on_content(chunk.content)
 
+                # Capture native_content from final chunk (e.g., Anthropic thinking blocks)
+                if hasattr(chunk, 'native_content') and chunk.native_content:
+                    native_content = chunk.native_content
+
+            # Add assistant response to conversation history for context continuity
+            assistant_message = ChatMessage(
+                role=MessageRole.ASSISTANT,
+                content=accumulated,
+                native_content=native_content
+            )
+            self.conversation_history.append(assistant_message)
+
             return accumulated
         except Exception as e:
             log.log_error(f"ReAct: LLM call failed: {e}")
             raise
 
-    async def _call_llm_with_tools(self, prompt: str) -> tuple:
+    async def _call_llm_with_tools(self, prompt: str = "") -> tuple:
         """
         Call LLM with tools enabled.
+
+        Args:
+            prompt: Optional user prompt. If empty, continues conversation with tool results.
 
         Returns:
             tuple: (text_response, tool_calls)
         """
-        messages = [
-            ChatMessage(role=MessageRole.SYSTEM, content=ReActPrompts.get_system_prompt()),
-            ChatMessage(role=MessageRole.USER, content=prompt)
-        ]
+        # Add user prompt to conversation history only if provided
+        if prompt:
+            user_message = ChatMessage(role=MessageRole.USER, content=prompt)
+            self.conversation_history.append(user_message)
 
+        # Use full conversation history for context continuity
         request = ChatRequest(
-            messages=messages,
+            messages=self.conversation_history.copy(),
             model=self.llm_provider.model if hasattr(self.llm_provider, 'model') else '',
             max_tokens=4096,
             temperature=0.7,
@@ -374,6 +515,7 @@ class ReActOrchestrator:
             # Stream the response and accumulate chunks
             accumulated = ""
             final_tool_calls = []
+            native_content = None
 
             async for chunk in self.llm_provider.chat_completion_stream(request):
                 if chunk.content:
@@ -385,6 +527,19 @@ class ReActOrchestrator:
                 # Tool calls come in the final chunk
                 if hasattr(chunk, 'tool_calls') and chunk.tool_calls:
                     final_tool_calls = chunk.tool_calls
+
+                # Capture native_content from final chunk (e.g., Anthropic thinking blocks)
+                if hasattr(chunk, 'native_content') and chunk.native_content:
+                    native_content = chunk.native_content
+
+            # Add assistant response to conversation history (with tool calls if any)
+            assistant_message = ChatMessage(
+                role=MessageRole.ASSISTANT,
+                content=accumulated,
+                tool_calls=final_tool_calls if final_tool_calls else None,
+                native_content=native_content
+            )
+            self.conversation_history.append(assistant_message)
 
             return accumulated, final_tool_calls
         except Exception as e:

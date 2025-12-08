@@ -159,13 +159,23 @@ class AnthropicProvider(BaseLLMProvider):
             # Make API call
             response = await asyncio.to_thread(self._client.messages.create, **payload)
             
-            # Extract content and tool calls
+            # Extract content, tool calls, and build native content blocks
             content = ""
             tool_calls = []
-            
+            native_content_blocks = []
+
             for content_block in response.content:
                 if content_block.type == "text":
                     content += content_block.text
+                    native_content_blocks.append({"type": "text", "text": content_block.text})
+                elif content_block.type == "thinking":
+                    # Capture thinking block for native_content (don't add to text content)
+                    # Signature is REQUIRED by Anthropic, always include it
+                    native_content_blocks.append({
+                        "type": "thinking",
+                        "thinking": content_block.thinking,
+                        "signature": getattr(content_block, 'signature', None)
+                    })
                 elif content_block.type == "tool_use":
                     tool_call = ToolCall(
                         id=content_block.id,
@@ -173,7 +183,13 @@ class AnthropicProvider(BaseLLMProvider):
                         arguments=content_block.input
                     )
                     tool_calls.append(tool_call)
-            
+                    native_content_blocks.append({
+                        "type": "tool_use",
+                        "id": content_block.id,
+                        "name": content_block.name,
+                        "input": content_block.input
+                    })
+
             # Call native message callback with actual API response
             if native_message_callback:
                 # Convert the actual Anthropic response to dict for storage
@@ -189,21 +205,22 @@ class AnthropicProvider(BaseLLMProvider):
                     }
                 }
                 native_message_callback(native_message, self.get_provider_type())
-            
+
             # Create usage info
             usage = Usage(
                 prompt_tokens=response.usage.input_tokens,
                 completion_tokens=response.usage.output_tokens,
                 total_tokens=response.usage.input_tokens + response.usage.output_tokens
             )
-            
+
             return ChatResponse(
                 content=content,
                 model=response.model,
                 usage=usage,
                 tool_calls=tool_calls if tool_calls else None,
                 finish_reason=self._map_stop_reason(response.stop_reason),
-                response_id=response.id
+                response_id=response.id,
+                native_content=native_content_blocks if native_content_blocks else None
             )
             
         except anthropic.AuthenticationError as e:
@@ -290,27 +307,32 @@ class AnthropicProvider(BaseLLMProvider):
 
             # Stream response using context manager
             accumulated_content = ""
+            accumulated_thinking = ""  # Track thinking content separately
             tool_calls = []
-            
+            thinking_blocks = []  # Track thinking blocks with index
+
             def _create_stream():
                 return self._client.messages.stream(**payload)
-            
+
             stream = await asyncio.to_thread(_create_stream)
-            
+
             try:
-                # Track tool calls being built during streaming
+                # Track tool calls and thinking blocks being built during streaming
                 building_tool_calls: Dict[str, Dict[str, Any]] = {}  # tool_id -> partial tool data
-                
+                building_thinking: Dict[int, Dict[str, Any]] = {}  # index -> {thinking: str, signature: str}
+
                 # Use context manager for proper stream handling
                 with stream as message_stream:
+                    # Process streaming events for UI updates
                     for event in message_stream:
-                        # Handle text delta events
+                        # Handle content block delta events
                         if event.type == "content_block_delta":
+                            # Handle text delta
                             if hasattr(event.delta, 'text'):
                                 text_delta = event.delta.text
                                 if text_delta:
                                     accumulated_content += text_delta
-                                    
+
                                     # Create streaming response
                                     yield ChatResponse(
                                         content=text_delta,  # Send just the delta, not accumulated
@@ -319,7 +341,18 @@ class AnthropicProvider(BaseLLMProvider):
                                         is_streaming=True,
                                         finish_reason="incomplete"
                                     )
-                            
+
+                            # Handle thinking delta
+                            elif hasattr(event.delta, 'thinking'):
+                                thinking_delta = event.delta.thinking
+                                if thinking_delta:
+                                    accumulated_thinking += thinking_delta
+                                    # Track by index
+                                    if hasattr(event, 'index'):
+                                        if event.index not in building_thinking:
+                                            building_thinking[event.index] = {"thinking": "", "signature": None}
+                                        building_thinking[event.index]["thinking"] += thinking_delta
+
                             # Handle tool input delta events
                             elif hasattr(event.delta, 'partial_json'):
                                 # Tool input is being built incrementally
@@ -339,9 +372,24 @@ class AnthropicProvider(BaseLLMProvider):
                                     building_tool_calls[tool_id]['input_json'] += event.delta.partial_json
                                     # Accumulating tool input parameters
                         
-                        # Handle tool use start events
+                        # Handle content block start events
                         elif event.type == "content_block_start" and hasattr(event.content_block, 'type'):
-                            if event.content_block.type == "tool_use":
+                            # Handle thinking block start
+                            if event.content_block.type == "thinking":
+                                # Initialize thinking block tracking
+                                if hasattr(event, 'index'):
+                                    signature = getattr(event.content_block, 'signature', None)
+                                    log.log_debug(f"Anthropic: Thinking block started at index {event.index}, signature={signature}")
+                                    building_thinking[event.index] = {
+                                        "thinking": "",
+                                        "signature": signature
+                                    }
+                                    # Store initial thinking content if present
+                                    if hasattr(event.content_block, 'thinking'):
+                                        building_thinking[event.index]["thinking"] = event.content_block.thinking
+
+                            # Handle tool use start
+                            elif event.content_block.type == "tool_use":
                                 # Start building this tool call
                                 initial_input = event.content_block.input or {}
                                 building_tool_calls[event.content_block.id] = {
@@ -352,8 +400,15 @@ class AnthropicProvider(BaseLLMProvider):
                                     'index': getattr(event, 'index', None)  # Store content block index for delta matching
                                 }
                         
-                        # Handle tool use completion events
+                        # Handle content block stop events
                         elif event.type == "content_block_stop":
+                            # Check if this was a thinking block - capture signature at the end
+                            if hasattr(event, 'index') and event.index in building_thinking:
+                                # The signature often comes in the content_block object at stop time
+                                if hasattr(event, 'content_block') and hasattr(event.content_block, 'signature'):
+                                    building_thinking[event.index]["signature"] = event.content_block.signature
+                                    log.log_debug(f"Anthropic: Captured signature at content_block_stop for index {event.index}")
+
                             # Check if this was a tool use block being completed
                             # The stop event might not have content_block.id, so we need to match by index
                             tool_id = None
@@ -363,7 +418,7 @@ class AnthropicProvider(BaseLLMProvider):
                                     if tool_data.get('index') == event.index:
                                         tool_id = tid
                                         break
-                            
+
                             if tool_id and tool_id in building_tool_calls:
                                     # Complete the tool call
                                     tool_data = building_tool_calls[tool_id]
@@ -383,11 +438,36 @@ class AnthropicProvider(BaseLLMProvider):
                                         arguments=final_input
                                     )
                                     tool_calls.append(tool_call)
-                                    
+
                                     # Remove from building dict
                                     del building_tool_calls[tool_id]
-                
-                # Handle any remaining uncompleted tool calls as fallback
+
+                    # After streaming completes (but still inside 'with' block), get final message with signatures
+                    try:
+                        final_message = message_stream.get_final_message()
+                        if final_message and hasattr(final_message, 'content'):
+                            # Extract thinking blocks with signatures from final message
+                            for block in final_message.content:
+                                if hasattr(block, 'type') and block.type == "thinking":
+                                    signature = getattr(block, 'signature', None)
+                                    thinking_text = getattr(block, 'thinking', '')
+                                    log.log_debug(f"Anthropic: Final message thinking block signature={signature[:20] if signature else None}...")
+                                    thinking_blocks.append({
+                                        "thinking": thinking_text,
+                                        "signature": signature
+                                    })
+                    except Exception as e:
+                        log.log_warn(f"Anthropic: Could not get final message: {e}")
+                        # Fall back to building_thinking if final message fails
+                        for index in sorted(building_thinking.keys()):
+                            thinking_data = building_thinking[index]
+                            if thinking_data and thinking_data.get("thinking"):
+                                thinking_blocks.append({
+                                    "thinking": thinking_data["thinking"],
+                                    "signature": thinking_data.get("signature")
+                                })
+
+                # Handle any remaining uncompleted tool calls as fallback (outside 'with' block)
                 for tool_id, tool_data in building_tool_calls.items():
                     final_input = tool_data['input']
                     if tool_data.get('input_json'):
@@ -396,21 +476,34 @@ class AnthropicProvider(BaseLLMProvider):
                             final_input = json.loads(tool_data['input_json'])
                         except json.JSONDecodeError:
                             log.log_warn(f"Failed to parse tool input JSON: {tool_data['input_json']}")
-                    
+
                     tool_call = ToolCall(
                         id=tool_data['id'],
                         name=tool_data['name'],
                         arguments=final_input
                     )
                     tool_calls.append(tool_call)
-                
+
                 # Call native message callback with complete streaming response
-                if native_message_callback and (accumulated_content or tool_calls):
+                if native_message_callback and (accumulated_content or tool_calls or thinking_blocks):
                     # Reconstruct the native Anthropic format from streaming data
+                    # Content blocks must be ordered by index: thinking first, then text, then tool_use
                     content_blocks = []
+
+                    # Add thinking blocks (these come first when extended thinking is enabled)
+                    for thinking_block in thinking_blocks:
+                        # Signature is REQUIRED by Anthropic, always include it
+                        content_blocks.append({
+                            "type": "thinking",
+                            "thinking": thinking_block["thinking"],
+                            "signature": thinking_block.get("signature")
+                        })
+
+                    # Add text content
                     if accumulated_content:
                         content_blocks.append({"type": "text", "text": accumulated_content})
-                    
+
+                    # Add tool calls
                     for tool_call in tool_calls:
                         content_blocks.append({
                             "type": "tool_use",
@@ -418,7 +511,7 @@ class AnthropicProvider(BaseLLMProvider):
                             "name": tool_call.name,
                             "input": tool_call.arguments
                         })
-                    
+
                     native_message = {
                         "role": "assistant",
                         "content": content_blocks,
@@ -429,14 +522,34 @@ class AnthropicProvider(BaseLLMProvider):
                     native_message_callback(native_message, self.get_provider_type())
                 
                 # Final response with complete content or tool calls
-                if accumulated_content or tool_calls:
+                if accumulated_content or tool_calls or thinking_blocks:
+                    # Build content blocks for native_content
+                    final_content_blocks = []
+                    for thinking_block in thinking_blocks:
+                        # Signature is REQUIRED by Anthropic, always include it
+                        final_content_blocks.append({
+                            "type": "thinking",
+                            "thinking": thinking_block["thinking"],
+                            "signature": thinking_block.get("signature")
+                        })
+                    if accumulated_content:
+                        final_content_blocks.append({"type": "text", "text": accumulated_content})
+                    for tool_call in tool_calls:
+                        final_content_blocks.append({
+                            "type": "tool_use",
+                            "id": tool_call.id,
+                            "name": tool_call.name,
+                            "input": tool_call.arguments
+                        })
+
                     yield ChatResponse(
                         content="",  # Empty for final signal
                         model=request.model or self.model,
                         usage=Usage(0, 0, 0),  # Usage not available in streaming
                         tool_calls=tool_calls if tool_calls else None,
                         is_streaming=False,
-                        finish_reason="tool_calls" if tool_calls else "stop"
+                        finish_reason="tool_calls" if tool_calls else "stop",
+                        native_content=final_content_blocks if final_content_blocks else None
                     )
                 
             except Exception as e:
@@ -587,33 +700,46 @@ class AnthropicProvider(BaseLLMProvider):
     def _prepare_messages(self, messages: List[ChatMessage]) -> List[Dict[str, Any]]:
         """Convert messages to Anthropic format"""
         anthropic_messages = []
-        
+
         for message in messages:
             # Skip system messages - handled separately
             if message.role == MessageRole.SYSTEM:
                 continue
-            
-            anthropic_msg = {
-                "role": "user" if message.role == MessageRole.USER else "assistant",
-                "content": message.content
-            }
-            
-            # Handle tool calls for assistant messages
-            if message.tool_calls:
-                content = []
-                if message.content:
-                    content.append({"type": "text", "text": message.content})
-                
-                for tool_call in message.tool_calls:
-                    content.append({
-                        "type": "tool_use",
-                        "id": tool_call.id,
-                        "name": tool_call.name,
-                        "input": tool_call.arguments
-                    })
-                
-                anthropic_msg["content"] = content
-            
+
+            # Use native_content if available (preserves thinking blocks, etc.)
+            if message.native_content is not None:
+                log.log_debug(f"Anthropic _prepare_messages: Using native_content for {message.role.value} message")
+                # Debug: Check if thinking blocks have signatures
+                if isinstance(message.native_content, list):
+                    for block in message.native_content:
+                        if isinstance(block, dict) and block.get('type') == 'thinking':
+                            log.log_debug(f"Anthropic: Thinking block has signature={block.get('signature')}")
+                anthropic_msg = {
+                    "role": "user" if message.role == MessageRole.USER else "assistant",
+                    "content": message.native_content
+                }
+            else:
+                anthropic_msg = {
+                    "role": "user" if message.role == MessageRole.USER else "assistant",
+                    "content": message.content
+                }
+
+                # Handle tool calls for assistant messages
+                if message.tool_calls:
+                    content = []
+                    if message.content:
+                        content.append({"type": "text", "text": message.content})
+
+                    for tool_call in message.tool_calls:
+                        content.append({
+                            "type": "tool_use",
+                            "id": tool_call.id,
+                            "name": tool_call.name,
+                            "input": tool_call.arguments
+                        })
+
+                    anthropic_msg["content"] = content
+
             # Handle tool responses
             if message.role == MessageRole.TOOL:
                 anthropic_msg = {
@@ -624,9 +750,9 @@ class AnthropicProvider(BaseLLMProvider):
                         "content": message.content
                     }]
                 }
-            
+
             anthropic_messages.append(anthropic_msg)
-        
+
         return anthropic_messages
     
     def _extract_system_message(self, messages: List[ChatMessage]) -> Optional[str]:

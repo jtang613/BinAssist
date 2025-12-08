@@ -151,6 +151,48 @@ class TodoListManager:
         self.todos.append(Todo(task=task))
         log.log_debug(f"TodoListManager: Added todo: {task[:50]}...")
 
+    def remove_todo_by_task(self, task_text: str):
+        """Remove a todo by matching task text (case-insensitive partial match)"""
+        original_count = len(self.todos)
+        task_lower = task_text.lower()
+        self.todos = [t for t in self.todos if task_lower not in t.task.lower()]
+        removed = original_count - len(self.todos)
+        if removed > 0:
+            log.log_debug(f"TodoListManager: Removed {removed} todo(s) matching: {task_text[:50]}...")
+
+    def update_from_reflection(self, new_tasks: List[str], tasks_to_remove: List[str]):
+        """
+        Update todo list based on reflection.
+
+        Args:
+            new_tasks: List of new task descriptions to add
+            tasks_to_remove: List of task descriptions to remove (partial match)
+        """
+        changes_made = False
+
+        # Remove tasks first
+        for task_text in tasks_to_remove:
+            original_count = len(self.todos)
+            # Only remove pending tasks to avoid removing in-progress or completed ones
+            self.todos = [t for t in self.todos
+                         if t.status != TodoStatus.PENDING or task_text.lower() not in t.task.lower()]
+            removed = original_count - len(self.todos)
+            if removed > 0:
+                log.log_info(f"TodoListManager: Removed {removed} pending todo(s) matching: {task_text[:50]}...")
+                changes_made = True
+
+        # Add new tasks
+        for task_text in new_tasks:
+            # Check if similar task already exists
+            task_lower = task_text.lower()
+            exists = any(task_lower in t.task.lower() for t in self.todos)
+            if not exists:
+                self.todos.append(Todo(task=task_text))
+                log.log_info(f"TodoListManager: Added new todo from reflection: {task_text[:50]}...")
+                changes_made = True
+
+        return changes_made
+
     def reset(self):
         """Reset all todos to pending"""
         for todo in self.todos:

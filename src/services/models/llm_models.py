@@ -55,7 +55,8 @@ class ChatMessage:
     tool_calls: Optional[List[ToolCall]] = None
     tool_call_id: Optional[str] = None  # For tool response messages
     name: Optional[str] = None  # For function messages
-    
+    native_content: Optional[Any] = None  # Provider-specific structured content (e.g., Anthropic content blocks)
+
     def __post_init__(self):
         """Convert string roles to MessageRole enum"""
         if isinstance(self.role, str):
@@ -98,12 +99,13 @@ class ChatResponse:
     is_streaming: bool = False
     response_id: Optional[str] = None
     created: Optional[int] = None
-    
+    native_content: Optional[Any] = None  # Provider-specific structured content (e.g., Anthropic content blocks)
+
     @property
     def has_tool_calls(self) -> bool:
         """Check if response contains tool calls"""
         return self.tool_calls is not None and len(self.tool_calls) > 0
-    
+
     @property
     def stopped_for_tool_calls(self) -> bool:
         """Check if response stopped because of tool calls"""

@@ -94,30 +94,31 @@ class FindingsCache:
                     relevance = 6
                     break
 
-        # Truncate long outputs for the fact summary
-        if len(output) > 200:
-            fact = f"Tool {tool_name} returned: {output[:200]}..."
+        # Store more of the output for better context (increased from 200 to 1000)
+        if len(output) > 1000:
+            fact = f"Tool {tool_name} returned: {output[:1000]}..."
         else:
             fact = f"Tool {tool_name} returned: {output}"
 
         self.add_finding(
             fact=fact,
-            evidence=output,
+            evidence=output,  # Full output stored in evidence
             tool_used=tool_name,
             relevance=relevance,
             iteration=iteration
         )
 
-    def format_for_prompt(self, max_findings: int = 10) -> str:
+    def format_for_prompt(self, max_findings: int = 50) -> str:
         """
         Format findings for prompt injection.
 
         Returns top findings sorted by relevance.
+        Now includes more findings with less truncation for better context.
         """
         if not self.findings:
             return "*No findings yet*"
 
-        # Sort by relevance and take top findings
+        # Sort by relevance and take top findings (increased from 10 to 50)
         sorted_findings = sorted(
             self.findings,
             key=lambda f: f.relevance,
@@ -125,10 +126,10 @@ class FindingsCache:
         )[:max_findings]
 
         lines = ["**Key Findings:**"]
-        for finding in sorted_findings:
-            # Truncate long facts
-            fact = finding.fact[:150] + "..." if len(finding.fact) > 150 else finding.fact
-            lines.append(f"* {fact}")
+        for i, finding in enumerate(sorted_findings, 1):
+            # Increased truncation limit from 150 to 500 characters for better context
+            fact = finding.fact[:500] + "..." if len(finding.fact) > 500 else finding.fact
+            lines.append(f"{i}. {fact}")
 
         return "\n".join(lines)
 
@@ -136,15 +137,16 @@ class FindingsCache:
         """
         Format for final synthesis with iteration summaries.
 
-        Includes all findings and iteration history.
+        Includes all findings and iteration history with minimal truncation.
         """
-        output = self.format_for_prompt(max_findings=15)
+        # Include many more findings for synthesis (increased from 15 to 100)
+        output = self.format_for_prompt(max_findings=100)
 
         if self.iteration_summaries:
             output += "\n\n**Investigation History:**\n"
             for i, summary in enumerate(self.iteration_summaries, 1):
-                # Truncate long summaries
-                summary_short = summary[:500] + "..." if len(summary) > 500 else summary
+                # Increased summary limit from 500 to 2000 for better synthesis context
+                summary_short = summary[:2000] + "..." if len(summary) > 2000 else summary
                 output += f"\n*Iteration {i}:* {summary_short}\n"
 
         return output

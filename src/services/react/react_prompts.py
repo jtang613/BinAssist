@@ -85,31 +85,47 @@ If you believe the current task is complete based on previous findings, you may 
     @staticmethod
     def get_reflection_prompt(objective: str, todos_formatted: str,
                               findings_formatted: str) -> str:
-        """Generate self-reflection prompt to decide continue or synthesize"""
-        return f"""## Self-Reflection
+        """Generate self-reflection prompt with adaptive planning"""
+        return f"""## Self-Reflection & Plan Adaptation
 
 **Original Question**: {objective}
 
-**Investigation Progress**:
+**Current Investigation Plan**:
 {todos_formatted}
 
-**Findings So Far**:
+**Findings Accumulated**:
 {findings_formatted}
 
-**Reflection Task**: Based on what you've discovered so far:
+**Reflection Tasks**:
+1. **Progress Assessment**: Review what you've learned and how it relates to the objective
+2. **Plan Adaptation**: Based on new findings, should the investigation plan change?
+3. **Readiness Check**: Can you now answer the user's question comprehensively?
 
-1. Do you have sufficient information to answer the user's question comprehensively?
-2. Are there critical gaps that require more investigation?
+**Required Response Format**:
 
-Respond with ONLY one of these formats:
-- "READY: [brief reason why you can answer now]"
-- "CONTINUE: [what critical information is still needed]"
+```
+ASSESSMENT: [Brief review of what you've learned and how it helps answer the objective]
 
-Guidelines:
-- Say READY if you have enough evidence to give a useful, well-supported answer
-- Say CONTINUE only if there's critical missing information that would significantly improve the answer
-- Don't continue just because there are unchecked todos - focus on whether you can answer the question
-- Be honest about what you know vs. what would be nice to know"""
+PLAN_UPDATES:
+ADD:
+- [New task to add, if any]
+- [Another new task, if needed]
+
+REMOVE:
+- [Task to remove because it's no longer relevant]
+- [Another task to remove, if any]
+
+DECISION: [READY or CONTINUE]
+REASON: [Why you're ready to answer OR what critical gaps remain]
+```
+
+**Guidelines**:
+- **ADD** new tasks if findings reveal unexpected complexity or new investigation paths
+- **REMOVE** pending tasks that are no longer relevant based on what you've learned
+- If no changes needed, leave ADD/REMOVE sections empty
+- Say **READY** if you have sufficient evidence for a well-supported answer
+- Say **CONTINUE** only if critical information is missing that would significantly improve the answer
+- Focus on answering the question, not completing all todos"""
 
     @staticmethod
     def get_synthesis_prompt(objective: str, todos_formatted: str,
