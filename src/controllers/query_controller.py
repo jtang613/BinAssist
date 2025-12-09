@@ -3,7 +3,7 @@
 from typing import Optional, Dict, Any, List, Callable
 import asyncio
 import binaryninja as bn
-from PySide6.QtCore import QDateTime, QThread, Signal, Qt
+from PySide6.QtCore import QDateTime, QThread, QTimer, Signal, Qt
 from ..services.binary_context_service import BinaryContextService, ViewLevel
 from ..services.llm_providers.provider_factory import LLMProviderFactory
 from ..services.settings_service import SettingsService
@@ -533,9 +533,23 @@ class QueryController:
     def set_binary_view(self, binary_view: bn.BinaryView):
         """Update the binary view for context service"""
         self.context_service.set_binary_view(binary_view)
-        
-        # Load existing chats for the new binary
-        self.load_existing_chats()
+
+        # Only calculate hash if not already cached
+        # This ensures we calculate ONCE per binary file, not on every navigation
+        if self.context_service.get_binary_hash() is None:
+            # Calculate binary hash ONCE and cache it
+            # This uses the NEW content-based hash (filename-independent)
+            binary_hash = self.analysis_db.get_binary_hash(binary_view)
+
+            # Perform automatic migration if needed (legacy hash -> new hash)
+            # This gracefully transitions existing chats/analysis to the new hashing scheme
+            self.analysis_db.migrate_legacy_hash_if_needed(binary_view, binary_hash)
+
+            # Cache the hash in context service for subsequent use
+            self.context_service.set_binary_hash(binary_hash)
+
+            # Load existing chats for the new binary
+            self.load_existing_chats()
     
     def set_view_frame(self, view_frame):
         """Update the view frame for context service"""
@@ -1430,8 +1444,13 @@ class QueryController:
         chat = self.chats[self.current_chat_id]
         markdown_content = self._format_chat_as_markdown(chat)
 
-        # Check if user is near the bottom before updating
-        should_auto_scroll = self.view._should_auto_scroll_to_bottom()
+        # Save scroll position BEFORE update
+        scrollbar = self.view.query_browser.verticalScrollBar()
+        old_value = scrollbar.value()
+        old_max = scrollbar.maximum()
+
+        # Check if user is at bottom (within 50px)
+        at_bottom = (old_max - old_value) <= 50 if old_max > 0 else True
 
         # Convert markdown to HTML (happens only every 1 second, not on every delta)
         # This is the GhidrAssist approach: periodic rendering on main thread
@@ -1440,9 +1459,25 @@ class QueryController:
         # Update with rendered HTML
         self.view.query_browser.setHtml(html_content)
 
-        # Auto-scroll if user was following
-        if should_auto_scroll:
-            self.view._scroll_to_bottom()
+        # Restore scroll position AFTER Qt finishes layout
+        # Use QTimer.singleShot(0) to defer until next event loop iteration
+        if at_bottom:
+            # User was at bottom - auto-follow new content
+            QTimer.singleShot(0, self.view._scroll_to_bottom)
+        else:
+            # User was reading elsewhere - preserve position
+            # Calculate relative position to maintain same content in view
+            if old_max > 0:
+                scroll_ratio = old_value / old_max
+            else:
+                scroll_ratio = 0
+
+            def restore_scroll():
+                new_max = scrollbar.maximum()
+                new_value = int(scroll_ratio * new_max)
+                scrollbar.setValue(new_value)
+
+            QTimer.singleShot(0, restore_scroll)
 
     def _update_chat_display(self):
         """Update the chat display with current chat content"""
@@ -2507,10 +2542,17 @@ Tool Usage Guidelines:
     # Database helper methods
     
     def _get_current_binary_hash(self) -> Optional[str]:
-        """Get current binary hash from context service"""
-        if self.context_service._binary_view:
-            return self.analysis_db.get_binary_hash(self.context_service._binary_view)
-        return None
+        """
+        Get current binary hash from cached value.
+
+        The hash is calculated ONCE in set_binary_view() and cached
+        in the context service. This avoids recalculating the hash
+        on every UI update.
+
+        Returns:
+            Cached binary hash, or None if not available
+        """
+        return self.context_service.get_binary_hash()
     
     # RLHF methods
     

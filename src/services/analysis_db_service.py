@@ -191,24 +191,23 @@ class AnalysisDBService:
     # Binary Hash Generation
     
     def get_binary_hash(self, binary_view: bn.BinaryView) -> str:
-        """Generate consistent hash for binary identification"""
+        """
+        Generate consistent hash for binary identification.
+
+        Uses ONLY binary content characteristics (entry point, length, first bytes).
+        Does NOT use filename, so hash remains consistent across file renames and BNDB saves.
+
+        This is the NEW content-based hash. For legacy filename-based hash, see get_legacy_binary_hash().
+        """
         if not binary_view:
             raise ValueError("Binary view is required")
-        
+
         try:
-            # Try to use any existing hash from Binary Ninja session data
-            if hasattr(binary_view, 'file') and binary_view.file:
-                session_data = getattr(binary_view.file, 'session_data', {})
-                if isinstance(session_data, dict) and 'hash' in session_data:
-                    return session_data['hash']
-            
-            # Generate hash from binary characteristics
-            filename = getattr(binary_view.file, 'filename', 'unknown') if binary_view.file else 'unknown'
+            # Get entry point
             entry_point = binary_view.entry_point or 0
-            
-            # Get file length using Binary Ninja's length property or end address
+
+            # Get file length
             try:
-                # Try to get the length of the binary view
                 if hasattr(binary_view, 'length'):
                     file_length = binary_view.length
                 elif hasattr(binary_view, 'end'):
@@ -221,28 +220,198 @@ class AnalysisDBService:
                             file_length = segment.end
             except:
                 file_length = 0
-            
-            # Create a unique identifier
+
+            # Create a unique identifier based ONLY on binary content (NOT filename)
+            # Use more bytes (512 instead of 64) for better uniqueness
+            hash_input = f"entry:{entry_point}:length:{file_length}"
+
+            # Add first bytes for uniqueness - use 512 bytes for robust identification
+            try:
+                bytes_to_read = min(512, file_length) if file_length > 0 else 512
+                first_bytes = binary_view.read(0, bytes_to_read)
+                if first_bytes:
+                    hash_input += f":bytes:{first_bytes.hex()}"
+            except:
+                pass
+
+            binary_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:16]
+
+            # Log without filename for privacy/security
+            log.log_debug(f"Generated content-based binary hash: {binary_hash}")
+            return binary_hash
+
+        except Exception as e:
+            log.log_error(f"Failed to generate binary hash: {e}")
+            raise RuntimeError(f"Cannot generate binary hash: {e}")
+
+    def get_legacy_binary_hash(self, binary_view: bn.BinaryView) -> str:
+        """
+        Generate LEGACY filename-based hash for backward compatibility.
+
+        This is the OLD hash calculation that includes filename.
+        Used for automatic migration of existing data to new content-based hash.
+
+        DO NOT use this for new data - use get_binary_hash() instead.
+        """
+        if not binary_view:
+            raise ValueError("Binary view is required")
+
+        try:
+            # OLD LOGIC: includes filename
+            filename = getattr(binary_view.file, 'filename', 'unknown') if binary_view.file else 'unknown'
+            entry_point = binary_view.entry_point or 0
+
+            # Get file length
+            try:
+                if hasattr(binary_view, 'length'):
+                    file_length = binary_view.length
+                elif hasattr(binary_view, 'end'):
+                    file_length = binary_view.end
+                else:
+                    file_length = 0
+                    for segment in binary_view.segments:
+                        if segment.end > file_length:
+                            file_length = segment.end
+            except:
+                file_length = 0
+
+            # OLD HASH FORMAT: includes filename
             hash_input = f"{filename}:{entry_point}:{file_length}"
-            
-            # Add first few bytes if available for additional uniqueness
+
             try:
                 first_bytes = binary_view.read(0, min(64, file_length) if file_length > 0 else 64)
                 if first_bytes:
                     hash_input += f":{first_bytes.hex()}"
             except:
                 pass
-            
-            binary_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:16]
-            log.log_info(f"Generated binary hash: {binary_hash} for {filename}")
-            return binary_hash
-            
+
+            legacy_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:16]
+            log.log_debug(f"Generated legacy hash: {legacy_hash} for migration check")
+            return legacy_hash
+
         except Exception as e:
-            log.log_error(f"Failed to generate binary hash: {e}")
-            # Ultimate fallback
-            import datetime
-            return hashlib.sha256(f"fallback:{datetime.datetime.now().isoformat()}".encode()).hexdigest()[:16]
-    
+            log.log_warn(f"Failed to generate legacy hash: {e}")
+            return None
+
+    def migrate_legacy_hash_if_needed(self, binary_view: bn.BinaryView, new_hash: str) -> bool:
+        """
+        Automatically migrate data from legacy (filename-based) hash to new (content-based) hash.
+
+        This is called when a binary is first opened to gracefully transition existing
+        chats and analysis data to the new hashing scheme.
+
+        Args:
+            binary_view: The binary view to check
+            new_hash: The new content-based hash
+
+        Returns:
+            True if migration was performed, False otherwise
+        """
+        try:
+            # Calculate the legacy hash for this binary
+            legacy_hash = self.get_legacy_binary_hash(binary_view)
+            if not legacy_hash or legacy_hash == new_hash:
+                return False
+
+            # Check if new hash already has data (already migrated)
+            with self._db_lock:
+                conn = self._get_connection()
+                cursor = conn.cursor()
+
+                # Check if new hash has any data
+                cursor.execute('''
+                    SELECT
+                        (SELECT COUNT(*) FROM BNAnalysis WHERE binary_hash = ?) +
+                        (SELECT COUNT(*) FROM BNContext WHERE binary_hash = ?) +
+                        (SELECT COUNT(*) FROM BNChatHistory WHERE binary_hash = ?) +
+                        (SELECT COUNT(*) FROM BNChatMetadata WHERE binary_hash = ?) +
+                        (SELECT COUNT(*) FROM BNChatMessages WHERE binary_hash = ?)
+                        as total_count
+                ''', (new_hash, new_hash, new_hash, new_hash, new_hash))
+
+                new_hash_count = cursor.fetchone()[0]
+
+                # Check if legacy hash has any data
+                cursor.execute('''
+                    SELECT
+                        (SELECT COUNT(*) FROM BNAnalysis WHERE binary_hash = ?) +
+                        (SELECT COUNT(*) FROM BNContext WHERE binary_hash = ?) +
+                        (SELECT COUNT(*) FROM BNChatHistory WHERE binary_hash = ?) +
+                        (SELECT COUNT(*) FROM BNChatMetadata WHERE binary_hash = ?) +
+                        (SELECT COUNT(*) FROM BNChatMessages WHERE binary_hash = ?)
+                        as total_count
+                ''', (legacy_hash, legacy_hash, legacy_hash, legacy_hash, legacy_hash))
+
+                legacy_hash_count = cursor.fetchone()[0]
+
+                conn.close()
+
+            # If new hash has data, no migration needed
+            if new_hash_count > 0:
+                log.log_debug(f"New hash {new_hash} already has {new_hash_count} entries, skipping migration")
+                return False
+
+            # If legacy hash has no data, nothing to migrate
+            if legacy_hash_count == 0:
+                log.log_debug(f"Legacy hash {legacy_hash} has no data, skipping migration")
+                return False
+
+            # Perform migration
+            log.log_info(f"Migrating {legacy_hash_count} entries from legacy hash {legacy_hash} to new hash {new_hash}")
+
+            with self._db_lock:
+                conn = self._get_connection()
+                try:
+                    cursor = conn.cursor()
+
+                    # Migrate all tables
+                    tables_migrated = 0
+
+                    # Migrate BNAnalysis
+                    cursor.execute('UPDATE BNAnalysis SET binary_hash = ? WHERE binary_hash = ?', (new_hash, legacy_hash))
+                    if cursor.rowcount > 0:
+                        log.log_info(f"  Migrated {cursor.rowcount} BNAnalysis entries")
+                        tables_migrated += cursor.rowcount
+
+                    # Migrate BNContext
+                    cursor.execute('UPDATE BNContext SET binary_hash = ? WHERE binary_hash = ?', (new_hash, legacy_hash))
+                    if cursor.rowcount > 0:
+                        log.log_info(f"  Migrated {cursor.rowcount} BNContext entries")
+                        tables_migrated += cursor.rowcount
+
+                    # Migrate BNChatHistory
+                    cursor.execute('UPDATE BNChatHistory SET binary_hash = ? WHERE binary_hash = ?', (new_hash, legacy_hash))
+                    if cursor.rowcount > 0:
+                        log.log_info(f"  Migrated {cursor.rowcount} BNChatHistory entries")
+                        tables_migrated += cursor.rowcount
+
+                    # Migrate BNChatMetadata
+                    cursor.execute('UPDATE BNChatMetadata SET binary_hash = ? WHERE binary_hash = ?', (new_hash, legacy_hash))
+                    if cursor.rowcount > 0:
+                        log.log_info(f"  Migrated {cursor.rowcount} BNChatMetadata entries")
+                        tables_migrated += cursor.rowcount
+
+                    # Migrate BNChatMessages
+                    cursor.execute('UPDATE BNChatMessages SET binary_hash = ? WHERE binary_hash = ?', (new_hash, legacy_hash))
+                    if cursor.rowcount > 0:
+                        log.log_info(f"  Migrated {cursor.rowcount} BNChatMessages entries")
+                        tables_migrated += cursor.rowcount
+
+                    conn.commit()
+                    log.log_info(f"Migration complete: {tables_migrated} total entries migrated")
+                    return True
+
+                except Exception as e:
+                    conn.rollback()
+                    log.log_error(f"Migration failed, rolled back: {e}")
+                    return False
+                finally:
+                    conn.close()
+
+        except Exception as e:
+            log.log_error(f"Failed to check/perform migration: {e}")
+            return False
+
     # Function Analysis Operations
     
     def save_function_analysis(self, binary_hash: str, function_start: int, 

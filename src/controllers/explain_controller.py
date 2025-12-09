@@ -136,6 +136,18 @@ class ExplainController:
     def set_binary_view(self, binary_view: bn.BinaryView):
         """Update the binary view for context service"""
         self.context_service.set_binary_view(binary_view)
+
+        # Only calculate hash if not already cached
+        # This ensures we calculate ONCE per binary file, not on every navigation
+        if self.context_service.get_binary_hash() is None:
+            # Calculate binary hash ONCE and cache it
+            binary_hash = self.analysis_db.get_binary_hash(binary_view)
+
+            # Perform automatic migration if needed (legacy hash -> new hash)
+            self.analysis_db.migrate_legacy_hash_if_needed(binary_view, binary_hash)
+
+            # Cache the hash in context service
+            self.context_service.set_binary_hash(binary_hash)
     
     def set_view_frame(self, view_frame):
         """Update the view frame for context service"""
@@ -1174,10 +1186,8 @@ Analyze the specific instruction/line of code below. Provide a detailed explanat
     # Database helper methods
     
     def _get_current_binary_hash(self) -> Optional[str]:
-        """Get current binary hash from context service"""
-        if self.context_service._binary_view:
-            return self.analysis_db.get_binary_hash(self.context_service._binary_view)
-        return None
+        """Get current binary hash from cached value"""
+        return self.context_service.get_binary_hash()
     
     def _get_function_start_address(self, address: int) -> Optional[int]:
         """Get function start address for database key"""

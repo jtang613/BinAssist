@@ -178,8 +178,16 @@ class OpenAIProvider(BaseLLMProvider):
                 # o* models don't support temperature parameter
             else:
                 completion_kwargs["max_tokens"] = min(request.max_tokens or self.max_tokens, self.max_tokens)
-                # Add temperature if specified (only for non-reasoning models)
-                if request.temperature is not None:
+
+                # Check if reasoning/thinking is enabled
+                reasoning_effort_str = self.config.get('reasoning_effort', 'none')
+                thinking_enabled = reasoning_effort_str and reasoning_effort_str != 'none'
+
+                # When thinking is enabled (e.g., Anthropic via LiteLLM), temperature must be 1
+                if thinking_enabled:
+                    completion_kwargs["temperature"] = 1
+                    log.log_debug("OpenAI: Thinking/reasoning enabled, forcing temperature=1")
+                elif request.temperature is not None:
                     completion_kwargs["temperature"] = request.temperature
 
             # Add reasoning effort if configured
@@ -324,8 +332,16 @@ class OpenAIProvider(BaseLLMProvider):
                 # o* models don't support temperature parameter
             else:
                 completion_kwargs["max_tokens"] = min(request.max_tokens or self.max_tokens, self.max_tokens)
-                # Add temperature if specified (only for non-reasoning models)
-                if request.temperature is not None:
+
+                # Check if reasoning/thinking is enabled
+                reasoning_effort_str = self.config.get('reasoning_effort', 'none')
+                thinking_enabled = reasoning_effort_str and reasoning_effort_str != 'none'
+
+                # When thinking is enabled (e.g., Anthropic via LiteLLM), temperature must be 1
+                if thinking_enabled:
+                    completion_kwargs["temperature"] = 1
+                    log.log_debug("OpenAI: Thinking/reasoning enabled, forcing temperature=1")
+                elif request.temperature is not None:
                     completion_kwargs["temperature"] = request.temperature
 
             # Add reasoning effort if configured (streaming)

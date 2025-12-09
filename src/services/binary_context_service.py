@@ -36,24 +36,57 @@ class ViewLevel(Enum):
 
 class BinaryContextService:
     """Service for extracting context-aware information from Binary Ninja"""
-    
+
     def __init__(self, binary_view: Optional[BinaryView] = None, view_frame=None):
         """Initialize with optional binary view and view frame"""
         self._binary_view = binary_view
         self._current_offset = 0
         self._view_frame = view_frame
-    
+        self._cached_binary_hash = None  # Cache hash to avoid recalculating
+
     def set_binary_view(self, binary_view: BinaryView) -> None:
         """Set the current binary view"""
+        # Only clear cached hash if the binary view actually changed
+        if self._binary_view != binary_view:
+            self._cached_binary_hash = None
         self._binary_view = binary_view
     
     def set_view_frame(self, view_frame) -> None:
         """Set the current view frame for UI context"""
         self._view_frame = view_frame
-    
+
     def set_current_offset(self, offset: int) -> None:
         """Set the current offset/address"""
         self._current_offset = offset
+
+    def set_binary_hash(self, binary_hash: str) -> None:
+        """
+        Set the cached binary hash.
+
+        This should be called ONCE when the binary is first opened,
+        after calculating the hash and performing any necessary migration.
+
+        Args:
+            binary_hash: The content-based binary hash to cache
+        """
+        self._cached_binary_hash = binary_hash
+        log.log_debug(f"Cached binary hash: {binary_hash}")
+
+    def get_binary_hash(self) -> Optional[str]:
+        """
+        Get the cached binary hash.
+
+        Returns the hash that was previously set via set_binary_hash().
+        If no hash has been cached, returns None.
+
+        Controllers should call AnalysisDBService.get_binary_hash() once
+        when the binary is opened, perform migration if needed, then cache
+        the result here using set_binary_hash().
+
+        Returns:
+            The cached binary hash, or None if not yet set
+        """
+        return self._cached_binary_hash
     
     def get_current_context(self) -> Dict[str, Any]:
         """Get complete context snapshot for current state"""
