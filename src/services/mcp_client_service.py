@@ -115,20 +115,12 @@ class MCPClientService:
                     # Convert settings format to MCPServerConfig format
                     config_dict = {
                         'name': server_data['name'],
-                        'transport_type': server_data.get('transport', 'stdio').lower(),
+                        'transport_type': server_data.get('transport', 'sse').lower(),
                         'enabled': server_data.get('enabled', True),
                         'url': server_data.get('url'),
                         'timeout': server_data.get('timeout', 30.0)
                     }
-                    
-                    # Handle command and args for stdio transport
-                    if config_dict['transport_type'] == 'stdio':
-                        url = server_data.get('url', '')
-                        if url:
-                            # Assume URL contains command for stdio transport
-                            config_dict['command'] = url
-                            config_dict['args'] = server_data.get('args', [])
-                    
+
                     config = MCPServerConfig.from_dict(config_dict)
                     server_configs.append(config)
                 except Exception as e:

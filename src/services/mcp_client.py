@@ -32,8 +32,7 @@ except ImportError:
 
 # Import MCP SDK
 try:
-    from mcp import ClientSession, StdioServerParameters, types
-    from mcp.client.stdio import stdio_client
+    from mcp import ClientSession, types
     # Check if SSE client is available
     try:
         from mcp.client.sse import sse_client
@@ -42,15 +41,23 @@ try:
         log.log_warn(f"MCP SSE client not available: {e}")
         sse_client = None
         SSE_CLIENT_AVAILABLE = False
+    # Check if Streamable HTTP client is available
+    try:
+        from mcp.client.streamable_http import streamablehttp_client
+        STREAMABLEHTTP_CLIENT_AVAILABLE = True
+    except ImportError as e:
+        log.log_warn(f"MCP Streamable HTTP client not available: {e}")
+        streamablehttp_client = None
+        STREAMABLEHTTP_CLIENT_AVAILABLE = False
     MCP_SDK_AVAILABLE = True
 except ImportError:
     log.log_warn("MCP SDK not available. Install with: pip install mcp")
     MCP_SDK_AVAILABLE = False
     ClientSession = None
-    StdioServerParameters = None
-    stdio_client = None
     sse_client = None
     SSE_CLIENT_AVAILABLE = False
+    streamablehttp_client = None
+    STREAMABLEHTTP_CLIENT_AVAILABLE = False
 
 
 class MCPConnection:
@@ -64,8 +71,8 @@ class MCPConnection:
         self.write = None
         self.tools: Dict[str, MCPTool] = {}
         self.resources: Dict[str, MCPResource] = {}
-        self._stdio_context = None
         self._sse_context = None
+        self._streamablehttp_context = None
         
     async def connect(self) -> bool:
         """Connect to the MCP server."""
@@ -73,10 +80,10 @@ class MCPConnection:
             raise MCPError("MCP SDK not available. Please install with: pip install mcp")
             
         try:
-            if self.config.transport_type == "stdio":
-                await self._connect_stdio()
-            elif self.config.transport_type == "sse":
+            if self.config.transport_type == "sse":
                 await self._connect_sse()
+            elif self.config.transport_type == "streamablehttp":
+                await self._connect_streamablehttp()
             else:
                 raise MCPError(f"Unsupported transport type: {self.config.transport_type}")
                 
@@ -87,32 +94,6 @@ class MCPConnection:
         except Exception as e:
             log.log_error(f"Failed to connect to MCP server {self.config.name}: {e}")
             raise MCPConnectionError(f"Connection failed: {e}")
-    
-    async def _connect_stdio(self):
-        """Connect using stdio transport."""
-        if not self.config.command:
-            raise MCPError("Command not specified for stdio transport")
-            
-        try:
-            # Create server parameters
-            server_params = StdioServerParameters(
-                command=self.config.command,
-                args=self.config.args or [],
-                env=self.config.env or None
-            )
-            
-            # Create stdio client connection
-            self._stdio_context = stdio_client(server_params)
-            self.read, self.write = await self._stdio_context.__aenter__()
-            
-            # Create and initialize client session
-            self.session = ClientSession(self.read, self.write)
-            await self.session.__aenter__()
-            await self.session.initialize()
-            
-        except Exception as e:
-            log.log_error(f"Failed to connect stdio to {self.config.name}: {e}")
-            raise MCPError(f"Failed to start MCP server: {e}")
     
     async def _connect_sse(self):
         """Connect using SSE transport."""
@@ -152,7 +133,45 @@ class MCPConnection:
                 raise MCPError(f"MCP protocol error connecting to {self.config.url}. Server may not support MCP or is misconfigured.")
             else:
                 raise MCPError(f"Failed to connect to SSE server: {e}")
-    
+
+    async def _connect_streamablehttp(self):
+        """Connect using Streamable HTTP transport."""
+        if not self.config.url:
+            raise MCPError("URL not specified for Streamable HTTP transport")
+
+        if not STREAMABLEHTTP_CLIENT_AVAILABLE:
+            raise MCPError("Streamable HTTP client not available in MCP SDK. Try updating MCP: pip install --upgrade mcp")
+
+        try:
+            # Create Streamable HTTP client connection
+            self._streamablehttp_context = streamablehttp_client(self.config.url, timeout=self.config.timeout)
+            # Streamable HTTP returns (read, write, session_id)
+            self.read, self.write, _ = await self._streamablehttp_context.__aenter__()
+
+            # Create and initialize session
+            self.session = ClientSession(self.read, self.write)
+            await self.session.__aenter__()
+
+            # Initialize with timeout
+            try:
+                await asyncio.wait_for(self.session.initialize(), timeout=self.config.timeout)
+            except asyncio.TimeoutError:
+                raise MCPError(f"Session initialization timed out after {self.config.timeout} seconds")
+
+        except Exception as e:
+            log.log_error(f"Failed to connect via Streamable HTTP to {self.config.name}: {e}")
+
+            # Provide more helpful error messages
+            error_msg = str(e).lower()
+            if "404" in error_msg:
+                raise MCPError(f"MCP server not found at {self.config.url}. Check the URL and ensure the MCP server is running.")
+            elif "connection" in error_msg and "refused" in error_msg:
+                raise MCPError(f"Connection refused to {self.config.url}. Ensure the MCP server is running and accessible.")
+            elif "timeout" in error_msg:
+                raise MCPError(f"Connection timeout to {self.config.url}. Server may be slow or unreachable.")
+            else:
+                raise MCPError(f"Failed to connect to Streamable HTTP server: {e}")
+
     async def _discover_capabilities(self):
         """Discover server capabilities."""
         try:
@@ -275,12 +294,12 @@ class MCPConnection:
                 if self._sse_context:
                     await self._sse_context.__aexit__(None, None, None)
                     self._sse_context = None
-                
-                if self._stdio_context:
-                    await self._stdio_context.__aexit__(None, None, None)
-                    self._stdio_context = None
-                    
-                self.read = None 
+
+                if self._streamablehttp_context:
+                    await self._streamablehttp_context.__aexit__(None, None, None)
+                    self._streamablehttp_context = None
+
+                self.read = None
                 self.write = None
                     
             except Exception as e:

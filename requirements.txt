@@ -3,4 +3,5 @@ anthropic
 pysqlite3
 markdown
 httpx
-mcp
+anyio>=4.6
+mcp==1.23.3

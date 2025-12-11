@@ -20,8 +20,8 @@ class MCPConnectionStatus(Enum):
 
 class MCPTransportType(Enum):
     """MCP transport protocol types."""
-    STDIO = "stdio"
     SSE = "sse"
+    STREAMABLEHTTP = "streamablehttp"
 
 
 @dataclass
@@ -31,22 +31,15 @@ class MCPServerConfig:
     transport_type: str
     enabled: bool = True
     timeout: float = 30.0
-    
-    # stdio transport fields
-    command: Optional[str] = None
-    args: Optional[List[str]] = None
-    env: Optional[Dict[str, str]] = None
-    
-    # SSE transport fields  
+
+    # SSE and Streamable HTTP transport fields
     url: Optional[str] = None
     headers: Optional[Dict[str, str]] = None
-    
+
     def __post_init__(self):
         """Validate configuration after initialization."""
-        if self.transport_type == "stdio" and not self.command:
-            raise ValueError("stdio transport requires command")
-        if self.transport_type == "sse" and not self.url:
-            raise ValueError("sse transport requires url")
+        if self.transport_type in ("sse", "streamablehttp") and not self.url:
+            raise ValueError(f"{self.transport_type} transport requires url")
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'MCPServerConfig':
@@ -56,13 +49,10 @@ class MCPServerConfig:
             transport_type=data['transport_type'],
             enabled=data.get('enabled', True),
             timeout=data.get('timeout', 30.0),
-            command=data.get('command'),
-            args=data.get('args'),
-            env=data.get('env'),
             url=data.get('url'),
             headers=data.get('headers')
         )
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert server config to dictionary."""
         return {
@@ -70,9 +60,6 @@ class MCPServerConfig:
             'transport_type': self.transport_type,
             'enabled': self.enabled,
             'timeout': self.timeout,
-            'command': self.command,
-            'args': self.args,
-            'env': self.env,
             'url': self.url,
             'headers': self.headers
         }

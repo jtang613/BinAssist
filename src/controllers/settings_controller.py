@@ -205,23 +205,14 @@ class MCPTestWorker(QThread):
             # Convert settings format to MCPServerConfig
             transport_type = self.server_config.get('transport', 'sse')
 
-            # Create config based on transport type
-            if transport_type == "stdio":
-                config = MCPServerConfig(
-                    name=self.server_config['name'],
-                    transport_type="stdio",
-                    command=self.server_config.get('command', ''),
-                    enabled=self.server_config.get('enabled', True),
-                    timeout=30.0
-                )
-            else:
-                config = MCPServerConfig(
-                    name=self.server_config['name'],
-                    transport_type="sse",
-                    url=self.server_config['url'],
-                    enabled=self.server_config.get('enabled', True),
-                    timeout=30.0
-                )
+            # Create config for HTTP-based transport (sse or streamablehttp)
+            config = MCPServerConfig(
+                name=self.server_config['name'],
+                transport_type=transport_type,
+                url=self.server_config['url'],
+                enabled=self.server_config.get('enabled', True),
+                timeout=30.0
+            )
             
             # Get MCP client service
             mcp_service = MCPClientService()
@@ -425,17 +416,10 @@ class MCPProviderDialog(QDialog):
         layout.addWidget(QLabel("Transport:"))
         self.transport_combo = QComboBox()
         self.transport_combo.addItem("SSE (HTTP)", "sse")
-        self.transport_combo.addItem("STDIO (Local)", "stdio")
+        self.transport_combo.addItem("Streamable HTTP", "streamablehttp")
         layout.addWidget(self.transport_combo)
-        
-        # Command (for STDIO)
-        self.command_label = QLabel("Command (for STDIO):")
-        layout.addWidget(self.command_label)
-        self.command_edit = QLineEdit()
-        self.command_edit.setPlaceholderText("e.g., python mcp-server.py")
-        layout.addWidget(self.command_edit)
-        
-        # Show/hide command field based on transport
+
+        # Update URL placeholder based on transport
         self.transport_combo.currentTextChanged.connect(self.on_transport_changed)
         self.on_transport_changed()  # Initial setup
         
@@ -461,17 +445,12 @@ class MCPProviderDialog(QDialog):
     def on_transport_changed(self):
         """Handle transport type change"""
         transport_data = self.transport_combo.currentData()
-        is_stdio = transport_data == "stdio"
-        
-        # Show/hide command fields for STDIO
-        self.command_label.setVisible(is_stdio)
-        self.command_edit.setVisible(is_stdio)
-        
+
         # Update URL placeholder based on transport
-        if is_stdio:
-            self.url_edit.setPlaceholderText("Leave empty for STDIO transport")
-        else:
+        if transport_data == "sse":
             self.url_edit.setPlaceholderText("e.g., http://localhost:8000/sse")
+        else:  # streamablehttp
+            self.url_edit.setPlaceholderText("e.g., http://localhost:8000/mcp")
     
     def populate_fields(self):
         """Populate fields with existing provider data"""
@@ -485,7 +464,6 @@ class MCPProviderDialog(QDialog):
             if index >= 0:
                 self.transport_combo.setCurrentIndex(index)
 
-            self.command_edit.setText(self.provider_data.get('command', ''))
             self.enabled_check.setChecked(self.provider_data.get('enabled', True))
 
             # Update UI based on transport type
@@ -499,10 +477,6 @@ class MCPProviderDialog(QDialog):
             'transport': self.transport_combo.currentData(),
             'enabled': self.enabled_check.isChecked()
         }
-
-        # Add command for STDIO transport
-        if self.transport_combo.currentData() == "stdio":
-            data['command'] = self.command_edit.text().strip()
 
         return data
 

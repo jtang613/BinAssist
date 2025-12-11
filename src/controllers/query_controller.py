@@ -2371,14 +2371,7 @@ Tool Usage Guidelines:
                     native_messages = self.analysis_db.get_native_messages_for_provider(
                         binary_hash, str(self.current_chat_id), provider_type
                     )
-                    # DEBUG: Log what we loaded from native storage
-                    log.log_info(f"🔍 NATIVE STORAGE DEBUG - Loaded {len(native_messages)} messages for {provider_type}")
-                    for i, msg in enumerate(native_messages):
-                        debug_msg = dict(msg)  # Make a copy for debugging
-                        if 'content' in debug_msg and len(str(debug_msg['content'])) > 100:
-                            debug_msg['content'] = str(debug_msg['content'])[:100] + "..."
-                        log.log_info(f"   Message {i}: {json.dumps(debug_msg, indent=2)}")
-                    
+
                     # Add native messages directly (they're already in provider format)
                     conversation_messages.extend(native_messages)
             except Exception as e:
