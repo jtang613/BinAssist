@@ -255,25 +255,27 @@ class QueryTabView(QWidget):
         # Prevent edit mode changes during query execution
         if self.query_running:
             return
-            
+
         self.is_edit_mode = not self.is_edit_mode
-        
+
         if self.is_edit_mode:
             # Switch to edit mode
             self.query_browser.hide()
             self.query_editor.show()
             self.edit_save_button.setText("Save")
-            # Copy current content to editor
-            self.query_editor.setPlainText(self.markdown_content)
+            # Don't set content here - let the controller prepare proper editable content
+            # via set_chat_content() after receiving edit_mode_changed signal
         else:
             # Switch to read mode (save)
             self.query_editor.hide()
             self.query_browser.show()
             self.edit_save_button.setText("Edit")
-            # Save edited content
+            # Store edited content for the controller to save
             self.markdown_content = self.query_editor.toPlainText()
             self.query_browser.setHtml(self.markdown_to_html(self.markdown_content))
-        
+            # Also update the markdown source for copy operations
+            self.query_browser.set_markdown_source(self.markdown_content)
+
         self.edit_mode_changed.emit(self.is_edit_mode)
     
     def on_submit_clicked(self):

@@ -1150,235 +1150,319 @@ class QueryController:
     
     def on_edit_mode_changed(self, is_edit_mode: bool):
         """Handle edit mode change using ChatEditManager"""
-        log.log_info(f"Query edit mode changed to: {is_edit_mode}")
-        
         if is_edit_mode:
-            # Entering edit mode - generate editable content
             self._prepare_edit_mode()
         else:
-            # Exiting edit mode - save changes
             if self.current_chat_id:
                 try:
                     self._save_edited_chat_content_with_manager()
-                    log.log_info("Successfully saved edited chat content using ChatEditManager")
                 except Exception as e:
-                    log.log_error(f"Failed to save edited chat content: {e}")
-    
+                    log.log_error(f"Failed to save edited chat: {e}")
+
     def _prepare_edit_mode(self):
         """Prepare chat content for editing using ChatEditManager"""
         if not self.current_chat_id or self.current_chat_id not in self.chats:
-            log.log_warn("No current chat to edit")
             return
-        
+
         try:
-            # Get current chat data
             chat_data = self.chats[self.current_chat_id]
-            
-            # Generate editable markdown content
             editable_content = self.chat_edit_manager.generate_editable_content(chat_data)
-            
-            # Set the content in the view for editing
             self.view.set_chat_content(editable_content)
-            
-            log.log_info(f"Prepared chat {self.current_chat_id} for editing with {len(self.chat_edit_manager.message_map)} tracked chunks")
-            
         except Exception as e:
             log.log_error(f"Failed to prepare edit mode: {e}")
-    
+
     def _save_edited_chat_content_with_manager(self):
-        """Save edited chat content using ChatEditManager"""
+        """Save edited chat content to database"""
         if not self.current_chat_id:
-            log.log_warn("No current chat to save")
             return
-        
+
         try:
-            # Get the edited content from the view
             edited_content = self.view.get_chat_content()
             if not edited_content:
-                log.log_warn("No content to save")
                 return
-            
-            # Parse changes using ChatEditManager
-            changes = self.chat_edit_manager.parse_edited_content(edited_content)
-            
-            if not changes:
-                log.log_info("No changes detected in edited content")
-                return
-            
-            log.log_info(f"Detected {len(changes)} changes in edited content")
-            
-            # Apply changes to database
+
             binary_hash = self._get_current_binary_hash()
             if not binary_hash:
                 log.log_warn("No binary hash available for saving edited content")
                 return
-            
-            # Apply changes based on their type
-            messages_updated = self._apply_chat_changes(binary_hash, changes)
-            
-            # Reload the chat to reflect changes
-            if messages_updated:
-                self._reload_current_chat()
-                log.log_info(f"Successfully applied {len(changes)} changes to chat {self.current_chat_id}")
-            
+
+            changes = self.chat_edit_manager.parse_edited_content(edited_content)
+
+            if changes:
+                messages_updated = self._apply_chat_changes(binary_hash, changes)
+                if messages_updated:
+                    self._reload_current_chat()
+            else:
+                # Fallback: Save the raw edited content directly
+                self._save_edited_content_directly(binary_hash, edited_content)
+
         except Exception as e:
-            log.log_error(f"Failed to save edited chat content with manager: {e}")
+            log.log_error(f"Failed to save edited chat content: {e}")
+
+    def _save_edited_content_directly(self, binary_hash: str, edited_content: str):
+        """Fallback: Save edited content directly to database (native storage)"""
+        try:
+            chat_id_str = str(self.current_chat_id)
+            chat_name = self.chats[self.current_chat_id].get("name", "Edited Chat")
+
+            # Delete existing messages from native storage and save new content
+            self.analysis_db.delete_native_chat(binary_hash, chat_id_str)
+            self.analysis_db.save_edited_message(
+                binary_hash, chat_id_str,
+                message_order=0,
+                role="edited",
+                content=edited_content
+            )
+            self.analysis_db.save_chat_metadata(binary_hash, chat_id_str, chat_name)
+
+            # Update in-memory chat
+            self.chats[self.current_chat_id]["messages"] = [{
+                "role": "edited",
+                "content": edited_content,
+                "timestamp": "edited",
+                "db_id": None
+            }]
+            self._update_chat_display()
+
+        except Exception as e:
+            log.log_error(f"Failed to save edited content directly: {e}")
     
     def _apply_chat_changes(self, binary_hash: str, changes) -> bool:
-        """Apply detected changes to the database"""
+        """Apply detected changes to the database
+
+        Parses ALL chunks from the edited content rather than relying on message_map,
+        since a chat may have been previously saved as a single "edited" message.
+        """
         try:
             from .chat_edit_manager import ChangeType
-            
+
             messages_updated = False
             title_updated = False
             new_title = None
-            
+
             for change in changes:
                 if change.change_type == ChangeType.MODIFIED:
-                    # Check if this is a title change
                     if getattr(change, 'role', None) == 'title':
                         title_updated = True
                         new_title = change.new_content
-                        log.log_info(f"Title changed to: '{new_title}'")
-                    # Update existing message
-                    elif change.db_id:
-                        # For now, we'll delete and recreate the entire chat
-                        # In the future, we could implement more granular updates
+                    else:
                         messages_updated = True
-                        log.log_info(f"Modified message with db_id {change.db_id}")
-                
                 elif change.change_type == ChangeType.DELETED:
-                    # Mark message as deleted
-                    if change.db_id:
-                        messages_updated = True
-                        log.log_info(f"Deleted message with db_id {change.db_id}")
-                
+                    messages_updated = True
                 elif change.change_type == ChangeType.ADDED:
-                    # Add new message
                     if change.new_content:
                         messages_updated = True
-                        log.log_info(f"Added new {change.role} message")
-            
-            # For now, implement simple approach: rebuild entire chat
+
+            # Rebuild chat by parsing ALL chunks directly from the edited content
             if messages_updated:
-                # Collect all current message data from changes
-                final_messages = []
-                
-                # Add modified and unchanged messages
-                for chunk_id, chat_msg in self.chat_edit_manager.message_map.items():
-                    # Check if this message was modified
-                    modified_change = None
-                    for change in changes:
-                        if change.change_type == ChangeType.MODIFIED and change.chunk_id == chunk_id:
-                            modified_change = change
-                            break
-                    
-                    # Check if this message was deleted
-                    deleted = any(change.change_type == ChangeType.DELETED and change.chunk_id == chunk_id 
-                                 for change in changes)
-                    
-                    if not deleted:
-                        content = modified_change.new_content if modified_change else chat_msg.content
-                        final_messages.append({
-                            "role": chat_msg.role,
-                            "content": content,
-                            "timestamp": chat_msg.timestamp,
-                            "db_id": chat_msg.db_id
-                        })
-                
-                # Add new messages
-                for change in changes:
-                    if change.change_type == ChangeType.ADDED:
-                        final_messages.append({
-                            "role": change.role,
-                            "content": change.new_content,
-                            "timestamp": change.timestamp or "edited",
-                            "db_id": None  # New message
-                        })
-                
-                # Sort by order if available
-                final_messages.sort(key=lambda m: m.get("db_id") or 999999)
-                
-                # Delete existing chat and recreate
-                self.analysis_db.delete_chat(binary_hash, str(self.current_chat_id))
-                
-                # Save all messages to database
+                edited_content = self.view.get_chat_content()
+                final_messages = self._extract_all_messages_from_edited_content(edited_content)
+
+                # Delete existing chat from native storage and recreate
+                self.analysis_db.delete_native_chat(binary_hash, str(self.current_chat_id))
+
+                # Save all messages to native storage
                 for i, message in enumerate(final_messages):
-                    self.analysis_db.save_chat_message(
+                    self.analysis_db.save_edited_message(
                         binary_hash, str(self.current_chat_id),
-                        message["role"], message["content"],
-                        metadata={"message_order": i}
+                        message_order=i,
+                        role=message["role"],
+                        content=message["content"]
                     )
-                
+
                 # Update in-memory chat
                 self.chats[self.current_chat_id]["messages"] = final_messages
-                
-                log.log_info(f"Rebuilt chat with {len(final_messages)} messages")
-            
+
             # Handle title changes
             if title_updated and new_title:
-                # Update in-memory chat title
-                old_title = self.chats[self.current_chat_id]["name"]
                 self.chats[self.current_chat_id]["name"] = new_title
-                
+
                 # Save updated title to database
                 try:
                     self.analysis_db.save_chat_metadata(binary_hash, str(self.current_chat_id), new_title)
-                    log.log_info(f"Saved updated chat title to database: '{new_title}'")
                 except Exception as e:
-                    log.log_error(f"Failed to save updated chat title to database: {e}")
-                
-                # Update the chat name in the history table by finding and updating the row
+                    log.log_error(f"Failed to save updated chat title: {e}")
+
+                # Update the chat name in the history table
                 try:
-                    # Find the row in the history table that corresponds to this chat
                     for row in range(self.view.history_table.rowCount()):
-                        item = self.view.history_table.item(row, 0)  # First column contains chat name
+                        item = self.view.history_table.item(row, 0)
                         if item and item.data(Qt.UserRole) == self.current_chat_id:
-                            # Update the displayed text
                             item.setText(new_title)
                             break
                 except Exception as e:
                     log.log_warn(f"Could not update chat name in history table: {e}")
-                
-                log.log_info(f"Updated chat title from '{old_title}' to '{new_title}'")
             
             return messages_updated or title_updated
             
         except Exception as e:
             log.log_error(f"Failed to apply chat changes: {e}")
             return False
-    
+
+    def _extract_all_messages_from_edited_content(self, edited_content: str) -> list:
+        """Extract all messages from edited markdown content.
+
+        Parses chunk markers and content, rebuilding the message list from raw markdown.
+        Works even when the original message_map only had 1 entry.
+        """
+        import re
+
+        messages = []
+
+        # Split content by chunk markers to get each section
+        chunk_split_pattern = r'(<!-- CHUNK:[^>]+ -->)'
+        parts = re.split(chunk_split_pattern, edited_content)
+
+        # Process pairs of (chunk_marker, content)
+        i = 0
+        while i < len(parts):
+            part = parts[i]
+
+            # Check if this is a chunk marker
+            chunk_match = re.match(r'<!-- CHUNK:([^>]+) -->', part.strip())
+            if chunk_match and i + 1 < len(parts):
+                chunk_content = parts[i + 1]
+
+                # Parse the header to get role (format: ## Role (timestamp))
+                header_match = re.match(r'\s*##?\s*(\w+)(?:\s*\([^)]*\))?', chunk_content)
+                if header_match:
+                    role_text = header_match.group(1).lower()
+
+                    # Map role text to standard roles
+                    if role_text == 'user':
+                        role = 'user'
+                    elif role_text in ('binassist', 'assistant'):
+                        role = 'assistant'
+                    elif role_text == 'edited':
+                        role = 'edited'
+                    elif role_text == 'error':
+                        role = 'error'
+                    else:
+                        role = role_text
+
+                    # Extract content after the header line
+                    lines = chunk_content.split('\n')
+                    content_lines = []
+                    found_header = False
+                    for line in lines:
+                        if not found_header:
+                            if re.match(r'\s*##?\s*\w+', line):
+                                found_header = True
+                            continue
+                        content_lines.append(line)
+
+                    content = '\n'.join(content_lines).strip()
+
+                    # Remove trailing horizontal rules
+                    while content.endswith('---'):
+                        content = content[:-3].strip()
+
+                    if content:
+                        messages.append({
+                            "role": role,
+                            "content": content,
+                            "timestamp": "edited",
+                            "db_id": None
+                        })
+
+                i += 2  # Skip marker and content
+            else:
+                i += 1
+
+        # If no chunks found, try header-based extraction as fallback
+        if not messages:
+            messages = self._extract_messages_by_headers(edited_content)
+
+        return messages
+
+    def _extract_messages_by_headers(self, content: str) -> list:
+        """Fallback extraction using section headers when chunk markers fail."""
+        import re
+
+        messages = []
+
+        # Find all headers like ## User (...), ## BinAssist (...), etc.
+        header_pattern = r'^##\s+(User|BinAssist|Assistant|Edited|Error)(?:\s*\([^)]*\))?'
+
+        lines = content.split('\n')
+        current_role = None
+        current_content = []
+
+        for line in lines:
+            header_match = re.match(header_pattern, line, re.IGNORECASE)
+            if header_match:
+                # Save previous message if exists
+                if current_role and current_content:
+                    msg_content = '\n'.join(current_content).strip()
+                    if msg_content:
+                        messages.append({
+                            "role": current_role,
+                            "content": msg_content,
+                            "timestamp": "edited",
+                            "db_id": None
+                        })
+
+                # Start new message
+                role_text = header_match.group(1).lower()
+                if role_text == 'binassist':
+                    current_role = 'assistant'
+                else:
+                    current_role = role_text
+                current_content = []
+            elif line.startswith('# ') and not line.startswith('## '):
+                # Skip title
+                continue
+            elif line.strip().startswith('<!-- CHUNK:'):
+                # Skip chunk markers
+                continue
+            elif line.strip() == '---':
+                # Skip horizontal rules
+                continue
+            elif current_role:
+                current_content.append(line)
+
+        # Don't forget the last message
+        if current_role and current_content:
+            msg_content = '\n'.join(current_content).strip()
+            if msg_content:
+                messages.append({
+                    "role": current_role,
+                    "content": msg_content,
+                    "timestamp": "edited",
+                    "db_id": None
+                })
+
+        return messages
+
     def _reload_current_chat(self):
-        """Reload the current chat from database"""
+        """Reload the current chat from database (native storage)"""
         if not self.current_chat_id:
             return
-        
+
         try:
             binary_hash = self._get_current_binary_hash()
             if not binary_hash:
                 return
-            
-            # Load fresh messages from database
-            messages = self.analysis_db.get_chat_history(binary_hash, str(self.current_chat_id))
-            
+
+            # Load fresh messages from native storage
+            messages = self.analysis_db.get_display_messages(binary_hash, str(self.current_chat_id))
+
             # Convert to our format
             formatted_messages = []
             for msg in messages:
                 formatted_messages.append({
                     "role": msg["role"],
                     "content": msg["content"],
-                    "timestamp": msg["created_at"],
-                    "db_id": msg["id"]
+                    "timestamp": msg.get("created_at", ""),
+                    "db_id": msg.get("id"),
+                    "message_type": msg.get("message_type", "standard"),
+                    "provider_type": msg.get("provider_type", "unknown")
                 })
-            
-            # Update in-memory chat
+
+            # Update in-memory chat and display
             self.chats[self.current_chat_id]["messages"] = formatted_messages
-            
-            # Display the updated chat
             self._update_chat_display()
-            
-            log.log_info(f"Reloaded chat {self.current_chat_id} with {len(formatted_messages)} messages")
-            
+
         except Exception as e:
             log.log_error(f"Failed to reload current chat: {e}")
     
@@ -1544,6 +1628,10 @@ class QueryController:
 
             elif role == "error":
                 content += f"## Error ({timestamp})\n**{text}**\n\n"
+
+            elif role == "edited":
+                # User-edited content is displayed as-is (already formatted)
+                content += f"{text}\n\n"
 
         return content
     

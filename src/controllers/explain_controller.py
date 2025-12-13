@@ -51,7 +51,11 @@ class ExplainController:
         # Query state tracking
         self.function_query_active = False
         self.line_query_active = False
-        
+
+        # Track current analysis context for edit/save
+        self._current_analysis_address = None  # Function start address
+        self._current_analysis_type = None  # "explain_function" or "explain_line"
+
         # MCP state tracking
         self.mcp_enabled = False
         self._tool_execution_active = False
@@ -203,9 +207,12 @@ class ExplainController:
                 cached_analysis = self.analysis_db.get_function_analysis(
                     binary_hash, function_start, "explain_function"
                 )
-                
+
                 if cached_analysis and not self._should_refresh_cache(cached_analysis):
                     log.log_info("Using cached function analysis")
+                    # Track analysis context for edit/save functionality
+                    self._current_analysis_address = function_start
+                    self._current_analysis_type = "explain_function"
                     self.view.set_explanation_content(cached_analysis['response'])
                     self._set_query_state("function", False)
                     return
@@ -308,9 +315,12 @@ class ExplainController:
                 cached_analysis = self.analysis_db.get_function_analysis(
                     binary_hash, function_start, "explain_line"
                 )
-                
+
                 if cached_analysis and not self._should_refresh_cache(cached_analysis):
                     log.log_info("Using cached line analysis")
+                    # Track analysis context for edit/save functionality
+                    self._current_analysis_address = function_start
+                    self._current_analysis_type = "explain_line"
                     self.view.set_explanation_content(cached_analysis['response'])
                     self._set_query_state("line", False)
                     return
@@ -389,10 +399,65 @@ class ExplainController:
         self._show_default_content()
     
     def on_edit_mode_changed(self, is_edit_mode: bool):
-        """Handle edit mode change"""
+        """Handle edit mode change - save edited content when exiting edit mode"""
         log.log_info(f"Edit mode changed to: {is_edit_mode}")
-        # TODO: Save/restore explanation content if needed
-    
+
+        if not is_edit_mode:
+            # Exiting edit mode (Save button clicked) - save the edited content
+            self._save_edited_explanation()
+
+    def _save_edited_explanation(self):
+        """Save the edited explanation content to the database"""
+        try:
+            # Get the edited content from the view
+            edited_content = self.view.get_explanation_content()
+            if not edited_content:
+                log.log_warn("No content to save")
+                return
+
+            # Check if we have valid analysis context
+            binary_hash = self._get_current_binary_hash()
+            if not binary_hash:
+                log.log_warn("No binary hash available for saving edited explanation")
+                return
+
+            # Get analysis address - use tracked value or calculate from current offset
+            analysis_address = self._current_analysis_address
+            if not analysis_address:
+                current_offset = self.context_service._current_offset
+                if current_offset:
+                    analysis_address = self._get_function_start_address(current_offset)
+
+            if not analysis_address:
+                log.log_warn("No analysis address available - cannot save edited explanation")
+                return
+
+            # Get analysis type - use tracked value or default to explain_function
+            analysis_type = self._current_analysis_type or "explain_function"
+
+            # Save the edited content to database
+            metadata = {
+                "view_level": self.context_service.get_current_view_level().value,
+                "model": "user_edited",
+                "offset": self.context_service._current_offset
+            }
+
+            self.analysis_db.save_function_analysis(
+                binary_hash,
+                analysis_address,
+                analysis_type,
+                edited_content,
+                metadata
+            )
+            log.log_info(f"Saved edited {analysis_type} to database for address {hex(analysis_address)}")
+
+            # Update tracked values for future edits
+            self._current_analysis_address = analysis_address
+            self._current_analysis_type = analysis_type
+
+        except Exception as e:
+            log.log_error(f"Failed to save edited explanation: {e}")
+
     def on_rag_enabled_changed(self, enabled: bool):
         """Handle RAG checkbox change"""
         log.log_info(f"RAG enabled changed to: {enabled}")
@@ -715,11 +780,15 @@ Analyze the specific instruction/line of code below. Provide a detailed explanat
                 binary_hash = self._get_current_binary_hash()
                 current_offset = self.context_service._current_offset
                 function_start = self._get_function_start_address(current_offset)
-                
+
                 if binary_hash and function_start is not None:
                     # Determine query type based on active query
                     query_type = "explain_function" if self.function_query_active else "explain_line"
-                    
+
+                    # Track current analysis context for edit/save functionality
+                    self._current_analysis_address = function_start
+                    self._current_analysis_type = query_type
+
                     # Save analysis with metadata
                     metadata = {
                         "view_level": self.context_service.get_current_view_level().value,
@@ -734,7 +803,7 @@ Analyze the specific instruction/line of code below. Provide a detailed explanat
                         complete_content, metadata
                     )
                     log.log_info(f"Saved {query_type} analysis to database")
-                    
+
             except Exception as e:
                 log.log_error(f"Failed to save analysis to database: {e}")
         

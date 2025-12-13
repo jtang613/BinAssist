@@ -169,9 +169,9 @@ class ExplainTabView(QWidget):
         # Prevent edit mode changes during query execution
         if self.function_query_running or self.line_query_running:
             return
-            
+
         self.is_edit_mode = not self.is_edit_mode
-        
+
         if self.is_edit_mode:
             # Switch to edit mode
             self.explain_browser.hide()
@@ -184,10 +184,12 @@ class ExplainTabView(QWidget):
             self.explain_editor.hide()
             self.explain_browser.show()
             self.edit_save_button.setText("Edit")
-            # Save edited content
+            # Store edited content for the controller to save
             self.markdown_content = self.explain_editor.toPlainText()
             self.explain_browser.setHtml(self.markdown_to_html(self.markdown_content))
-        
+            # Also update the markdown source for copy operations
+            self.explain_browser.set_markdown_source(self.markdown_content)
+
         self.edit_mode_changed.emit(self.is_edit_mode)
     
     def set_current_offset(self, offset_hex):

@@ -1275,21 +1275,110 @@ class AnalysisDBService:
             try:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    DELETE FROM BNChatMessages 
+                    DELETE FROM BNChatMessages
                     WHERE binary_hash = ? AND chat_id = ?
                 ''', (binary_hash, chat_id))
-                
+
                 deleted_count = cursor.rowcount
                 conn.commit()
-                
+
                 if deleted_count > 0:
                     log.log_info(f"Deleted {deleted_count} native messages from chat {chat_id}")
-                
+
                 return deleted_count > 0
-                
+
             except Exception as e:
                 conn.rollback()
                 raise RuntimeError(f"Failed to delete native chat: {e}")
+            finally:
+                conn.close()
+
+    def save_edited_message(self, binary_hash: str, chat_id: str, message_order: int,
+                           role: str, content: str, provider_type: str = "edited") -> int:
+        """Save an edited message to native storage (BNChatMessages table)
+
+        This method is specifically for saving user-edited messages that don't have
+        the full native message format from an LLM provider.
+        """
+        with self._db_lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+
+                # Create a minimal native message structure
+                native_message = {
+                    "role": role,
+                    "content": content
+                }
+
+                # Insert into BNChatMessages
+                cursor.execute('''
+                    INSERT INTO BNChatMessages (
+                        binary_hash, chat_id, message_order, provider_type,
+                        native_message_data, role, content_text, message_type,
+                        parent_message_id, conversation_thread_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                ''', (
+                    binary_hash, chat_id, message_order, provider_type,
+                    json.dumps(native_message), role, content, "edited"
+                ))
+
+                message_id = cursor.lastrowid
+                conn.commit()
+
+                log.log_debug(f"Saved edited message {message_id}: {role} message, order={message_order}")
+                return message_id
+
+            except Exception as e:
+                conn.rollback()
+                raise RuntimeError(f"Failed to save edited message: {e}")
+            finally:
+                conn.close()
+
+    def update_native_message_content(self, message_id: int, new_content: str) -> bool:
+        """Update the content of an existing native message
+
+        Used when user edits a message in the chat UI.
+        """
+        with self._db_lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+
+                # First get the current native message data
+                cursor.execute('''
+                    SELECT native_message_data, role FROM BNChatMessages WHERE id = ?
+                ''', (message_id,))
+
+                row = cursor.fetchone()
+                if not row:
+                    log.log_warn(f"Message {message_id} not found for update")
+                    return False
+
+                native_data = json.loads(row[0]) if row[0] else {}
+                role = row[1]
+
+                # Update the content in native data
+                native_data["content"] = new_content
+
+                # Update the record
+                cursor.execute('''
+                    UPDATE BNChatMessages
+                    SET native_message_data = ?, content_text = ?, message_type = 'edited'
+                    WHERE id = ?
+                ''', (json.dumps(native_data), new_content, message_id))
+
+                updated = cursor.rowcount > 0
+                conn.commit()
+
+                if updated:
+                    log.log_info(f"Updated message {message_id} content")
+
+                return updated
+
+            except Exception as e:
+                conn.rollback()
+                raise RuntimeError(f"Failed to update native message content: {e}")
             finally:
                 conn.close()
     
