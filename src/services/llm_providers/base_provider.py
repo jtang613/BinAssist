@@ -393,15 +393,83 @@ class BaseLLMProvider(ABC):
     def has_tool_capability_changed(self, tools: List[Dict[str, Any]]) -> bool:
         """
         Check if tool capability requirements have changed.
-        
+
         Args:
             tools: List of tool definitions
-            
+
         Returns:
             True if provider needs to update tool capabilities
         """
         # Default implementation: no capability changes needed
         return False
+
+    # ===================================================================
+    # Token Counting Methods
+    # ===================================================================
+
+    async def count_tokens(self, request: ChatRequest) -> int:
+        """
+        Count tokens for a potential chat request.
+
+        This method estimates the token count for messages, system prompt,
+        and tools before sending to the API. Providers should override
+        with native token counting when available.
+
+        Args:
+            request: Chat request to count tokens for
+
+        Returns:
+            Estimated token count
+
+        Note:
+            Default implementation uses character-based approximation
+            (~4 characters per token for English text). This is a rough
+            estimate and providers should override with accurate counting.
+        """
+        total_chars = 0
+
+        # Count message content
+        for message in request.messages:
+            if message.content:
+                total_chars += len(message.content)
+
+            # Count tool calls in message
+            if message.tool_calls:
+                for tc in message.tool_calls:
+                    total_chars += len(tc.name or '')
+                    total_chars += len(tc.arguments or '')
+
+        # Count tools definitions (rough estimate)
+        if request.tools:
+            import json
+            try:
+                tools_str = json.dumps(request.tools)
+                total_chars += len(tools_str)
+            except (TypeError, ValueError):
+                # Fallback: estimate 500 chars per tool
+                total_chars += len(request.tools) * 500
+
+        # Convert to tokens (~4 chars per token for English)
+        estimated_tokens = total_chars // 4
+
+        log.log_debug(f"Token estimate for {self.name}: ~{estimated_tokens} tokens ({total_chars} chars)")
+
+        return estimated_tokens
+
+    def estimate_tokens_for_text(self, text: str) -> int:
+        """
+        Estimate token count for a single text string.
+
+        Args:
+            text: Text to estimate tokens for
+
+        Returns:
+            Estimated token count
+        """
+        if not text:
+            return 0
+        # ~4 characters per token for English text
+        return len(text) // 4
     
     def validate_config(self) -> bool:
         """

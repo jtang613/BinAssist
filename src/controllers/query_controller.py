@@ -512,10 +512,12 @@ class QueryController:
 
         # Connect view signals
         self._connect_signals()
-        
-        # Load existing chats if binary view is available
+
+        # Initialize binary view and load chats if binary view is available
         if binary_view:
-            self.load_existing_chats()
+            # Properly initialize the binary view with hash calculation
+            self.set_binary_view(binary_view)
+            # Note: set_binary_view will call load_existing_chats() if hash changes
     
     def _connect_signals(self):
         """Connect view signals to controller methods"""
@@ -534,19 +536,18 @@ class QueryController:
         """Update the binary view for context service"""
         self.context_service.set_binary_view(binary_view)
 
-        # Only calculate hash if not already cached
-        # This ensures we calculate ONCE per binary file, not on every navigation
-        if self.context_service.get_binary_hash() is None:
-            # Calculate binary hash ONCE and cache it
-            # This uses the NEW content-based hash (filename-independent)
-            binary_hash = self.analysis_db.get_binary_hash(binary_view)
+        # Calculate the new binary's hash
+        new_binary_hash = self.analysis_db.get_binary_hash(binary_view)
+        current_binary_hash = self.context_service.get_binary_hash()
 
+        # Check if this is a different binary (hash changed)
+        if new_binary_hash != current_binary_hash:
             # Perform automatic migration if needed (legacy hash -> new hash)
             # This gracefully transitions existing chats/analysis to the new hashing scheme
-            self.analysis_db.migrate_legacy_hash_if_needed(binary_view, binary_hash)
+            self.analysis_db.migrate_legacy_hash_if_needed(binary_view, new_binary_hash)
 
-            # Cache the hash in context service for subsequent use
-            self.context_service.set_binary_hash(binary_hash)
+            # Cache the new hash in context service
+            self.context_service.set_binary_hash(new_binary_hash)
 
             # Load existing chats for the new binary
             self.load_existing_chats()
@@ -571,11 +572,13 @@ class QueryController:
             if not binary_hash:
                 log.log_debug("No binary hash available, skipping chat history load")
                 return
-            
+
+            log.log_info(f"Loading chats for binary hash: {binary_hash[:16]}...")
+
             # Clear existing chats first
             self.chats.clear()
             self.current_chat_id = None
-            
+
             # Clear the view's history table
             self.view.history_table.setRowCount(0)
             
@@ -592,7 +595,11 @@ class QueryController:
             
             # Get all chats for this binary
             existing_chats = self.analysis_db.get_all_chats(binary_hash)
-            
+
+            log.log_info(f"Found {len(existing_chats)} chats in database for this binary")
+            for chat in existing_chats:
+                log.log_info(f"  Chat ID: {chat['chat_id']}, Hash: {chat.get('binary_hash', 'N/A')[:16]}...")
+
             if not existing_chats:
                 log.log_debug("No existing chats found in database")
                 
@@ -874,6 +881,9 @@ class QueryController:
             self._query_active = True
             self._current_query_binary_hash = self._get_current_binary_hash()
             self.view.set_query_running(True)
+
+            # Reset auto-scroll to follow new response by default
+            self.view.enable_auto_scroll()
             
             # Add user query to chat immediately (both legacy and native formats)
             self._add_message_to_chat(self.current_chat_id, "user", query_text)
@@ -1440,44 +1450,12 @@ class QueryController:
         if not self.current_chat_id or self.current_chat_id not in self.chats:
             return
 
-        # Format chat as markdown
+        # Format chat as markdown and update the view
+        # The view handles scroll tracking internally via _on_scroll_changed
+        # which detects user-initiated scrolls and auto-enables/disables scroll following
         chat = self.chats[self.current_chat_id]
         markdown_content = self._format_chat_as_markdown(chat)
-
-        # Save scroll position BEFORE update
-        scrollbar = self.view.query_browser.verticalScrollBar()
-        old_value = scrollbar.value()
-        old_max = scrollbar.maximum()
-
-        # Check if user is at bottom (within 50px)
-        at_bottom = (old_max - old_value) <= 50 if old_max > 0 else True
-
-        # Convert markdown to HTML (happens only every 1 second, not on every delta)
-        # This is the GhidrAssist approach: periodic rendering on main thread
-        html_content = self.view.markdown_to_html(markdown_content)
-
-        # Update with rendered HTML
-        self.view.query_browser.setHtml(html_content)
-
-        # Restore scroll position AFTER Qt finishes layout
-        # Use QTimer.singleShot(0) to defer until next event loop iteration
-        if at_bottom:
-            # User was at bottom - auto-follow new content
-            QTimer.singleShot(0, self.view._scroll_to_bottom)
-        else:
-            # User was reading elsewhere - preserve position
-            # Calculate relative position to maintain same content in view
-            if old_max > 0:
-                scroll_ratio = old_value / old_max
-            else:
-                scroll_ratio = 0
-
-            def restore_scroll():
-                new_max = scrollbar.maximum()
-                new_value = int(scroll_ratio * new_max)
-                scrollbar.setValue(new_value)
-
-            QTimer.singleShot(0, restore_scroll)
+        self.view.set_chat_content(markdown_content)
 
     def _update_chat_display(self):
         """Update the chat display with current chat content"""
@@ -2643,6 +2621,9 @@ Tool Usage Guidelines:
             self._react_active = True
             self._current_query_binary_hash = self._get_current_binary_hash()
             self.view.set_query_running(True)
+
+            # Reset auto-scroll to follow new response by default
+            self.view.enable_auto_scroll()
 
             # Add user query to chat (both legacy and native formats)
             self._add_message_to_chat(self.current_chat_id, "user", query_text)

@@ -87,4 +87,13 @@ class ReActConfig:
     tool_timeout: float = 30.0
     reflection_enabled: bool = True
     min_findings_for_ready: int = 2
-    context_window_tokens: int = 8000
+
+    # Context window management settings
+    context_window_tokens: int = 150000  # Conservative limit for Anthropic models
+    context_threshold_percent: float = 0.75  # Trigger compression at 75%
+    max_tool_result_tokens: int = 10000  # Truncate individual results exceeding this
+    min_recent_tool_pairs: int = 2  # Preserve at least this many recent tool pairs
+
+    # Network error retry settings
+    max_retries: int = 3  # Number of retries for transient network errors
+    retry_delay: float = 2.0  # Initial delay between retries (doubles each retry)

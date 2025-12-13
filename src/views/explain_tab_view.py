@@ -1,9 +1,59 @@
 #!/usr/bin/env python3
 
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-                              QPushButton, QTextBrowser, QTextEdit, QLineEdit, QSizePolicy, QCheckBox)
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+                              QPushButton, QTextBrowser, QTextEdit, QLineEdit, QSizePolicy, QCheckBox,
+                              QApplication)
 from PySide6.QtCore import Signal, Qt
+from PySide6.QtGui import QKeySequence
 import markdown
+import re
+
+
+class MarkdownCopyBrowser(QTextBrowser):
+    """
+    QTextBrowser subclass that copies the backing markdown source.
+
+    When the user presses Ctrl+C or uses the context menu to copy, this widget
+    copies the original markdown text rather than the rendered HTML.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._markdown_source = ""
+
+    def set_markdown_source(self, markdown_text: str):
+        """Store the markdown source for copy operations"""
+        self._markdown_source = markdown_text
+
+    def _copy_markdown(self):
+        """Copy the markdown source to clipboard"""
+        if self._markdown_source:
+            QApplication.clipboard().setText(self._markdown_source)
+
+    def keyPressEvent(self, event):
+        """Intercept Ctrl+C to copy markdown"""
+        if event.matches(QKeySequence.Copy):
+            self._copy_markdown()
+        else:
+            super().keyPressEvent(event)
+
+    def contextMenuEvent(self, event):
+        """Override context menu to replace Copy action with markdown copy"""
+        from PySide6.QtWidgets import QMenu
+        from PySide6.QtGui import QAction
+
+        menu = self.createStandardContextMenu()
+
+        # Find and replace the Copy action
+        for action in menu.actions():
+            if action.text().replace('&', '') == 'Copy':
+                # Disconnect original and connect our markdown copy
+                action.triggered.disconnect()
+                action.triggered.connect(self._copy_markdown)
+                break
+
+        menu.exec(event.globalPos())
+        menu.deleteLater()
 
 
 class ExplainTabView(QWidget):
@@ -81,18 +131,19 @@ class ExplainTabView(QWidget):
         parent_layout.addLayout(top_row)
     
     def create_main_text_widget(self, parent_layout):
-        # HTML browser for read-only mode
-        self.explain_browser = QTextBrowser()
+        # HTML browser for read-only mode (uses MarkdownCopyBrowser to copy markdown source)
+        self.explain_browser = MarkdownCopyBrowser()
+        self.explain_browser.set_markdown_source(self.markdown_content)
         self.explain_browser.setHtml(self.markdown_to_html(self.markdown_content))
         self.explain_browser.anchorClicked.connect(self._on_anchor_clicked)
         # Prevent default navigation for custom protocols
         self.explain_browser.setOpenLinks(False)
-        
+
         # Text editor for edit mode
         self.explain_editor = QTextEdit()
         self.explain_editor.setPlainText(self.markdown_content)
         self.explain_editor.hide()  # Hidden by default
-        
+
         parent_layout.addWidget(self.explain_browser)
         parent_layout.addWidget(self.explain_editor)
     
@@ -149,12 +200,25 @@ class ExplainTabView(QWidget):
         if not self.is_edit_mode:
             # Check if user is near the bottom before updating
             should_auto_scroll = self._should_auto_scroll_to_bottom()
-            
+            scrollbar = self.explain_browser.verticalScrollBar()
+            old_value = scrollbar.value() if scrollbar else 0
+
+            # Store markdown source for copy operations
+            self.explain_browser.set_markdown_source(markdown_text)
+
             self.explain_browser.setHtml(self.markdown_to_html(markdown_text))
-            
-            # Auto-scroll to bottom if user was following the explanation
+
+            # Defer scroll restoration until after Qt processes the layout change
+            from PySide6.QtCore import QTimer
             if should_auto_scroll:
-                self._scroll_to_bottom()
+                # Auto-scroll to bottom if user was following the explanation
+                QTimer.singleShot(0, self._scroll_to_bottom)
+            else:
+                # Preserve position if user scrolled away
+                def restore_scroll():
+                    if scrollbar:
+                        scrollbar.setValue(old_value)
+                QTimer.singleShot(0, restore_scroll)
         else:
             self.explain_editor.setPlainText(markdown_text)
     
@@ -215,12 +279,38 @@ class ExplainTabView(QWidget):
     def markdown_to_html(self, markdown_text):
         """Convert Markdown text to HTML for display"""
         try:
-            html = markdown.markdown(markdown_text, extensions=['codehilite', 'fenced_code', 'tables'])
-            
+            # Preprocess to ensure tables are properly parsed
+            preprocessed = self._preprocess_markdown_tables(markdown_text)
+
+            # Preprocess to ensure --- (horizontal rules) have a blank line before them
+            # Without a blank line, markdown interprets the preceding line as a heading
+            preprocessed = self._preprocess_markdown_hrs(preprocessed)
+
+            html = markdown.markdown(preprocessed, extensions=['codehilite', 'fenced_code', 'tables'])
+
+            # Add CSS for table styling and normalize text rendering
+            # Uses semi-transparent colors that work in both light and dark modes
+            table_css = """
+            <style>
+                table { border-collapse: collapse; margin: 10px 0; width: auto; }
+                th, td { border: 1px solid rgba(128, 128, 128, 0.4); padding: 6px 10px; text-align: left; }
+                th { background-color: rgba(128, 128, 128, 0.2); font-weight: bold; }
+                tr:nth-child(even) { background-color: rgba(128, 128, 128, 0.1); }
+                /* Normalize paragraph and text styles to prevent unexpected large text */
+                p { font-size: 12px; margin: 8px 0; }
+                strong { font-size: inherit; }
+                h1 { font-size: 18px; margin: 12px 0 8px 0; }
+                h2 { font-size: 16px; margin: 10px 0 6px 0; }
+                h3 { font-size: 14px; margin: 8px 0 4px 0; }
+                h4, h5, h6 { font-size: 12px; margin: 6px 0 4px 0; }
+            </style>
+            """
+
             # Add RLHF feedback links at the bottom
             feedback_html = self._get_feedback_html()
-            
+
             return f"""
+            {table_css}
             <div style='font-family: Arial, sans-serif; font-size: 12px;'>
                 {html}
                 {feedback_html}
@@ -229,7 +319,58 @@ class ExplainTabView(QWidget):
         except:
             # Fallback if markdown parsing fails
             return f"<pre>{markdown_text}</pre>"
-    
+
+    def _preprocess_markdown_tables(self, text):
+        """
+        Ensure markdown tables have a blank line before them.
+
+        The markdown 'tables' extension requires a blank line before the table
+        for proper parsing. LLMs often output tables immediately after text.
+        """
+        lines = text.split('\n')
+        result = []
+        prev_was_blank = True
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            is_table_line = stripped.startswith('|') and '|' in stripped[1:]
+
+            if is_table_line and not prev_was_blank:
+                if result and not (result[-1].strip().startswith('|') and '|' in result[-1].strip()[1:]):
+                    result.append('')
+
+            result.append(line)
+            prev_was_blank = (stripped == '')
+
+        return '\n'.join(result)
+
+    def _preprocess_markdown_hrs(self, text):
+        """
+        Ensure horizontal rules (---) have a blank line before them.
+
+        In markdown, '---' directly below text turns that text into a heading.
+        For '---' to render as a horizontal rule <hr>, it needs a blank line above.
+        """
+        lines = text.split('\n')
+        result = []
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+
+            # Check if this line is a horizontal rule (---, ***, ___)
+            is_hr = stripped in ('---', '***', '___') or \
+                    (len(stripped) >= 3 and set(stripped) <= {'-', ' '} and stripped.count('-') >= 3) or \
+                    (len(stripped) >= 3 and set(stripped) <= {'*', ' '} and stripped.count('*') >= 3) or \
+                    (len(stripped) >= 3 and set(stripped) <= {'_', ' '} and stripped.count('_') >= 3)
+
+            # If this is an HR and previous line wasn't blank, insert blank line
+            if is_hr and result and result[-1].strip() != '':
+                result.append('')
+
+            result.append(line)
+
+        return '\n'.join(result)
+
     def _get_feedback_html(self):
         """Generate HTML for RLHF feedback thumbs up/down links"""
         return """

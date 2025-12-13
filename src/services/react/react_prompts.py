@@ -101,31 +101,26 @@ If you believe the current task is complete based on previous findings, you may 
 2. **Plan Adaptation**: Based on new findings, should the investigation plan change?
 3. **Readiness Check**: Can you now answer the user's question comprehensively?
 
-**Required Response Format**:
+**Required Response Format** (use plain text, keep label and content on same line):
 
-```
-ASSESSMENT: [Brief review of what you've learned and how it helps answer the objective]
+**Assessment:** [Your assessment here on same line]
 
-PLAN_UPDATES:
-ADD:
-- [New task to add, if any]
-- [Another new task, if needed]
+**Plan Updates:**
+- ADD: [task] (or "None")
+- REMOVE: [task] (or "None")
 
-REMOVE:
-- [Task to remove because it's no longer relevant]
-- [Another task to remove, if any]
+**Decision:** READY or CONTINUE
 
-DECISION: [READY or CONTINUE]
-REASON: [Why you're ready to answer OR what critical gaps remain]
-```
+**Reason:** [Your reason here on same line - do NOT put a newline after "Reason:"]
 
 **Guidelines**:
+- Keep each label and its content on the SAME LINE (e.g., "**Reason:** Because..." not "**Reason:**\\nBecause...")
 - **ADD** new tasks if findings reveal unexpected complexity or new investigation paths
 - **REMOVE** pending tasks that are no longer relevant based on what you've learned
-- If no changes needed, leave ADD/REMOVE sections empty
 - Say **READY** if you have sufficient evidence for a well-supported answer
 - Say **CONTINUE** only if critical information is missing that would significantly improve the answer
-- Focus on answering the question, not completing all todos"""
+- Focus on answering the question, not completing all todos
+- Do NOT use code blocks, backticks, or extra newlines after labels"""
 
     @staticmethod
     def get_synthesis_prompt(objective: str, todos_formatted: str,

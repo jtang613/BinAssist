@@ -194,7 +194,7 @@ class AnalysisDBService:
         """
         Generate consistent hash for binary identification.
 
-        Uses ONLY binary content characteristics (entry point, length, first bytes).
+        Uses SHA256 hash of the actual raw binary file content.
         Does NOT use filename, so hash remains consistent across file renames and BNDB saves.
 
         This is the NEW content-based hash. For legacy filename-based hash, see get_legacy_binary_hash().
@@ -203,41 +203,34 @@ class AnalysisDBService:
             raise ValueError("Binary view is required")
 
         try:
-            # Get entry point
-            entry_point = binary_view.entry_point or 0
+            # Use the raw file content to generate a true SHA256 hash
+            # This ensures different binaries always have different hashes
+            raw_view = binary_view.parent_view if binary_view.parent_view else binary_view
 
-            # Get file length
-            try:
-                if hasattr(binary_view, 'length'):
-                    file_length = binary_view.length
-                elif hasattr(binary_view, 'end'):
-                    file_length = binary_view.end
-                else:
-                    # Fallback: get the highest address from segments
-                    file_length = 0
-                    for segment in binary_view.segments:
-                        if segment.end > file_length:
-                            file_length = segment.end
-            except:
-                file_length = 0
+            # Read the entire raw file content
+            if hasattr(raw_view, 'raw') and raw_view.raw:
+                # If there's a raw view, use it
+                file_data = raw_view.raw.read(0, raw_view.raw.length)
+            elif hasattr(binary_view, 'file') and binary_view.file:
+                # Try to read from the file object
+                file_data = binary_view.file.raw.read(0, binary_view.file.raw.length)
+            else:
+                # Fallback: read from the binary view itself
+                # Use start to end of all segments
+                start = binary_view.start
+                end = binary_view.end
+                file_data = binary_view.read(start, end - start)
 
-            # Create a unique identifier based ONLY on binary content (NOT filename)
-            # Use more bytes (512 instead of 64) for better uniqueness
-            hash_input = f"entry:{entry_point}:length:{file_length}"
+            if file_data:
+                binary_hash = hashlib.sha256(file_data).hexdigest()
+            else:
+                # Ultimate fallback: use entry point and length
+                entry_point = binary_view.entry_point or 0
+                file_length = binary_view.end - binary_view.start if binary_view.end else 0
+                hash_input = f"entry:{entry_point}:length:{file_length}"
+                binary_hash = hashlib.sha256(hash_input.encode()).hexdigest()
 
-            # Add first bytes for uniqueness - use 512 bytes for robust identification
-            try:
-                bytes_to_read = min(512, file_length) if file_length > 0 else 512
-                first_bytes = binary_view.read(0, bytes_to_read)
-                if first_bytes:
-                    hash_input += f":bytes:{first_bytes.hex()}"
-            except:
-                pass
-
-            binary_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:16]
-
-            # Log without filename for privacy/security
-            log.log_debug(f"Generated content-based binary hash: {binary_hash}")
+            log.log_info(f"Generated binary hash: {binary_hash[:16]}...")
             return binary_hash
 
         except Exception as e:

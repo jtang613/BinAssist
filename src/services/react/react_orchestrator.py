@@ -16,6 +16,9 @@ from .findings_cache import FindingsCache
 from .react_prompts import ReActPrompts
 from ..models.react_models import ReActResult, ReActStatus, ReActConfig
 from ..models.llm_models import ToolCall, ToolResult, ChatMessage, ChatRequest, MessageRole
+from ..models.context_models import ContextWindowConfig
+from ..context_window_manager import ContextWindowManager
+from ..llm_providers.base_provider import NetworkError
 
 try:
     import binaryninja
@@ -71,6 +74,15 @@ class ReActOrchestrator:
         # Conversation history (maintained across iterations for context continuity)
         self.conversation_history: List[ChatMessage] = []
 
+        # Context window management - prevents context overflow in long investigations
+        context_config = ContextWindowConfig(
+            context_limit_tokens=self.config.context_window_tokens,
+            threshold_percent=self.config.context_threshold_percent,
+            max_tool_result_tokens=self.config.max_tool_result_tokens,
+            min_recent_tool_pairs=self.config.min_recent_tool_pairs
+        )
+        self.context_manager = ContextWindowManager(llm_provider, context_config)
+
         # Callbacks for progress updates
         self.on_progress: Optional[Callable[[str, int], None]] = None
         self.on_todos_updated: Optional[Callable[[str], None]] = None
@@ -85,6 +97,34 @@ class ReActOrchestrator:
         """Cancel the orchestrator execution"""
         self.cancelled = True
         log.log_info("ReActOrchestrator cancellation requested")
+
+    def _cleanup_orphaned_tool_calls(self):
+        """
+        Clean up any orphaned tool calls in conversation history.
+
+        This is called during error/cancellation handling to ensure the
+        conversation history is in a valid state for potential continuation
+        or for review by the user.
+
+        Delegates to ContextWindowManager for consistent handling of both
+        tool_calls field and native_content blocks.
+        """
+        if not self.conversation_history:
+            return
+
+        # Use the context manager's validation which handles both
+        # tool_calls field AND native_content for tool_use/tool_result blocks
+        cleaned_history = self.context_manager._validate_and_fix_tool_pairs(
+            self.conversation_history
+        )
+
+        if len(cleaned_history) != len(self.conversation_history):
+            log.log_info(
+                f"Cleaned up orphaned tool calls: removed "
+                f"{len(self.conversation_history) - len(cleaned_history)} messages"
+            )
+
+        self.conversation_history = cleaned_history
 
     async def analyze(self, objective: str, initial_context: str = "") -> ReActResult:
         """
@@ -196,11 +236,15 @@ class ReActOrchestrator:
 
         except asyncio.CancelledError:
             log.log_info("ReAct: Analysis cancelled via asyncio")
+            # Clean up any orphaned tool calls before returning
+            self._cleanup_orphaned_tool_calls()
             return ReActResult.cancelled()
         except Exception as e:
             log.log_error(f"ReAct orchestrator error: {e}")
             import traceback
             log.log_error(traceback.format_exc())
+            # Clean up any orphaned tool calls before returning
+            self._cleanup_orphaned_tool_calls()
             return ReActResult.error(str(e))
 
     async def _run_planning(self, objective: str, initial_context: str):
@@ -264,6 +308,18 @@ class ReActOrchestrator:
 
         # Tool calling loop
         while tool_calls and tool_round < max_tool_rounds:
+            # Check for cancellation BEFORE executing tools
+            if self.cancelled:
+                log.log_info("ReAct: Cancellation detected before tool execution")
+                # Remove the last assistant message that has tool calls without results
+                # to prevent orphaned tool calls in conversation history
+                if (self.conversation_history and
+                    self.conversation_history[-1].role == MessageRole.ASSISTANT and
+                    self.conversation_history[-1].tool_calls):
+                    orphaned_msg = self.conversation_history.pop()
+                    log.log_debug(f"Removed orphaned assistant message with {len(orphaned_msg.tool_calls)} tool calls")
+                break
+
             tool_round += 1
             log.log_info(f"ReAct: Tool round {tool_round} with {len(tool_calls)} tool calls")
 
@@ -274,22 +330,49 @@ class ReActOrchestrator:
             # Execute tools
             tool_results = await self._execute_tools(tool_calls, iteration)
 
-            # Add tool results to conversation history
-            for tc, result in zip(tool_calls, tool_results):
+            # Check for cancellation AFTER tool execution but BEFORE adding results
+            if self.cancelled:
+                log.log_info("ReAct: Cancellation detected after tool execution")
+                # Remove the assistant message with tool calls since we won't add results
+                if (self.conversation_history and
+                    self.conversation_history[-1].role == MessageRole.ASSISTANT and
+                    self.conversation_history[-1].tool_calls):
+                    orphaned_msg = self.conversation_history.pop()
+                    log.log_debug(f"Removed orphaned assistant message with {len(orphaned_msg.tool_calls)} tool calls")
+                break
+
+            # Validate tool results match tool calls before adding to history
+            # Build a map of result IDs for validation
+            result_id_map = {r.tool_call_id: r for r in tool_results}
+
+            # Add tool results to conversation history (with truncation for large results)
+            for tc in tool_calls:
+                # Find matching result by tool_call_id (not by position)
+                result = result_id_map.get(tc.id)
+                if result is None:
+                    log.log_warn(f"No result found for tool call {tc.id} ({tc.name}), creating error result")
+                    content = f"Error: No result returned for tool call"
+                else:
+                    content = result.content if not result.error else f"Error: {result.error}"
+
+                # Truncate oversized tool results to prevent context overflow
+                content = self.context_manager.truncate_tool_result(content)
+
                 tool_message = ChatMessage(
                     role=MessageRole.TOOL,
-                    content=result.content if not result.error else f"Error: {result.error}",
+                    content=content,
                     tool_call_id=tc.id,
                     name=tc.name
                 )
                 self.conversation_history.append(tool_message)
 
             # Store findings from tool results
-            for tc, result in zip(tool_calls, tool_results):
+            for tc in tool_calls:
                 # Track tool used
                 self.todo_manager.add_tool_used(tc.name)
 
-                if not result.error:
+                result = result_id_map.get(tc.id)
+                if result and not result.error:
                     self.findings.extract_from_tool_output(tc.name, result.content, iteration)
                     if self.on_finding:
                         preview = result.content[:100] + "..." if len(result.content) > 100 else result.content
@@ -379,38 +462,50 @@ class ReActOrchestrator:
         Returns:
             (new_tasks, tasks_to_remove, is_ready)
         """
+        import re
+
         new_tasks = []
         tasks_to_remove = []
         is_ready = False
 
-        # Check decision
+        # Check decision (case-insensitive)
         response_upper = response.upper()
-        if "DECISION:" in response_upper and "READY" in response_upper.split("DECISION:")[1].split("\n")[0]:
-            is_ready = True
+        if "DECISION:" in response_upper:
+            decision_part = response_upper.split("DECISION:")[1].split("\n")[0]
+            if "READY" in decision_part:
+                is_ready = True
 
-        # Extract ADD section
-        if "ADD:" in response:
-            add_section = response.split("ADD:")[1]
-            if "REMOVE:" in add_section:
-                add_section = add_section.split("REMOVE:")[0]
-            elif "DECISION:" in add_section:
-                add_section = add_section.split("DECISION:")[0]
+        # Extract ADD section (case-insensitive search, but preserve original for parsing)
+        add_match = re.search(r'(?:^|\n)\s*[-*]?\s*ADD:', response, re.IGNORECASE)
+        if add_match:
+            add_section = response[add_match.end():]
+            # Find end of ADD section (REMOVE, DECISION, or next major section)
+            end_match = re.search(r'(?:^|\n)\s*[-*]?\s*(?:REMOVE:|DECISION:|\*\*Decision)', add_section, re.IGNORECASE)
+            if end_match:
+                add_section = add_section[:end_match.start()]
 
-            # Parse bullet points in ADD section
-            import re
+            # Parse bullet points or comma-separated items, filter out "None"
             add_matches = re.findall(r'^\s*[-*]\s*(.+?)$', add_section, re.MULTILINE)
-            new_tasks = [task.strip() for task in add_matches if task.strip() and len(task.strip()) > 5]
+            new_tasks = [
+                task.strip() for task in add_matches
+                if task.strip() and len(task.strip()) > 5 and task.strip().lower() != 'none'
+            ]
 
-        # Extract REMOVE section
-        if "REMOVE:" in response:
-            remove_section = response.split("REMOVE:")[1]
-            if "DECISION:" in remove_section:
-                remove_section = remove_section.split("DECISION:")[0]
+        # Extract REMOVE section (case-insensitive)
+        remove_match = re.search(r'(?:^|\n)\s*[-*]?\s*REMOVE:', response, re.IGNORECASE)
+        if remove_match:
+            remove_section = response[remove_match.end():]
+            # Find end of REMOVE section
+            end_match = re.search(r'(?:^|\n)\s*[-*]?\s*(?:DECISION:|\*\*Decision|\*\*Reason)', remove_section, re.IGNORECASE)
+            if end_match:
+                remove_section = remove_section[:end_match.start()]
 
-            # Parse bullet points in REMOVE section
-            import re
+            # Parse bullet points, filter out "None"
             remove_matches = re.findall(r'^\s*[-*]\s*(.+?)$', remove_section, re.MULTILINE)
-            tasks_to_remove = [task.strip() for task in remove_matches if task.strip() and len(task.strip()) > 5]
+            tasks_to_remove = [
+                task.strip() for task in remove_matches
+                if task.strip() and len(task.strip()) > 5 and task.strip().lower() != 'none'
+            ]
 
         log.log_debug(f"ReAct: Parsed reflection - new_tasks={len(new_tasks)}, remove={len(tasks_to_remove)}, ready={is_ready}")
 
@@ -448,43 +543,82 @@ class ReActOrchestrator:
         user_message = ChatMessage(role=MessageRole.USER, content=prompt)
         self.conversation_history.append(user_message)
 
-        # Use full conversation history for context continuity
+        # Check and manage context window before LLM call
+        # This also validates tool pairs and removes orphans
+        managed_history = await self.context_manager.check_and_manage(
+            self.conversation_history,
+            tools=None  # No tools for this call
+        )
+
+        # Always update our reference if the managed history differs
+        # (could be from compression OR from orphan removal)
+        if managed_history is not self.conversation_history:
+            if len(managed_history) != len(self.conversation_history):
+                log.log_info(
+                    f"ReAct: Context managed from {len(self.conversation_history)} "
+                    f"to {len(managed_history)} messages"
+                )
+            self.conversation_history = managed_history
+
+        # Use managed conversation history for context continuity
         request = ChatRequest(
-            messages=self.conversation_history.copy(),
+            messages=managed_history,
             model=self.llm_provider.model if hasattr(self.llm_provider, 'model') else '',
             max_tokens=4096,
             temperature=0.7,
             stream=True
         )
 
-        try:
-            # Stream the response and accumulate chunks
-            accumulated = ""
-            native_content = None
+        # Retry loop for transient network errors
+        last_error = None
+        for attempt in range(self.config.max_retries + 1):
+            try:
+                # Stream the response and accumulate chunks
+                accumulated = ""
+                native_content = None
 
-            async for chunk in self.llm_provider.chat_completion_stream(request):
-                if chunk.content:
-                    accumulated += chunk.content
-                    # Emit content chunks for UI updates (unless suppressed)
+                async for chunk in self.llm_provider.chat_completion_stream(request):
+                    if chunk.content:
+                        accumulated += chunk.content
+                        # Emit content chunks for UI updates (unless suppressed)
+                        if emit_content and self.on_content:
+                            self.on_content(chunk.content)
+
+                    # Capture native_content from final chunk (e.g., Anthropic thinking blocks)
+                    if hasattr(chunk, 'native_content') and chunk.native_content:
+                        native_content = chunk.native_content
+
+                # Add assistant response to conversation history for context continuity
+                assistant_message = ChatMessage(
+                    role=MessageRole.ASSISTANT,
+                    content=accumulated,
+                    native_content=native_content
+                )
+                self.conversation_history.append(assistant_message)
+
+                return accumulated
+
+            except NetworkError as e:
+                last_error = e
+                if attempt < self.config.max_retries:
+                    delay = self.config.retry_delay * (2 ** attempt)
+                    log.log_warn(
+                        f"ReAct: Network error (attempt {attempt + 1}/{self.config.max_retries + 1}), "
+                        f"retrying in {delay}s: {e}"
+                    )
                     if emit_content and self.on_content:
-                        self.on_content(chunk.content)
+                        self.on_content(f"\n\n*Network timeout, retrying in {delay:.0f}s...*\n\n")
+                    await asyncio.sleep(delay)
+                else:
+                    log.log_error(f"ReAct: Network error after {self.config.max_retries + 1} attempts: {e}")
+                    raise
 
-                # Capture native_content from final chunk (e.g., Anthropic thinking blocks)
-                if hasattr(chunk, 'native_content') and chunk.native_content:
-                    native_content = chunk.native_content
+            except Exception as e:
+                log.log_error(f"ReAct: LLM call failed: {e}")
+                raise
 
-            # Add assistant response to conversation history for context continuity
-            assistant_message = ChatMessage(
-                role=MessageRole.ASSISTANT,
-                content=accumulated,
-                native_content=native_content
-            )
-            self.conversation_history.append(assistant_message)
-
-            return accumulated
-        except Exception as e:
-            log.log_error(f"ReAct: LLM call failed: {e}")
-            raise
+        # Should not reach here, but just in case
+        raise last_error
 
     async def _call_llm_with_tools(self, prompt: str = "") -> tuple:
         """
@@ -501,9 +635,27 @@ class ReActOrchestrator:
             user_message = ChatMessage(role=MessageRole.USER, content=prompt)
             self.conversation_history.append(user_message)
 
-        # Use full conversation history for context continuity
+        # Check and manage context window before LLM call
+        # This prevents context overflow by summarizing older messages when needed
+        # Also validates tool pairs and removes orphans
+        managed_history = await self.context_manager.check_and_manage(
+            self.conversation_history,
+            tools=self.mcp_tools
+        )
+
+        # Always update our reference if the managed history differs
+        # (could be from compression OR from orphan removal)
+        if managed_history is not self.conversation_history:
+            if len(managed_history) != len(self.conversation_history):
+                log.log_info(
+                    f"ReAct: Context managed from {len(self.conversation_history)} "
+                    f"to {len(managed_history)} messages"
+                )
+            self.conversation_history = managed_history
+
+        # Use managed conversation history for context continuity
         request = ChatRequest(
-            messages=self.conversation_history.copy(),
+            messages=managed_history,
             model=self.llm_provider.model if hasattr(self.llm_provider, 'model') else '',
             max_tokens=4096,
             temperature=0.7,
@@ -511,40 +663,69 @@ class ReActOrchestrator:
             tools=self.mcp_tools if self.mcp_tools else None
         )
 
-        try:
-            # Stream the response and accumulate chunks
-            accumulated = ""
-            final_tool_calls = []
-            native_content = None
+        # Retry loop for transient network errors
+        last_error = None
+        for attempt in range(self.config.max_retries + 1):
+            try:
+                # Stream the response and accumulate chunks
+                accumulated = ""
+                final_tool_calls = []
+                native_content = None
 
-            async for chunk in self.llm_provider.chat_completion_stream(request):
-                if chunk.content:
-                    accumulated += chunk.content
-                    # Emit content chunks for UI updates
+                async for chunk in self.llm_provider.chat_completion_stream(request):
+                    if chunk.content:
+                        accumulated += chunk.content
+                        # Emit content chunks for UI updates
+                        if self.on_content:
+                            self.on_content(chunk.content)
+
+                    # Tool calls come in the final chunk
+                    if hasattr(chunk, 'tool_calls') and chunk.tool_calls:
+                        final_tool_calls = chunk.tool_calls
+
+                    # Capture native_content from final chunk (e.g., Anthropic thinking blocks)
+                    if hasattr(chunk, 'native_content') and chunk.native_content:
+                        native_content = chunk.native_content
+
+                # Add assistant response to conversation history (with tool calls if any)
+                assistant_message = ChatMessage(
+                    role=MessageRole.ASSISTANT,
+                    content=accumulated,
+                    tool_calls=final_tool_calls if final_tool_calls else None,
+                    native_content=native_content
+                )
+                self.conversation_history.append(assistant_message)
+
+                return accumulated, final_tool_calls
+
+            except NetworkError as e:
+                last_error = e
+                if attempt < self.config.max_retries:
+                    delay = self.config.retry_delay * (2 ** attempt)
+                    log.log_warn(
+                        f"ReAct: Network error (attempt {attempt + 1}/{self.config.max_retries + 1}), "
+                        f"retrying in {delay}s: {e}"
+                    )
                     if self.on_content:
-                        self.on_content(chunk.content)
+                        self.on_content(f"\n\n*Network timeout, retrying in {delay:.0f}s...*\n\n")
+                    await asyncio.sleep(delay)
+                else:
+                    log.log_error(f"ReAct: Network error after {self.config.max_retries + 1} attempts: {e}")
+                    # Don't raise - return a message to the LLM about the timeout
+                    error_msg = (
+                        f"The LLM request timed out after {self.config.max_retries + 1} attempts. "
+                        "Please try a simpler query or try again later."
+                    )
+                    if self.on_content:
+                        self.on_content(f"\n\n*{error_msg}*\n\n")
+                    raise
 
-                # Tool calls come in the final chunk
-                if hasattr(chunk, 'tool_calls') and chunk.tool_calls:
-                    final_tool_calls = chunk.tool_calls
+            except Exception as e:
+                log.log_error(f"ReAct: LLM call with tools failed: {e}")
+                raise
 
-                # Capture native_content from final chunk (e.g., Anthropic thinking blocks)
-                if hasattr(chunk, 'native_content') and chunk.native_content:
-                    native_content = chunk.native_content
-
-            # Add assistant response to conversation history (with tool calls if any)
-            assistant_message = ChatMessage(
-                role=MessageRole.ASSISTANT,
-                content=accumulated,
-                tool_calls=final_tool_calls if final_tool_calls else None,
-                native_content=native_content
-            )
-            self.conversation_history.append(assistant_message)
-
-            return accumulated, final_tool_calls
-        except Exception as e:
-            log.log_error(f"ReAct: LLM call with tools failed: {e}")
-            raise
+        # Should not reach here, but just in case
+        raise last_error
 
     async def _execute_tools(self, tool_calls: List[ToolCall], iteration: int) -> List[ToolResult]:
         """Execute tool calls via MCP orchestrator"""

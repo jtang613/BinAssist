@@ -17,6 +17,11 @@ try:
 except ImportError:
     raise ImportError("anthropic package not available. Install with: pip install anthropic")
 
+try:
+    import httpx
+except ImportError:
+    httpx = None  # Will handle timeout errors generically
+
 from .base_provider import (
     BaseLLMProvider, APIProviderError, AuthenticationError, 
     RateLimitError, NetworkError
@@ -593,6 +598,12 @@ class AnthropicProvider(BaseLLMProvider):
             # Catch-all for other API errors
             raise APIProviderError(f"Anthropic API error: {e}")
         except Exception as e:
+            # Check for httpx timeout errors that may not be wrapped
+            error_str = str(e).lower()
+            if httpx and isinstance(e, (httpx.ReadTimeout, httpx.WriteTimeout, httpx.ConnectTimeout)):
+                raise NetworkError(f"Request timeout: {e}")
+            elif 'timeout' in error_str or 'timed out' in error_str:
+                raise NetworkError(f"Request timeout: {e}")
             raise APIProviderError(f"Unexpected error during streaming: {e}")
     
     async def generate_embeddings(self, request: EmbeddingRequest) -> EmbeddingResponse:
@@ -669,7 +680,73 @@ class AnthropicProvider(BaseLLMProvider):
     def get_provider_type(self) -> ProviderType:
         """Get the provider type for this provider"""
         return ProviderType.ANTHROPIC
-    
+
+    async def count_tokens(self, request: ChatRequest) -> int:
+        """
+        Count tokens for a chat request using Anthropic's native token counting API.
+
+        This provides accurate token counts for Claude models, accounting for
+        message formatting, tool definitions, and system prompts.
+
+        Args:
+            request: Chat request to count tokens for
+
+        Returns:
+            Actual token count from Anthropic API
+
+        Note:
+            Falls back to character-based estimation if API call fails.
+        """
+        try:
+            # Prepare messages in Anthropic format
+            anthropic_messages = self._prepare_messages(request.messages)
+
+            # Extract system message
+            system_message = self._extract_system_message(request.messages)
+
+            # Prepare tools if present
+            anthropic_tools = None
+            if request.tools:
+                anthropic_tools = self._convert_tools_to_anthropic(request.tools)
+
+            # Build count_tokens request
+            count_params = {
+                "model": request.model or self.model,
+                "messages": anthropic_messages,
+            }
+
+            if system_message:
+                count_params["system"] = system_message
+
+            if anthropic_tools:
+                count_params["tools"] = anthropic_tools
+
+            # Call Anthropic's count_tokens API
+            # Use asyncio.to_thread since the Anthropic client is synchronous
+            response = await asyncio.to_thread(
+                self._client.messages.count_tokens,
+                **count_params
+            )
+
+            token_count = response.input_tokens
+            log.log_debug(f"Anthropic token count: {token_count} tokens")
+            return token_count
+
+        except anthropic.BadRequestError as e:
+            # API validation error - fall back to estimation
+            log.log_warn(f"Anthropic count_tokens failed (bad request): {e}. Using estimation.")
+            return await super().count_tokens(request)
+
+        except anthropic.APIError as e:
+            # General API error - fall back to estimation
+            log.log_warn(f"Anthropic count_tokens API error: {e}. Using estimation.")
+            return await super().count_tokens(request)
+
+        except Exception as e:
+            # Unexpected error - fall back to estimation
+            log.log_warn(f"Anthropic count_tokens failed: {e}. Using estimation.")
+            return await super().count_tokens(request)
+
     def format_tool_results_for_continuation(self, tool_calls: List[ToolCall], tool_results: List[str]) -> List[Dict[str, Any]]:
         """
         Format tool execution results for Anthropic conversation continuation.

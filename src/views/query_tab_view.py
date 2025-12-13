@@ -1,11 +1,60 @@
 #!/usr/bin/env python3
 
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                               QTextBrowser, QTextEdit, QLineEdit, QTableWidget, QTableWidgetItem,
-                              QSplitter, QPlainTextEdit, QHeaderView, QAbstractItemView, QSizePolicy, QCheckBox)
+                              QSplitter, QPlainTextEdit, QHeaderView, QAbstractItemView, QSizePolicy, QCheckBox,
+                              QApplication)
 from PySide6.QtCore import Signal, Qt, QDateTime
 from PySide6.QtGui import QKeySequence
 import markdown
+import re
+
+
+class MarkdownCopyBrowser(QTextBrowser):
+    """
+    QTextBrowser subclass that copies the backing markdown source.
+
+    When the user presses Ctrl+C or uses the context menu to copy, this widget
+    copies the original markdown text rather than the rendered HTML.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._markdown_source = ""
+
+    def set_markdown_source(self, markdown_text: str):
+        """Store the markdown source for copy operations"""
+        self._markdown_source = markdown_text
+
+    def _copy_markdown(self):
+        """Copy the markdown source to clipboard"""
+        if self._markdown_source:
+            QApplication.clipboard().setText(self._markdown_source)
+
+    def keyPressEvent(self, event):
+        """Intercept Ctrl+C to copy markdown"""
+        if event.matches(QKeySequence.Copy):
+            self._copy_markdown()
+        else:
+            super().keyPressEvent(event)
+
+    def contextMenuEvent(self, event):
+        """Override context menu to replace Copy action with markdown copy"""
+        from PySide6.QtWidgets import QMenu
+        from PySide6.QtGui import QAction
+
+        menu = self.createStandardContextMenu()
+
+        # Find and replace the Copy action
+        for action in menu.actions():
+            if action.text().replace('&', '') == 'Copy':
+                # Disconnect original and connect our markdown copy
+                action.triggered.disconnect()
+                action.triggered.connect(self._copy_markdown)
+                break
+
+        menu.exec(event.globalPos())
+        menu.deleteLater()
 
 
 class QueryTabView(QWidget):
@@ -114,13 +163,19 @@ class QueryTabView(QWidget):
         parent_layout.addLayout(top_row)
     
     def create_main_text_widget(self):
-        # HTML browser for read-only mode
-        self.query_browser = QTextBrowser()
+        # HTML browser for read-only mode (uses MarkdownCopyBrowser to copy markdown source)
+        self.query_browser = MarkdownCopyBrowser()
+        self.query_browser.set_markdown_source(self.markdown_content)
         self.query_browser.setHtml(self.markdown_to_html(self.markdown_content))
         self.query_browser.anchorClicked.connect(self._on_anchor_clicked)
         # Prevent default navigation for custom protocols
         self.query_browser.setOpenLinks(False)
-        
+
+        # Track user scroll actions to detect when they scroll away from bottom
+        self._auto_scroll_enabled = True
+        self._programmatic_scroll = False  # Flag to ignore our own scroll commands
+        self.query_browser.verticalScrollBar().valueChanged.connect(self._on_scroll_changed)
+
         # Text editor for edit mode
         self.query_editor = QTextEdit()
         self.query_editor.setPlainText(self.markdown_content)
@@ -379,17 +434,39 @@ class QueryTabView(QWidget):
     def set_chat_content(self, markdown_text):
         """Set the chat content (in Markdown format)"""
         self.markdown_content = markdown_text
-        
+
         if not self.is_edit_mode:
-            # Check if user is near the bottom before updating
-            should_auto_scroll = self._should_auto_scroll_to_bottom()
-            
+            # Save scroll position before updating
+            scrollbar = self.query_browser.verticalScrollBar()
+            old_value = scrollbar.value() if scrollbar else 0
+            should_auto_scroll = self._auto_scroll_enabled
+
+            # Set flag to ignore scroll events during the entire update cycle
+            # This stays True until after the deferred scroll completes
+            self._programmatic_scroll = True
+
+            # Store markdown source for copy operations
+            self.query_browser.set_markdown_source(markdown_text)
+
             html_content = self.markdown_to_html(markdown_text)
             self.query_browser.setHtml(html_content)
-            
-            # Auto-scroll to bottom if user was following the conversation
+
+            # Defer scroll restoration until after Qt processes the layout change
+            # This ensures scrollbar.maximum() reflects the new content size
+            from PySide6.QtCore import QTimer
             if should_auto_scroll:
-                self._scroll_to_bottom()
+                # User wants to follow new content - scroll to bottom
+                def scroll_to_bottom():
+                    scrollbar.setValue(scrollbar.maximum())
+                    self._programmatic_scroll = False
+                QTimer.singleShot(0, scroll_to_bottom)
+            else:
+                # User is reading elsewhere - preserve absolute position
+                def restore_scroll():
+                    if scrollbar:
+                        scrollbar.setValue(old_value)
+                    self._programmatic_scroll = False
+                QTimer.singleShot(0, restore_scroll)
         else:
             self.query_editor.setPlainText(markdown_text)
     
@@ -404,42 +481,93 @@ class QueryTabView(QWidget):
         self.chat_counter += 1
         return f"Chat {self.chat_counter}"
     
-    def _should_auto_scroll_to_bottom(self):
-        """Check if we should auto-scroll to bottom (user is following the conversation)"""
-        if not hasattr(self, 'query_browser'):
-            return True
-            
+    def _on_scroll_changed(self, value):
+        """
+        Handle scroll position changes to detect user-initiated scrolling.
+
+        When streaming content, we want to:
+        - Auto-scroll to bottom if user hasn't manually scrolled away
+        - Stop auto-scrolling if user scrolls up to read earlier content
+        - Resume auto-scrolling if user scrolls back to bottom
+        """
+        # Ignore scroll changes we initiated programmatically
+        if self._programmatic_scroll:
+            return
+
         scrollbar = self.query_browser.verticalScrollBar()
         if not scrollbar:
-            return True
-            
-        # Check if user is near the bottom (within 50 pixels)
-        current_pos = scrollbar.value()
+            return
+
         max_pos = scrollbar.maximum()
-        
-        # If there's no content to scroll, always auto-scroll
+
+        # No content to scroll - stay in auto-scroll mode
         if max_pos <= 0:
-            return True
-            
-        # User is considered "following" if they're within 50px of bottom
-        return (max_pos - current_pos) <= 50
-    
+            return
+
+        # Check if user is near bottom (within 50px)
+        at_bottom = (max_pos - value) <= 50
+
+        # Update auto-scroll state based on where user scrolled
+        # If they scrolled to bottom, enable auto-scroll
+        # If they scrolled away from bottom, disable auto-scroll
+        self._auto_scroll_enabled = at_bottom
+
+    def enable_auto_scroll(self):
+        """Enable auto-scrolling (call when starting a new query)"""
+        self._auto_scroll_enabled = True
+
+    def is_auto_scroll_enabled(self):
+        """Check if auto-scroll is currently enabled"""
+        return getattr(self, '_auto_scroll_enabled', True)
+
     def _scroll_to_bottom(self):
-        """Scroll the text browser to the bottom"""
+        """Scroll the text browser to the bottom (programmatically)"""
         if hasattr(self, 'query_browser'):
             scrollbar = self.query_browser.verticalScrollBar()
             if scrollbar:
+                # Set flag to ignore this scroll in our handler
+                self._programmatic_scroll = True
                 scrollbar.setValue(scrollbar.maximum())
+                self._programmatic_scroll = False
     
     def markdown_to_html(self, markdown_text):
         """Convert Markdown text to HTML for display"""
         try:
-            html = markdown.markdown(markdown_text, extensions=['codehilite', 'fenced_code', 'tables', 'sane_lists', 'nl2br'])
-            
+            # Preprocess to ensure tables are properly parsed
+            # The 'tables' extension requires a blank line before the table,
+            # but LLMs often output tables without one. The 'nl2br' extension
+            # converts newlines to <br> before 'tables' can parse them.
+            preprocessed = self._preprocess_markdown_tables(markdown_text)
+
+            # Preprocess to ensure --- (horizontal rules) have a blank line before them
+            # Without a blank line, markdown interprets the preceding line as a heading
+            preprocessed = self._preprocess_markdown_hrs(preprocessed)
+
+            html = markdown.markdown(preprocessed, extensions=['codehilite', 'fenced_code', 'tables', 'sane_lists', 'nl2br'])
+
+            # Add CSS for table styling and normalize text rendering
+            # Uses semi-transparent colors that work in both light and dark modes
+            table_css = """
+            <style>
+                table { border-collapse: collapse; margin: 10px 0; width: auto; }
+                th, td { border: 1px solid rgba(128, 128, 128, 0.4); padding: 6px 10px; text-align: left; }
+                th { background-color: rgba(128, 128, 128, 0.2); font-weight: bold; }
+                tr:nth-child(even) { background-color: rgba(128, 128, 128, 0.1); }
+                /* Normalize paragraph and text styles to prevent unexpected large text */
+                p { font-size: 12px; margin: 8px 0; }
+                strong { font-size: inherit; }
+                h1 { font-size: 18px; margin: 12px 0 8px 0; }
+                h2 { font-size: 16px; margin: 10px 0 6px 0; }
+                h3 { font-size: 14px; margin: 8px 0 4px 0; }
+                h4, h5, h6 { font-size: 12px; margin: 6px 0 4px 0; }
+            </style>
+            """
+
             # Add RLHF feedback links at the bottom
             feedback_html = self._get_feedback_html()
-            
+
             return f"""
+            {table_css}
             <div style='font-family: Arial, sans-serif; font-size: 12px;'>
                 {html}
                 {feedback_html}
@@ -448,7 +576,64 @@ class QueryTabView(QWidget):
         except:
             # Fallback if markdown parsing fails
             return f"<pre>{markdown_text}</pre>"
-    
+
+    def _preprocess_markdown_tables(self, text):
+        """
+        Ensure markdown tables have a blank line before them.
+
+        The markdown 'tables' extension requires a blank line before the table
+        for proper parsing. LLMs often output tables immediately after text.
+        This preprocessor detects table starts and ensures proper spacing.
+        """
+        lines = text.split('\n')
+        result = []
+        prev_was_blank = True  # Start as if there was a blank line
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+
+            # Detect if this line starts a table (starts with | and contains |)
+            is_table_line = stripped.startswith('|') and '|' in stripped[1:]
+
+            # If this is a table line and previous wasn't blank or a table line,
+            # insert a blank line before it
+            if is_table_line and not prev_was_blank:
+                # Check if previous line was also a table line
+                if result and not (result[-1].strip().startswith('|') and '|' in result[-1].strip()[1:]):
+                    result.append('')
+
+            result.append(line)
+            prev_was_blank = (stripped == '')
+
+        return '\n'.join(result)
+
+    def _preprocess_markdown_hrs(self, text):
+        """
+        Ensure horizontal rules (---) have a blank line before them.
+
+        In markdown, '---' directly below text turns that text into a heading.
+        For '---' to render as a horizontal rule <hr>, it needs a blank line above.
+        """
+        lines = text.split('\n')
+        result = []
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+
+            # Check if this line is a horizontal rule (---, ***, ___)
+            is_hr = stripped in ('---', '***', '___') or \
+                    (len(stripped) >= 3 and set(stripped) <= {'-', ' '} and stripped.count('-') >= 3) or \
+                    (len(stripped) >= 3 and set(stripped) <= {'*', ' '} and stripped.count('*') >= 3) or \
+                    (len(stripped) >= 3 and set(stripped) <= {'_', ' '} and stripped.count('_') >= 3)
+
+            # If this is an HR and previous line wasn't blank, insert blank line
+            if is_hr and result and result[-1].strip() != '':
+                result.append('')
+
+            result.append(line)
+
+        return '\n'.join(result)
+
     def _get_feedback_html(self):
         """Generate HTML for RLHF feedback thumbs up/down links"""
         return """
