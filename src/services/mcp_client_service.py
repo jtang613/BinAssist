@@ -13,6 +13,12 @@ import threading
 import time
 from typing import Dict, List, Optional, Any
 
+try:
+    import anyio
+    ANYIO_AVAILABLE = True
+except ImportError:
+    ANYIO_AVAILABLE = False
+
 from .settings_service import SettingsService
 from .models.mcp_models import (
     MCPConfig, MCPServerConfig, MCPTool, MCPResource, 
@@ -218,35 +224,33 @@ class MCPClientService:
         log.log_info(f"Testing connection to MCP server: {server_config.name}")
         
         try:
-            # Use thread executor to run async test
-            try:
-                # Check if we're in an event loop
-                current_loop = asyncio.get_running_loop()
-                
-                # Run in new thread with new event loop
-                def run_test():
-                    new_loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(new_loop)
-                    try:
-                        return new_loop.run_until_complete(self._test_server_connection_async(server_config))
-                    finally:
-                        new_loop.close()
-                
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(run_test)
-                    result = future.result(timeout=60)  # 60 second timeout
-                    return result
-                    
-            except RuntimeError:
-                # No loop running, create new one
+            # Use anyio.run() to properly handle MCP's anyio-based async code
+            # This ensures cancel scopes and other anyio internals work correctly
+            if ANYIO_AVAILABLE:
+                # anyio.run() creates a proper anyio event loop context
+                def run_test_with_anyio():
+                    return anyio.run(self._test_server_connection_async, server_config)
+
+                try:
+                    # Check if we're already in an event loop
+                    asyncio.get_running_loop()
+                    # We're in an event loop, run in separate thread to avoid nesting
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        future = executor.submit(run_test_with_anyio)
+                        return future.result(timeout=60)
+                except RuntimeError:
+                    # No loop running, can run directly with anyio
+                    return anyio.run(self._test_server_connection_async, server_config)
+            else:
+                # Fallback to raw asyncio (may have issues with anyio-based MCP)
+                log.log_warn("anyio not available, falling back to raw asyncio")
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 try:
-                    result = loop.run_until_complete(self._test_server_connection_async(server_config))
-                    return result
+                    return loop.run_until_complete(self._test_server_connection_async(server_config))
                 finally:
                     loop.close()
-                    
+
         except Exception as e:
             log.log_error(f"Exception in test_server_connection: {e}")
             return MCPTestResult.failure_result(str(e))
