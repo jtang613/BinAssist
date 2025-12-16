@@ -117,9 +117,9 @@ If you believe the current task is complete based on previous findings, you may 
 - Keep each label and its content on the SAME LINE (e.g., "**Reason:** Because..." not "**Reason:**\\nBecause...")
 - **ADD** new tasks if findings reveal unexpected complexity or new investigation paths
 - **REMOVE** pending tasks that are no longer relevant based on what you've learned
-- Say **READY** if you have sufficient evidence for a well-supported answer
-- Say **CONTINUE** only if critical information is missing that would significantly improve the answer
-- Focus on answering the question, not completing all todos
+- Say **CONTINUE** if there are pending tasks that would provide valuable information
+- Say **READY** only if ALL planned tasks are complete OR remaining tasks would not meaningfully improve the answer
+- Completing investigation tasks thoroughly leads to better answers
 - Do NOT use code blocks, backticks, or extra newlines after labels"""
 
     @staticmethod

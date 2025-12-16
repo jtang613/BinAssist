@@ -431,6 +431,12 @@ class ReActOrchestrator:
             if changes_made:
                 log.log_info(f"ReAct: Plan updated - added {len(new_tasks)} tasks, removed {len(tasks_to_remove)} tasks")
 
+                # Grant extra iterations for newly added tasks (2 per task)
+                if new_tasks:
+                    extra_iterations = len(new_tasks) * 2
+                    self.config.max_iterations += extra_iterations
+                    log.log_info(f"ReAct: Extended max_iterations by {extra_iterations} for {len(new_tasks)} new task(s)")
+
                 # Emit updated todo list
                 if self.on_todos_updated:
                     self.on_todos_updated(self.todo_manager.format_for_prompt())
@@ -475,37 +481,22 @@ class ReActOrchestrator:
             if "READY" in decision_part:
                 is_ready = True
 
-        # Extract ADD section (case-insensitive search, but preserve original for parsing)
-        add_match = re.search(r'(?:^|\n)\s*[-*]?\s*ADD:', response, re.IGNORECASE)
-        if add_match:
-            add_section = response[add_match.end():]
-            # Find end of ADD section (REMOVE, DECISION, or next major section)
-            end_match = re.search(r'(?:^|\n)\s*[-*]?\s*(?:REMOVE:|DECISION:|\*\*Decision)', add_section, re.IGNORECASE)
-            if end_match:
-                add_section = add_section[:end_match.start()]
+        # Extract all ADD entries directly - match "- ADD: [task]" patterns
+        # This correctly handles multiple ADD lines without losing the first task
+        add_pattern = r'[-*]\s*ADD:\s*(.+?)(?:\n|$)'
+        add_matches = re.findall(add_pattern, response, re.IGNORECASE)
+        new_tasks = [
+            task.strip() for task in add_matches
+            if task.strip() and len(task.strip()) > 5 and task.strip().lower() != 'none'
+        ]
 
-            # Parse bullet points or comma-separated items, filter out "None"
-            add_matches = re.findall(r'^\s*[-*]\s*(.+?)$', add_section, re.MULTILINE)
-            new_tasks = [
-                task.strip() for task in add_matches
-                if task.strip() and len(task.strip()) > 5 and task.strip().lower() != 'none'
-            ]
-
-        # Extract REMOVE section (case-insensitive)
-        remove_match = re.search(r'(?:^|\n)\s*[-*]?\s*REMOVE:', response, re.IGNORECASE)
-        if remove_match:
-            remove_section = response[remove_match.end():]
-            # Find end of REMOVE section
-            end_match = re.search(r'(?:^|\n)\s*[-*]?\s*(?:DECISION:|\*\*Decision|\*\*Reason)', remove_section, re.IGNORECASE)
-            if end_match:
-                remove_section = remove_section[:end_match.start()]
-
-            # Parse bullet points, filter out "None"
-            remove_matches = re.findall(r'^\s*[-*]\s*(.+?)$', remove_section, re.MULTILINE)
-            tasks_to_remove = [
-                task.strip() for task in remove_matches
-                if task.strip() and len(task.strip()) > 5 and task.strip().lower() != 'none'
-            ]
+        # Extract all REMOVE entries directly - match "- REMOVE: [task]" patterns
+        remove_pattern = r'[-*]\s*REMOVE:\s*(.+?)(?:\n|$)'
+        remove_matches = re.findall(remove_pattern, response, re.IGNORECASE)
+        tasks_to_remove = [
+            task.strip() for task in remove_matches
+            if task.strip() and len(task.strip()) > 5 and task.strip().lower() != 'none'
+        ]
 
         log.log_debug(f"ReAct: Parsed reflection - new_tasks={len(new_tasks)}, remove={len(tasks_to_remove)}, ready={is_ready}")
 

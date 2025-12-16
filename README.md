@@ -249,7 +249,6 @@ anthropic              # LLM API communication
 openai                 # LLM API communication
 pysqlite3              # Database operations
 markdown               # Documentation formatting  
-whoosh                 # RAG document store
 mcp                    # MCP client
 ```
 

@@ -86,7 +86,7 @@ class ReActConfig:
     max_iterations: int = 15
     tool_timeout: float = 30.0
     reflection_enabled: bool = True
-    min_findings_for_ready: int = 2
+    min_findings_for_ready: int = 5
 
     # Context window management settings
     context_window_tokens: int = 150000  # Conservative limit for Anthropic models

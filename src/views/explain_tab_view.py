@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                               QPushButton, QTextBrowser, QTextEdit, QLineEdit, QSizePolicy, QCheckBox,
                               QApplication)
 from PySide6.QtCore import Signal, Qt
-from PySide6.QtGui import QKeySequence
+from PySide6.QtGui import QKeySequence, QFontDatabase
 import markdown
 import re
 
@@ -141,6 +141,7 @@ class ExplainTabView(QWidget):
 
         # Text editor for edit mode
         self.explain_editor = QTextEdit()
+        self.explain_editor.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
         self.explain_editor.setPlainText(self.markdown_content)
         self.explain_editor.hide()  # Hidden by default
 

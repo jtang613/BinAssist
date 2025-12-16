@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushB
                               QSplitter, QPlainTextEdit, QHeaderView, QAbstractItemView, QSizePolicy, QCheckBox,
                               QApplication)
 from PySide6.QtCore import Signal, Qt, QDateTime
-from PySide6.QtGui import QKeySequence
+from PySide6.QtGui import QKeySequence, QFontDatabase
 import markdown
 import re
 
@@ -141,7 +141,7 @@ class QueryTabView(QWidget):
         self.mcp_checkbox.toggled.connect(self.mcp_enabled_changed.emit)
 
         # Agentic mode checkbox (ReAct autonomous agent)
-        self.agentic_checkbox = QCheckBox("Agentic")
+        self.agentic_checkbox = QCheckBox("ReAct Agent")
         self.agentic_checkbox.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.agentic_checkbox.setChecked(False)  # Default disabled
         self.agentic_checkbox.setToolTip("Enable ReAct autonomous agent for complex investigations")
@@ -178,6 +178,7 @@ class QueryTabView(QWidget):
 
         # Text editor for edit mode
         self.query_editor = QTextEdit()
+        self.query_editor.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
         self.query_editor.setPlainText(self.markdown_content)
         self.query_editor.hide()  # Hidden by default
     
