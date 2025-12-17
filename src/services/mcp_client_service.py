@@ -237,7 +237,7 @@ class MCPClientService:
                     # We're in an event loop, run in separate thread to avoid nesting
                     with concurrent.futures.ThreadPoolExecutor() as executor:
                         future = executor.submit(run_test_with_anyio)
-                        return future.result(timeout=60)
+                        return future.result(timeout=15)
                 except RuntimeError:
                     # No loop running, can run directly with anyio
                     return anyio.run(self._test_server_connection_async, server_config)
@@ -260,27 +260,35 @@ class MCPClientService:
         test_connection = None
         try:
             log.log_info(f"Creating test connection to {server_config.name}")
-            
+
             # Create temporary connection for testing
             test_connection = MCPConnection(server_config)
-            
-            # Attempt connection
-            success = await test_connection.connect()
-            
+
+            # Attempt connection with 10 second timeout
+            try:
+                success = await asyncio.wait_for(test_connection.connect(), timeout=10.0)
+            except asyncio.TimeoutError:
+                log.log_warn(f"Test connection timeout for {server_config.name} after 10 seconds")
+                return MCPTestResult.failure_result("Connection test timed out after 10 seconds")
+
             if success:
                 log.log_info(f"Test connection successful to {server_config.name}")
-                
+
                 # Get available tools and resources
                 tools = list(test_connection.tools.values())
                 resources = list(test_connection.resources.values())
-                
+
                 log.log_info(f"Found {len(tools)} tools and {len(resources)} resources")
-                
+
                 return MCPTestResult.success_result(tools, resources)
             else:
                 log.log_warn(f"Test connection failed to {server_config.name}")
                 return MCPTestResult.failure_result("Failed to connect to server")
-                
+
+        except asyncio.TimeoutError:
+            # Catch timeout at outer level as well
+            log.log_warn(f"Test connection timeout for {server_config.name}")
+            return MCPTestResult.failure_result("Connection test timed out after 10 seconds")
         except Exception as e:
             log.log_error(f"Test connection error for {server_config.name}: {e}")
             return MCPTestResult.failure_result(str(e))
