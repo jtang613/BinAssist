@@ -280,6 +280,13 @@ class OpenAIMessageAdapter(MessageFormatAdapter):
         return ProviderType.OPENAI
 
 
+class LiteLLMMessageAdapter(OpenAIMessageAdapter):
+    """Message format adapter for LiteLLM proxy - uses OpenAI format"""
+
+    def get_provider_type(self) -> ProviderType:
+        return ProviderType.LITELLM
+
+
 class OllamaMessageAdapter(MessageFormatAdapter):
     """Message format adapter for Ollama API"""
     
@@ -371,7 +378,8 @@ class MessageFormatService:
         self._adapters: Dict[ProviderType, MessageFormatAdapter] = {
             ProviderType.ANTHROPIC: AnthropicMessageAdapter(),
             ProviderType.OPENAI: OpenAIMessageAdapter(),
-            ProviderType.OLLAMA: OllamaMessageAdapter()
+            ProviderType.OLLAMA: OllamaMessageAdapter(),
+            ProviderType.LITELLM: LiteLLMMessageAdapter()
         }
     
     def get_adapter(self, provider_type: ProviderType) -> MessageFormatAdapter:

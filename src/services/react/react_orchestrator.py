@@ -534,11 +534,19 @@ class ReActOrchestrator:
         user_message = ChatMessage(role=MessageRole.USER, content=prompt)
         self.conversation_history.append(user_message)
 
+        # Detect if conversation history contains tool messages from previous iterations
+        # Some providers (e.g., Bedrock via LiteLLM) require tools parameter when tool messages exist
+        has_tool_messages = any(
+            msg.role == MessageRole.TOOL or (hasattr(msg, 'tool_calls') and msg.tool_calls)
+            for msg in self.conversation_history
+        )
+
         # Check and manage context window before LLM call
         # This also validates tool pairs and removes orphans
+        # Pass tools to context manager if history contains tool messages
         managed_history = await self.context_manager.check_and_manage(
             self.conversation_history,
-            tools=None  # No tools for this call
+            tools=self.mcp_tools if has_tool_messages else None
         )
 
         # Always update our reference if the managed history differs
@@ -552,12 +560,14 @@ class ReActOrchestrator:
             self.conversation_history = managed_history
 
         # Use managed conversation history for context continuity
+        # Pass tools if history contains tool messages (required by some providers like Bedrock)
         request = ChatRequest(
             messages=managed_history,
             model=self.llm_provider.model if hasattr(self.llm_provider, 'model') else '',
             max_tokens=4096,
             temperature=0.7,
-            stream=True
+            stream=True,
+            tools=self.mcp_tools if has_tool_messages else None
         )
 
         # Retry loop for transient network errors

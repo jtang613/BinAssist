@@ -12,12 +12,13 @@ class ProviderType(Enum):
     Enumeration of supported LLM provider types.
     Used throughout the plugin for type safety and consistency.
     """
-    
+
     OPENAI = "openai"
-    ANTHROPIC = "anthropic" 
+    ANTHROPIC = "anthropic"
     OLLAMA = "ollama"
     OPENWEBUI = "openwebui"
     LMSTUDIO = "lmstudio"
+    LITELLM = "litellm"
     
     @classmethod
     def get_display_names(cls) -> dict[str, str]:
@@ -25,9 +26,10 @@ class ProviderType(Enum):
         return {
             cls.OPENAI: "OpenAI",
             cls.ANTHROPIC: "Anthropic (Claude)",
-            cls.OLLAMA: "Ollama (Local)",  
+            cls.OLLAMA: "Ollama (Local)",
             cls.OPENWEBUI: "Open WebUI",
-            cls.LMSTUDIO: "LM Studio"
+            cls.LMSTUDIO: "LM Studio",
+            cls.LITELLM: "LiteLLM (Proxy)"
         }
     
     @classmethod
@@ -38,7 +40,8 @@ class ProviderType(Enum):
             cls.ANTHROPIC: "https://api.anthropic.com",
             cls.OLLAMA: "http://localhost:11434",
             cls.OPENWEBUI: "http://localhost:3000",
-            cls.LMSTUDIO: "http://localhost:1234/v1"
+            cls.LMSTUDIO: "http://localhost:1234/v1",
+            cls.LITELLM: "http://localhost:4000"
         }
     
     @classmethod
@@ -49,7 +52,7 @@ class ProviderType(Enum):
                 "gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"
             ],
             cls.ANTHROPIC: [
-                "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", 
+                "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022",
                 "claude-3-opus-20240229", "claude-3-sonnet-20240229"
             ],
             cls.OLLAMA: [
@@ -63,17 +66,22 @@ class ProviderType(Enum):
             cls.LMSTUDIO: [
                 # LM Studio uses locally downloaded models
                 "microsoft/DialoGPT-medium", "microsoft/DialoGPT-large"
+            ],
+            cls.LITELLM: [
+                # LiteLLM proxies to various providers - models are dynamic
+                # Examples: bedrock/anthropic.claude-*, bedrock/amazon.nova-*, etc.
             ]
         }
     
-    @classmethod 
+    @classmethod
     def supports_embeddings(cls, provider_type: 'ProviderType') -> bool:
         """Check if provider type supports embedding generation"""
         return provider_type in {
             cls.OPENAI,     # text-embedding-3-small, text-embedding-3-large
             cls.OLLAMA,     # Various embedding models available
             cls.OPENWEBUI,  # Depends on connected providers
-            cls.LMSTUDIO    # Depends on loaded models
+            cls.LMSTUDIO,   # Depends on loaded models
+            cls.LITELLM     # Can proxy embeddings to various providers
         }
     
     @classmethod
@@ -84,7 +92,8 @@ class ProviderType(Enum):
             cls.ANTHROPIC,  # Tool calling support
             cls.OLLAMA,     # Limited tool calling support
             cls.OPENWEBUI,  # Depends on connected providers
-            cls.LMSTUDIO    # Limited support
+            cls.LMSTUDIO,   # Limited support
+            cls.LITELLM     # Proxies tool calls to various providers
         }
     
     @classmethod
@@ -92,10 +101,11 @@ class ProviderType(Enum):
         """Check if provider type supports streaming responses"""
         return provider_type in {
             cls.OPENAI,     # Full streaming support
-            cls.ANTHROPIC,  # Full streaming support  
+            cls.ANTHROPIC,  # Full streaming support
             cls.OLLAMA,     # Full streaming support
             cls.OPENWEBUI,  # Full streaming support
-            cls.LMSTUDIO    # Full streaming support
+            cls.LMSTUDIO,   # Full streaming support
+            cls.LITELLM     # Full streaming support via proxy
         }
     
     @classmethod

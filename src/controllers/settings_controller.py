@@ -318,6 +318,25 @@ class ProviderDialog(QDialog):
         self.disable_tls_check = QCheckBox("Disable TLS Verification")
         layout.addWidget(self.disable_tls_check)
 
+        # LiteLLM metadata (read-only fields, only visible for LiteLLM providers)
+        self.litellm_metadata_label = QLabel("LiteLLM Metadata:")
+        self.litellm_metadata_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        layout.addWidget(self.litellm_metadata_label)
+
+        self.model_family_label = QLabel("Model Family: Not detected")
+        layout.addWidget(self.model_family_label)
+
+        self.is_bedrock_label = QLabel("Bedrock Model: No")
+        layout.addWidget(self.is_bedrock_label)
+
+        # Initially hide LiteLLM metadata
+        self.litellm_metadata_label.setVisible(False)
+        self.model_family_label.setVisible(False)
+        self.is_bedrock_label.setVisible(False)
+
+        # Connect model edit to update metadata
+        self.model_edit.textChanged.connect(self.update_litellm_metadata)
+
         # Buttons
         button_layout = QHBoxLayout()
         self.ok_button = QPushButton("OK")
@@ -367,11 +386,11 @@ class ProviderDialog(QDialog):
         if current_data:
             try:
                 provider_type = ProviderType(current_data)
-                
+
                 # Auto-fill URL with default for this provider type
                 if not self.url_edit.text() or self.url_edit.text() in [pt.default_url for pt in ProviderType]:
                     self.url_edit.setText(provider_type.default_url)
-                
+
                 # Clear model field to encourage user to select appropriate model
                 # Could also populate with default models if desired
                 if not self.model_edit.text():
@@ -379,9 +398,67 @@ class ProviderDialog(QDialog):
                     default_models = provider_type.default_models
                     if default_models:
                         self.model_edit.setText(default_models[0])
-                        
+
+                # Show/hide LiteLLM metadata based on provider type
+                is_litellm = provider_type == ProviderType.LITELLM
+                self.litellm_metadata_label.setVisible(is_litellm)
+                self.model_family_label.setVisible(is_litellm)
+                self.is_bedrock_label.setVisible(is_litellm)
+
+                # Update metadata if switching to LiteLLM
+                if is_litellm:
+                    self.update_litellm_metadata()
+
             except ValueError:
                 pass  # Invalid provider type, ignore
+
+    def update_litellm_metadata(self):
+        """Update LiteLLM metadata labels based on current model name"""
+        current_provider_type = self.provider_type_combo.currentData()
+        if current_provider_type != 'litellm':
+            return
+
+        model_name = self.model_edit.text().strip()
+        if not model_name:
+            self.model_family_label.setText("Model Family: Not detected")
+            self.is_bedrock_label.setText("Bedrock Model: No")
+            return
+
+        # Detect model family (same logic as in settings_service.py)
+        model_family = self._detect_model_family(model_name)
+        is_bedrock = model_name.startswith('bedrock/')
+
+        self.model_family_label.setText(f"Model Family: {model_family.title()}")
+        self.is_bedrock_label.setText(f"Bedrock Model: {'Yes' if is_bedrock else 'No'}")
+
+    def _detect_model_family(self, model: str) -> str:
+        """Detect model family from model name (same logic as settings_service.py)"""
+        model_lower = model.lower()
+
+        # Bedrock models
+        if model_lower.startswith('bedrock/'):
+            if 'anthropic' in model_lower or 'claude' in model_lower:
+                return 'anthropic'
+            elif 'amazon' in model_lower or 'nova' in model_lower:
+                return 'amazon'
+            elif 'meta' in model_lower or 'llama' in model_lower:
+                return 'meta'
+            elif 'cohere' in model_lower:
+                return 'cohere'
+            elif 'ai21' in model_lower:
+                return 'ai21'
+
+        # Non-Bedrock
+        if 'claude' in model_lower or 'anthropic' in model_lower:
+            return 'anthropic'
+        elif 'gpt' in model_lower or 'openai' in model_lower:
+            return 'openai'
+        elif 'gemini' in model_lower or 'google' in model_lower:
+            return 'google'
+        elif 'llama' in model_lower or 'meta' in model_lower:
+            return 'meta'
+
+        return 'unknown'
 
 
 class MCPProviderDialog(QDialog):

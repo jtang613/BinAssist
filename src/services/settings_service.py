@@ -144,9 +144,14 @@ class SettingsService:
     def _run_migrations(self):
         """Run database migrations"""
         try:
-            from .migrations import migrate_add_provider_type, migrate_add_reasoning_effort
+            from .migrations import (
+                migrate_add_provider_type,
+                migrate_add_reasoning_effort,
+                migrate_add_litellm_configs
+            )
             migrate_add_provider_type(self._db_path)
             migrate_add_reasoning_effort(self._db_path)
+            migrate_add_litellm_configs(self._db_path)
         except Exception as e:
             # Migration failures shouldn't prevent plugin loading
             try:
@@ -292,24 +297,74 @@ class SettingsService:
                 conn.close()
     
     # LLM Provider Operations
-    
+
+    def _detect_model_family(self, model: str) -> str:
+        """
+        Detect underlying model family from model name for LiteLLM.
+
+        Examples:
+        - bedrock/anthropic.claude-* -> anthropic
+        - bedrock/amazon.nova-* -> amazon
+        - bedrock/meta.llama3-* -> meta
+        - claude-3-5-sonnet -> anthropic (non-Bedrock)
+        - gpt-4o -> openai (non-Bedrock)
+        """
+        model_lower = model.lower()
+
+        # Bedrock models: bedrock/<provider>.<model-name>
+        if model_lower.startswith('bedrock/'):
+            if 'anthropic' in model_lower or 'claude' in model_lower:
+                return 'anthropic'
+            elif 'amazon' in model_lower or 'nova' in model_lower:
+                return 'amazon'
+            elif 'meta' in model_lower or 'llama' in model_lower:
+                return 'meta'
+            elif 'cohere' in model_lower:
+                return 'cohere'
+            elif 'ai21' in model_lower:
+                return 'ai21'
+
+        # Non-Bedrock LiteLLM models
+        if 'claude' in model_lower or 'anthropic' in model_lower:
+            return 'anthropic'
+        elif 'gpt' in model_lower or 'openai' in model_lower:
+            return 'openai'
+        elif 'gemini' in model_lower or 'google' in model_lower:
+            return 'google'
+        elif 'llama' in model_lower or 'meta' in model_lower:
+            return 'meta'
+
+        return 'unknown'
+
+    def _is_bedrock_model(self, model: str) -> bool:
+        """Check if this is a Bedrock model"""
+        return model.startswith('bedrock/')
+
     def add_llm_provider(self, name: str, model: str, url: str, max_tokens: int = 4096,
                         api_key: str = '', disable_tls: bool = False, provider_type: str = 'openai',
                         reasoning_effort: str = 'none') -> int:
         """Add a new LLM provider"""
+        # Detect LiteLLM model family and Bedrock status
+        model_family = 'unknown'
+        is_bedrock = False
+        if provider_type == 'litellm':
+            model_family = self._detect_model_family(model)
+            is_bedrock = self._is_bedrock_model(model)
+
         with self._db_lock:
             conn = self._get_connection()
             try:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT INTO llm_providers (name, model, url, max_tokens, api_key, disable_tls, provider_type, reasoning_effort)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (name, model, url, max_tokens, api_key, disable_tls, provider_type, reasoning_effort))
-                
+                    INSERT INTO llm_providers
+                    (name, model, url, max_tokens, api_key, disable_tls, provider_type, reasoning_effort, model_family, is_bedrock, litellm_params)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (name, model, url, max_tokens, api_key, disable_tls, provider_type, reasoning_effort, model_family, is_bedrock, '{}'))
+
                 provider_id = cursor.lastrowid
                 conn.commit()
                 return provider_id
-                
+
             except sqlite3.IntegrityError:
                 raise ValueError(f"Provider '{name}' already exists")
             except Exception as e:
@@ -353,29 +408,52 @@ class SettingsService:
     
     def update_llm_provider(self, provider_id: int, **kwargs) -> bool:
         """Update an LLM provider"""
-        valid_fields = {'name', 'model', 'url', 'max_tokens', 'api_key', 'disable_tls', 'provider_type', 'is_active', 'reasoning_effort'}
+        valid_fields = {'name', 'model', 'url', 'max_tokens', 'api_key', 'disable_tls',
+                        'provider_type', 'is_active', 'reasoning_effort',
+                        'model_family', 'is_bedrock', 'litellm_params'}
         update_fields = {k: v for k, v in kwargs.items() if k in valid_fields}
-        
+
         if not update_fields:
             return False
-        
+
+        # If provider_type or model is being updated, detect LiteLLM metadata
+        if 'provider_type' in update_fields or 'model' in update_fields:
+            with self._db_lock:
+                conn = self._get_connection()
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute('SELECT provider_type, model FROM llm_providers WHERE id = ?', (provider_id,))
+                    row = cursor.fetchone()
+                    if row:
+                        current_provider_type, current_model = row
+                        # Determine final provider_type and model after update
+                        final_provider_type = update_fields.get('provider_type', current_provider_type)
+                        final_model = update_fields.get('model', current_model)
+
+                        # If final provider_type is litellm, detect model_family and is_bedrock
+                        if final_provider_type == 'litellm':
+                            update_fields['model_family'] = self._detect_model_family(final_model)
+                            update_fields['is_bedrock'] = self._is_bedrock_model(final_model)
+                finally:
+                    conn.close()
+
         with self._db_lock:
             conn = self._get_connection()
             try:
                 cursor = conn.cursor()
-                
+
                 set_clause = ', '.join([f"{field} = ?" for field in update_fields.keys()])
                 values = list(update_fields.values()) + [provider_id]
-                
+
                 cursor.execute(f'''
                     UPDATE llm_providers SET {set_clause}, updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
                 ''', values)
-                
+
                 updated = cursor.rowcount > 0
                 conn.commit()
                 return updated
-                
+
             except Exception as e:
                 conn.rollback()
                 raise RuntimeError(f"Failed to update LLM provider: {e}")

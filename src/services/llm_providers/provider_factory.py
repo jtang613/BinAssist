@@ -127,18 +127,41 @@ class LLMProviderFactory:
         except ImportError:
             pass  # Ollama provider not available
 
+        # LiteLLM provider
+        try:
+            # LiteLLMProviderFactory is defined in this file
+            self.register_factory(
+                ProviderType.LITELLM,
+                LiteLLMProviderFactory()
+            )
+        except ImportError:
+            pass  # LiteLLM provider not available
+
 
 class AnthropicProviderFactory(ProviderFactory):
     """Factory for creating Anthropic providers"""
-    
+
     def create_provider(self, config: Dict[str, Any]) -> BaseLLMProvider:
         """Create Anthropic provider instance"""
         from .anthropic_provider import AnthropicProvider
         return AnthropicProvider(config)
-    
+
     def supports_provider_type(self, provider_type: ProviderType) -> bool:
         """Check if this factory supports Anthropic providers"""
         return provider_type == ProviderType.ANTHROPIC
+
+
+class LiteLLMProviderFactory(ProviderFactory):
+    """Factory for creating LiteLLM providers"""
+
+    def create_provider(self, config: Dict[str, Any]) -> BaseLLMProvider:
+        """Create LiteLLM provider instance"""
+        from .litellm_provider import LiteLLMProvider
+        return LiteLLMProvider(config)
+
+    def supports_provider_type(self, provider_type: ProviderType) -> bool:
+        """Check if this factory supports LiteLLM providers"""
+        return provider_type == ProviderType.LITELLM
 
 
 # Future provider factories will be added here as they are implemented
