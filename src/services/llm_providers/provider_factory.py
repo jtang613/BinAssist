@@ -107,13 +107,13 @@ class LLMProviderFactory:
         except ImportError:
             pass  # Anthropic provider not available
         
-        # OpenAI provider
+        # OpenAI provider (handles OpenAI, LM Studio, and OpenWebUI)
         try:
             from .openai_provider import OpenAIProviderFactory
-            self.register_factory(
-                ProviderType.OPENAI,
-                OpenAIProviderFactory()
-            )
+            openai_factory = OpenAIProviderFactory()
+            self.register_factory(ProviderType.OPENAI, openai_factory)
+            self.register_factory(ProviderType.LMSTUDIO, openai_factory)
+            self.register_factory(ProviderType.OPENWEBUI, openai_factory)
         except ImportError:
             pass  # OpenAI provider not available
         

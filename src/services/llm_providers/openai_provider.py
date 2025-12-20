@@ -55,11 +55,14 @@ class OpenAIProvider(BaseLLMProvider):
     def __init__(self, config: Dict[str, Any]):
         """Initialize OpenAI provider"""
         super().__init__(config)
-        
+
         # Validate configuration
         self.validate_config()
-        if not self.api_key:
-            raise ValueError("API key is required for OpenAI provider")
+
+        # Check if API key is required for this provider type
+        provider_type = self.get_provider_type()
+        if not self.api_key and ProviderType.requires_api_key(provider_type):
+            raise ValueError(f"API key is required for {provider_type.value} provider")
         
         # Initialize OpenAI client
         try:
@@ -73,6 +76,9 @@ class OpenAIProvider(BaseLLMProvider):
             base_url = None
             if self.url and self.url != 'https://api.openai.com/v1':
                 base_url = self.url
+
+            # For local providers that don't need API keys, use a placeholder
+            api_key = self.api_key or "not-needed"
 
             # Handle TLS verification settings and create client
             if self.disable_tls:
@@ -89,7 +95,7 @@ class OpenAIProvider(BaseLLMProvider):
                 http_client = httpx.Client(verify=False, timeout=timeout)
 
                 self._client = OpenAI(
-                    api_key=self.api_key,
+                    api_key=api_key,
                     base_url=base_url,
                     timeout=timeout,
                     max_retries=0,  # We handle retries ourselves
@@ -97,7 +103,7 @@ class OpenAIProvider(BaseLLMProvider):
                 )
             else:
                 self._client = OpenAI(
-                    api_key=self.api_key,
+                    api_key=api_key,
                     base_url=base_url,
                     timeout=timeout,
                     max_retries=0  # We handle retries ourselves
@@ -581,7 +587,11 @@ class OpenAIProvider(BaseLLMProvider):
     
     def get_provider_type(self) -> ProviderType:
         """Get the provider type for this provider"""
-        return ProviderType.OPENAI
+        # Return the configured provider type (could be OPENAI, LMSTUDIO, or OPENWEBUI)
+        provider_type_str = self.config.get('provider_type', 'openai')
+        if isinstance(provider_type_str, str):
+            return ProviderType(provider_type_str)
+        return provider_type_str
     
     def validate_config(self):
         """Validate provider configuration"""
@@ -621,4 +631,9 @@ class OpenAIProviderFactory(ProviderFactory):
     
     def supports_provider_type(self, provider_type: ProviderType) -> bool:
         """Check if this factory supports the provider type"""
-        return provider_type == ProviderType.OPENAI
+        # OpenAI provider handles OpenAI-compatible APIs
+        return provider_type in {
+            ProviderType.OPENAI,
+            ProviderType.LMSTUDIO,
+            ProviderType.OPENWEBUI
+        }
