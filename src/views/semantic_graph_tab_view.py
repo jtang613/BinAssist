@@ -1,0 +1,867 @@
+#!/usr/bin/env python3
+
+import json
+import math
+from typing import Any, Dict, List, Optional
+
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFontDatabase, QTextCursor, QBrush, QColor, QPen
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTabWidget,
+    QGroupBox, QGridLayout, QSplitter, QListWidget, QListWidgetItem, QTableWidget,
+    QTableWidgetItem, QComboBox, QTextEdit, QCheckBox, QSpinBox, QGraphicsView,
+    QGraphicsScene, QGraphicsRectItem, QGraphicsLineItem, QGraphicsTextItem,
+    QFrame, QRadioButton, QButtonGroup, QAbstractItemView, QInputDialog
+)
+
+
+class SemanticGraphTabView(QWidget):
+    go_requested = Signal(str)
+    reset_requested = Signal()
+    reindex_requested = Signal()
+    semantic_analysis_requested = Signal()
+    security_analysis_requested = Signal()
+    refresh_names_requested = Signal()
+    navigate_requested = Signal(int)
+    index_function_requested = Signal(int)
+    save_summary_requested = Signal(str)
+    add_flag_requested = Signal(str)
+    remove_flag_requested = Signal(str)
+    edge_clicked = Signal(str)
+    visual_refresh_requested = Signal(int, list)
+    search_query_requested = Signal(str, dict)
+
+    def __init__(self):
+        super().__init__()
+        self._current_address = 0
+        self._current_node_id = None
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout()
+        layout.setContentsMargins(5, 5, 5, 5)
+
+        header = QHBoxLayout()
+        header.addWidget(QLabel("Current:"))
+        self.current_field = QLineEdit()
+        self.current_field.setPlaceholderText("Function name or address")
+        header.addWidget(self.current_field)
+        self.go_button = QPushButton("Go")
+        header.addWidget(self.go_button)
+        layout.addLayout(header)
+
+        self.status_label = QLabel("Status: No program loaded")
+        layout.addWidget(self.status_label)
+
+        self.subtabs = QTabWidget()
+        self.list_view = SemanticGraphListView()
+        self.graph_view = SemanticGraphGraphView()
+        self.search_view = SemanticGraphSearchView()
+        self.subtabs.addTab(self.list_view, "List View")
+        self.subtabs.addTab(self.graph_view, "Visual Graph")
+        self.subtabs.addTab(self.search_view, "Search")
+        layout.addWidget(self.subtabs)
+
+        bottom = QHBoxLayout()
+        self.reset_button = QPushButton("Reset Graph")
+        self.reindex_button = QPushButton("ReIndex Binary")
+        self.semantic_button = QPushButton("Semantic Analysis")
+        self.security_button = QPushButton("Security Analysis")
+        self.refresh_names_button = QPushButton("Refresh Names")
+        bottom.addWidget(self.reset_button)
+        bottom.addWidget(self.reindex_button)
+        bottom.addWidget(self.semantic_button)
+        bottom.addWidget(self.security_button)
+        bottom.addWidget(self.refresh_names_button)
+        bottom.addStretch()
+        layout.addLayout(bottom)
+
+        self.stats_label = QLabel("Graph Stats: Not loaded")
+        layout.addWidget(self.stats_label)
+
+        self.setLayout(layout)
+        self._wire_signals()
+
+    def _wire_signals(self):
+        self.go_button.clicked.connect(self._on_go_clicked)
+        self.current_field.returnPressed.connect(self._on_go_clicked)
+        self.reset_button.clicked.connect(self.reset_requested.emit)
+        self.reindex_button.clicked.connect(self.reindex_requested.emit)
+        self.semantic_button.clicked.connect(self.semantic_analysis_requested.emit)
+        self.security_button.clicked.connect(self.security_analysis_requested.emit)
+        self.refresh_names_button.clicked.connect(self.refresh_names_requested.emit)
+
+        self.list_view.navigate_requested.connect(self.navigate_requested.emit)
+        self.list_view.index_function_requested.connect(self._emit_index_current)
+        self.list_view.reindex_requested.connect(self.reindex_requested.emit)
+        self.list_view.save_summary_requested.connect(self.save_summary_requested.emit)
+        self.list_view.add_flag_requested.connect(self.add_flag_requested.emit)
+        self.list_view.remove_flag_requested.connect(self.remove_flag_requested.emit)
+        self.list_view.edge_clicked.connect(self.edge_clicked.emit)
+
+        self.graph_view.navigate_requested.connect(self.navigate_requested.emit)
+        self.graph_view.index_function_requested.connect(self._emit_index_current)
+        self.graph_view.reindex_requested.connect(self.reindex_requested.emit)
+        self.graph_view.refresh_requested.connect(self.visual_refresh_requested.emit)
+
+        self.search_view.query_requested.connect(self.search_query_requested.emit)
+        self.search_view.navigate_requested.connect(self.navigate_requested.emit)
+
+    def _on_go_clicked(self):
+        text = self.current_field.text().strip()
+        if text:
+            self.go_requested.emit(text)
+
+    def _emit_index_current(self):
+        self.index_function_requested.emit(self._current_address)
+
+    def update_location(self, address: int, function_name: Optional[str]):
+        self._current_address = address
+        display = f"{function_name} @ 0x{address:x}" if function_name else f"0x{address:x}"
+        self.current_field.setText(display)
+        self.search_view.update_current_address(address)
+        if self.subtabs.currentWidget() == self.list_view:
+            self.list_view.refresh()
+        elif self.subtabs.currentWidget() == self.graph_view:
+            self.graph_view.refresh()
+
+    def update_status(self, indexed: bool, caller_count: int, callee_count: int, flag_count: int):
+        if indexed:
+            self.status_label.setText(
+                f"Status: Indexed | {caller_count} callers | {callee_count} callees | {flag_count} security flags"
+            )
+        else:
+            self.status_label.setText("Status: Not Indexed")
+
+    def update_stats(self, node_count: int, edge_count: int, stale_count: int, last_indexed: Optional[str]):
+        if node_count == 0:
+            self.stats_label.setText("Graph Stats: Not indexed")
+        else:
+            timestamp = last_indexed or "unknown"
+            self.stats_label.setText(
+                f"Graph Stats: {node_count} nodes | {edge_count} edges | {stale_count} stale | Last indexed: {timestamp}"
+            )
+
+    def set_current_node_id(self, node_id: Optional[str]):
+        self._current_node_id = node_id
+
+    def get_current_address(self) -> int:
+        return self._current_address
+
+
+class SemanticGraphListView(QWidget):
+    index_function_requested = Signal(int)
+    reindex_requested = Signal()
+    navigate_requested = Signal(int)
+    save_summary_requested = Signal(str)
+    add_flag_requested = Signal(str)
+    remove_flag_requested = Signal(str)
+    edge_clicked = Signal(str)
+
+    KNOWN_FLAGS = [
+        "BUFFER_OVERFLOW_RISK",
+        "COMMAND_INJECTION_RISK",
+        "FORMAT_STRING_RISK",
+        "USE_AFTER_FREE_RISK",
+        "PATH_TRAVERSAL_RISK",
+        "INTEGER_OVERFLOW_RISK",
+        "NULL_DEREF_RISK",
+        "MEMORY_LEAK_RISK",
+        "RACE_CONDITION_RISK",
+        "HANDLES_USER_INPUT",
+        "PARSES_NETWORK_DATA",
+        "CRYPTO_OPERATION",
+        "AUTHENTICATION",
+    ]
+
+    def __init__(self):
+        super().__init__()
+        self._all_edges: List[Dict[str, Any]] = []
+        self._editing_summary = False
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout()
+
+        self.stack = QStackedFrame()
+        self.content_widget = QWidget()
+        self.placeholder_widget = self._build_placeholder()
+
+        content_layout = QHBoxLayout()
+        left = QVBoxLayout()
+        right = QVBoxLayout()
+
+        self.callers_list = QListWidget()
+        self.callers_list.itemDoubleClicked.connect(self._navigate_from_list)
+        callers_group = self._wrap_group("CALLERS", self.callers_list)
+        left.addWidget(callers_group)
+
+        self.callees_list = QListWidget()
+        self.callees_list.itemDoubleClicked.connect(self._navigate_from_list)
+        callees_group = self._wrap_group("CALLEES", self.callees_list)
+        left.addWidget(callees_group)
+
+        self.edge_filter = QComboBox()
+        self.edge_filter.addItems(
+            ["All Types", "CALLS", "REFERENCES", "DATA_DEPENDS", "CALLS_VULNERABLE", "SIMILAR_PURPOSE"]
+        )
+        self.edge_filter.currentIndexChanged.connect(self._refresh_edges_table)
+
+        self.edges_table = QTableWidget(0, 4)
+        self.edges_table.setHorizontalHeaderLabels(["Type", "Target", "Weight", "Actions"])
+        self.edges_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.edges_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+
+        edges_box = QWidget()
+        edges_layout = QVBoxLayout()
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("Filter:"))
+        filter_row.addWidget(self.edge_filter)
+        filter_row.addStretch()
+        edges_layout.addLayout(filter_row)
+        edges_layout.addWidget(self.edges_table)
+        edges_box.setLayout(edges_layout)
+        left.addWidget(self._wrap_group("EDGES", edges_box))
+
+        self.flags_container = QWidget()
+        self.flags_layout = QVBoxLayout()
+        self.flags_container.setLayout(self.flags_layout)
+        flags_group = self._wrap_group("SECURITY FLAGS", self.flags_container)
+        right.addWidget(flags_group)
+
+        self.add_flag_button = QPushButton("+ Add Custom Flag...")
+        self.add_flag_button.clicked.connect(self._prompt_add_flag)
+        right.addWidget(self.add_flag_button)
+
+        self.summary_area = QTextEdit()
+        self.summary_area.setReadOnly(True)
+        self.summary_area.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
+        summary_group = self._wrap_group("LLM SUMMARY", self.summary_area)
+        right.addWidget(summary_group)
+
+        self.edit_summary_button = QPushButton("Edit")
+        self.edit_summary_button.clicked.connect(self._toggle_summary_edit)
+        right.addWidget(self.edit_summary_button)
+
+        content_layout.addLayout(left, 3)
+        content_layout.addLayout(right, 2)
+        self.content_widget.setLayout(content_layout)
+
+        self.stack.addWidget(self.placeholder_widget)
+        self.stack.addWidget(self.content_widget)
+        layout.addWidget(self.stack)
+        self.setLayout(layout)
+        self.show_not_indexed()
+
+    def _wrap_group(self, title: str, widget: QWidget) -> QGroupBox:
+        box = QGroupBox(title)
+        inner = QVBoxLayout()
+        inner.addWidget(widget)
+        box.setLayout(inner)
+        return box
+
+    def _build_placeholder(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout()
+        label = QLabel("Function not yet indexed in the knowledge graph.")
+        label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(label)
+        index_button = QPushButton("Index This Function")
+        index_button.clicked.connect(lambda: self.index_function_requested.emit(0))
+        layout.addWidget(index_button)
+        reindex_button = QPushButton("ReIndex Binary")
+        reindex_button.clicked.connect(self.reindex_requested.emit)
+        layout.addWidget(reindex_button)
+        widget.setLayout(layout)
+        return widget
+
+    def show_not_indexed(self):
+        self.stack.setCurrentWidget(self.placeholder_widget)
+
+    def show_content(self):
+        self.stack.setCurrentWidget(self.content_widget)
+
+    def refresh(self):
+        pass
+
+    def set_callers(self, callers: List[Dict[str, Any]]):
+        self.callers_list.clear()
+        for entry in callers:
+            item = QListWidgetItem(f"{entry['name']} @ 0x{entry['address']:x}")
+            item.setData(Qt.UserRole, entry["address"])
+            self.callers_list.addItem(item)
+
+    def set_callees(self, callees: List[Dict[str, Any]]):
+        self.callees_list.clear()
+        for entry in callees:
+            item = QListWidgetItem(f"{entry['name']} @ 0x{entry['address']:x}")
+            item.setData(Qt.UserRole, entry["address"])
+            self.callees_list.addItem(item)
+
+    def set_edges(self, edges: List[Dict[str, Any]]):
+        self._all_edges = edges
+        self._refresh_edges_table()
+
+    def _refresh_edges_table(self):
+        self.edges_table.setRowCount(0)
+        filter_val = self.edge_filter.currentText()
+        for edge in self._all_edges:
+            if filter_val != "All Types" and edge["type"] != filter_val:
+                continue
+            row = self.edges_table.rowCount()
+            self.edges_table.insertRow(row)
+            self.edges_table.setItem(row, 0, QTableWidgetItem(edge["type"]))
+            self.edges_table.setItem(row, 1, QTableWidgetItem(edge["target"]))
+            self.edges_table.setItem(row, 2, QTableWidgetItem(f"{edge.get('weight', 1.0):.2f}"))
+            button = QPushButton("View")
+            button.clicked.connect(lambda _=None, target=edge["target"]: self.edge_clicked.emit(target))
+            self.edges_table.setCellWidget(row, 3, button)
+
+    def set_security_flags(self, flags: List[str]):
+        while self.flags_layout.count():
+            item = self.flags_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        flags_set = set(flags)
+        for known in self.KNOWN_FLAGS:
+            cb = QCheckBox(known)
+            cb.setChecked(known in flags_set)
+            cb.stateChanged.connect(lambda state, f=known: self._toggle_flag(f, state))
+            self.flags_layout.addWidget(cb)
+
+        for flag in flags:
+            if flag in self.KNOWN_FLAGS:
+                continue
+            cb = QCheckBox(flag)
+            cb.setChecked(True)
+            cb.stateChanged.connect(lambda state, f=flag: self._toggle_flag(f, state))
+            self.flags_layout.addWidget(cb)
+
+        self.flags_layout.addStretch()
+
+    def set_summary(self, summary: str):
+        self.summary_area.setPlainText(summary or "")
+        self.summary_area.moveCursor(QTextCursor.Start)
+
+    def _toggle_summary_edit(self):
+        if self._editing_summary:
+            summary = self.summary_area.toPlainText()
+            self.summary_area.setReadOnly(True)
+            self.edit_summary_button.setText("Edit")
+            self._editing_summary = False
+            self.save_summary_requested.emit(summary)
+        else:
+            self.summary_area.setReadOnly(False)
+            self.edit_summary_button.setText("Save")
+            self._editing_summary = True
+
+    def _prompt_add_flag(self):
+        flag, ok = QInputDialog.getText(self, "Add Security Flag", "Enter custom security flag:")
+        if not ok:
+            return
+        if flag:
+            clean = flag.strip().upper().replace(" ", "_")
+            self.add_flag_requested.emit(clean)
+
+    def _toggle_flag(self, flag: str, state: int):
+        if state == Qt.Checked:
+            self.add_flag_requested.emit(flag)
+        else:
+            self.remove_flag_requested.emit(flag)
+
+    def _navigate_from_list(self, item: QListWidgetItem):
+        address = item.data(Qt.UserRole)
+        if address is not None:
+            self.navigate_requested.emit(int(address))
+
+
+class SemanticGraphGraphView(QWidget):
+    refresh_requested = Signal(int, list)
+    navigate_requested = Signal(int)
+    index_function_requested = Signal(int)
+    reindex_requested = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self._nodes = []
+        self._edges = []
+        self._node_items = {}
+        self._selected_node = None
+        self._colors = {
+            "background": QColor("#1f2123"),
+            "node": QColor("#3a3f44"),
+            "node_text": QColor("#e6e6e6"),
+            "center": QColor("#2ea8b3"),
+            "center_text": QColor("#ffffff"),
+            "vuln": QColor("#7a2b2b"),
+            "vuln_text": QColor("#ffd6d6"),
+            "edge_calls": QColor("#58a6ff"),
+            "edge_refs": QColor("#7a7f87"),
+            "edge_data": QColor("#4caf50"),
+            "edge_vuln": QColor("#ff5c5c"),
+        }
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout()
+
+        self.stack = QStackedFrame()
+        self.content_widget = QWidget()
+        self.placeholder_widget = self._build_placeholder()
+
+        content_layout = QVBoxLayout()
+
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel("N-Hops:"))
+        self.n_hops = QSpinBox()
+        self.n_hops.setRange(1, 5)
+        self.n_hops.setValue(2)
+        self.n_hops.valueChanged.connect(self._on_refresh)
+        controls.addWidget(self.n_hops)
+
+        controls.addWidget(QLabel("Edge Types:"))
+        self.calls_cb = QCheckBox("CALLS")
+        self.calls_cb.setChecked(True)
+        self.refs_cb = QCheckBox("REFS")
+        self.refs_cb.setChecked(True)
+        self.data_cb = QCheckBox("DATA_DEP")
+        self.vuln_cb = QCheckBox("VULN")
+        self.vuln_cb.setChecked(True)
+        for cb in (self.calls_cb, self.refs_cb, self.data_cb, self.vuln_cb):
+            cb.stateChanged.connect(self._on_refresh)
+            controls.addWidget(cb)
+        controls.addStretch()
+
+        zoom_box = QHBoxLayout()
+        zoom_box.addWidget(QLabel("Zoom:"))
+        self.zoom_out = QPushButton("-")
+        self.zoom_out.setFixedWidth(24)
+        self.zoom_out.clicked.connect(self._zoom_out)
+        self.zoom_label = QLabel("100%")
+        self.zoom_in = QPushButton("+")
+        self.zoom_in.setFixedWidth(24)
+        self.zoom_in.clicked.connect(self._zoom_in)
+        self.zoom_fit = QPushButton("Fit")
+        self.zoom_fit.clicked.connect(self._zoom_fit)
+        zoom_box.addWidget(self.zoom_out)
+        zoom_box.addWidget(self.zoom_label)
+        zoom_box.addWidget(self.zoom_in)
+        zoom_box.addWidget(self.zoom_fit)
+        controls.addLayout(zoom_box)
+
+        content_layout.addLayout(controls)
+
+        self.scene = QGraphicsScene()
+        self.scene.selectionChanged.connect(self._on_selection_changed)
+        self.view = QGraphicsView(self.scene)
+        self.view.setRenderHint(self.view.renderHints())
+        self.view.setBackgroundBrush(QBrush(self._colors["background"]))
+        content_layout.addWidget(self.view)
+
+        info = QHBoxLayout()
+        self.selected_label = QLabel("Selected: None")
+        self.summary_label = QLabel("")
+        self.summary_label.setStyleSheet("color: gray;")
+        info.addWidget(self.selected_label)
+        info.addWidget(self.summary_label)
+        info.addStretch()
+        self.go_to_button = QPushButton("Go To")
+        self.go_to_button.setEnabled(False)
+        self.go_to_button.clicked.connect(self._go_to_selected)
+        info.addWidget(self.go_to_button)
+        self.details_button = QPushButton("Details")
+        self.details_button.setEnabled(False)
+        self.details_button.clicked.connect(self._go_to_selected)
+        info.addWidget(self.details_button)
+        content_layout.addLayout(info)
+
+        self.content_widget.setLayout(content_layout)
+        self.stack.addWidget(self.placeholder_widget)
+        self.stack.addWidget(self.content_widget)
+        self.stack.setCurrentWidget(self.placeholder_widget)
+
+        layout.addWidget(self.stack)
+        self.setLayout(layout)
+
+    def _build_placeholder(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout()
+        label = QLabel("Function not yet indexed in the knowledge graph.")
+        label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(label)
+        index_button = QPushButton("Index This Function")
+        index_button.clicked.connect(lambda: self.index_function_requested.emit(0))
+        layout.addWidget(index_button)
+        reindex_button = QPushButton("ReIndex Binary")
+        reindex_button.clicked.connect(self.reindex_requested.emit)
+        layout.addWidget(reindex_button)
+        widget.setLayout(layout)
+        return widget
+
+    def show_not_indexed(self):
+        self.scene.clear()
+        self.selected_label.setText("Selected: None")
+        self.summary_label.setText("")
+        self.go_to_button.setEnabled(False)
+        self.stack.setCurrentWidget(self.placeholder_widget)
+
+    def show_content(self):
+        self.stack.setCurrentWidget(self.content_widget)
+
+    def refresh(self):
+        self._on_refresh()
+
+    def build_graph(self, center_node: Dict[str, Any], nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]):
+        self._nodes = nodes
+        self._edges = edges
+        self.scene.clear()
+        self._node_items.clear()
+
+        positions = self._layout_nodes(center_node, nodes)
+        for node in nodes:
+            pos = positions.get(node["id"], (0, 0))
+            item = self._add_node_item(node, pos[0], pos[1], node["id"] == center_node["id"])
+            self._node_items[node["id"]] = item
+
+        for edge in edges:
+            src = self._node_items.get(edge["source_id"])
+            tgt = self._node_items.get(edge["target_id"])
+            if src and tgt:
+                edge_color, edge_width, dash = self._edge_style(edge["type"])
+                pen = QPen(edge_color, edge_width)
+                if dash:
+                    pen.setStyle(Qt.DashLine)
+                line = QGraphicsLineItem(src.rect().center().x() + src.x(),
+                                         src.rect().center().y() + src.y(),
+                                         tgt.rect().center().x() + tgt.x(),
+                                         tgt.rect().center().y() + tgt.y())
+                line.setPen(pen)
+                self.scene.addItem(line)
+        self._zoom_fit()
+
+    def _add_node_item(self, node: Dict[str, Any], x: float, y: float, is_center: bool):
+        rect = QGraphicsRectItem(0, 0, 120, 50)
+        rect.setPos(x, y)
+        fill, text_color = self._node_style(node, is_center)
+        rect.setBrush(QBrush(fill))
+        rect.setPen(QPen(QColor("#2a2d30"), 1))
+        rect.setFlag(QGraphicsRectItem.ItemIsSelectable)
+        rect.setData(0, node)
+        text = QGraphicsTextItem(node["label"])
+        text.setDefaultTextColor(text_color)
+        text.setParentItem(rect)
+        text.setPos(5, 5)
+        self.scene.addItem(rect)
+        return rect
+
+    def _layout_nodes(self, center_node: Dict[str, Any], nodes: List[Dict[str, Any]]):
+        positions = {center_node["id"]: (0, 0)}
+        radius = 200
+        others = [n for n in nodes if n["id"] != center_node["id"]]
+        count = len(others)
+        for i, node in enumerate(others):
+            angle = (2 * math.pi * i / max(1, count))
+            positions[node["id"]] = (radius * math.cos(angle), radius * math.sin(angle))
+        return positions
+
+    def _on_refresh(self):
+        edge_types = []
+        if self.calls_cb.isChecked():
+            edge_types.append("CALLS")
+        if self.refs_cb.isChecked():
+            edge_types.append("REFERENCES")
+        if self.data_cb.isChecked():
+            edge_types.append("DATA_DEPENDS")
+        if self.vuln_cb.isChecked():
+            edge_types.append("CALLS_VULNERABLE")
+        self.refresh_requested.emit(int(self.n_hops.value()), edge_types)
+
+    def _go_to_selected(self):
+        if self._selected_node:
+            self.navigate_requested.emit(self._selected_node["address"])
+
+    def _on_selection_changed(self):
+        items = self.scene.selectedItems()
+        if not items:
+            self._selected_node = None
+            self.selected_label.setText("Selected: None")
+            self.summary_label.setText("")
+            self.go_to_button.setEnabled(False)
+            self.details_button.setEnabled(False)
+            return
+        node = items[0].data(0)
+        if not node:
+            return
+        self._selected_node = node
+        self.selected_label.setText(f"Selected: {node['label']}")
+        summary = node.get("summary", "")
+        if summary and len(summary) > 100:
+            summary = summary[:97] + "..."
+        self.summary_label.setText(summary)
+        self.go_to_button.setEnabled(True)
+        self.details_button.setEnabled(True)
+
+    def _node_style(self, node: Dict[str, Any], is_center: bool):
+        if is_center:
+            return self._colors["center"], self._colors["center_text"]
+        if node.get("has_vuln"):
+            return self._colors["vuln"], self._colors["vuln_text"]
+        return self._colors["node"], self._colors["node_text"]
+
+    def _edge_style(self, edge_type: str):
+        if edge_type == "CALLS":
+            return self._colors["edge_calls"], 2, False
+        if edge_type == "REFERENCES":
+            return self._colors["edge_refs"], 1, True
+        if edge_type == "DATA_DEPENDS":
+            return self._colors["edge_data"], 1, True
+        if edge_type == "CALLS_VULNERABLE":
+            return self._colors["edge_vuln"], 2, False
+        return self._colors["edge_calls"], 1, False
+
+    def _zoom_in(self):
+        self.view.scale(1.2, 1.2)
+        self._update_zoom_label()
+
+    def _zoom_out(self):
+        self.view.scale(1 / 1.2, 1 / 1.2)
+        self._update_zoom_label()
+
+    def _zoom_fit(self):
+        self.view.fitInView(self.scene.itemsBoundingRect(), Qt.KeepAspectRatio)
+        self._update_zoom_label()
+
+    def _update_zoom_label(self):
+        transform = self.view.transform()
+        percent = int(transform.m11() * 100)
+        self.zoom_label.setText(f"{percent}%")
+
+
+class SemanticGraphSearchView(QWidget):
+    query_requested = Signal(str, dict)
+    navigate_requested = Signal(int)
+
+    QUERY_TYPES = [
+        ("Semantic Search", "ga_search_semantic"),
+        ("Get Analysis", "ga_get_semantic_analysis"),
+        ("Similar Functions", "ga_get_similar_functions"),
+        ("Call Context", "ga_get_call_context"),
+        ("Security Analysis", "ga_get_security_analysis"),
+        ("Module Summary", "ga_get_module_summary"),
+        ("Activity Analysis", "ga_get_activity_analysis"),
+    ]
+
+    def __init__(self):
+        super().__init__()
+        self._last_results = []
+        self._selected_address = None
+        self._current_address = None
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout()
+
+        types_group = QGroupBox("Query Type")
+        types_layout = QGridLayout()
+        self.type_group = QButtonGroup()
+        for idx, (label, value) in enumerate(self.QUERY_TYPES):
+            radio = QRadioButton(label)
+            radio.setProperty("query_value", value)
+            if idx == 0:
+                radio.setChecked(True)
+            self.type_group.addButton(radio)
+            types_layout.addWidget(radio, idx // 4, idx % 4)
+        types_group.setLayout(types_layout)
+        layout.addWidget(types_group)
+
+        params_group = QGroupBox("Parameters")
+        params_layout = QHBoxLayout()
+        self.query_field = QLineEdit()
+        self.address_field = QLineEdit()
+        self.limit_spin = QSpinBox()
+        self.limit_spin.setRange(1, 100)
+        self.limit_spin.setValue(20)
+        self.depth_spin = QSpinBox()
+        self.depth_spin.setRange(1, 5)
+        self.depth_spin.setValue(1)
+        self.direction_combo = QComboBox()
+        self.direction_combo.addItems(["both", "callers", "callees"])
+        self.scope_combo = QComboBox()
+        self.scope_combo.addItems(["function", "binary"])
+        params_layout.addWidget(QLabel("Query:"))
+        params_layout.addWidget(self.query_field)
+        params_layout.addWidget(QLabel("Address:"))
+        params_layout.addWidget(self.address_field)
+        params_layout.addWidget(QLabel("Limit:"))
+        params_layout.addWidget(self.limit_spin)
+        params_layout.addWidget(QLabel("Depth:"))
+        params_layout.addWidget(self.depth_spin)
+        params_layout.addWidget(QLabel("Direction:"))
+        params_layout.addWidget(self.direction_combo)
+        params_layout.addWidget(QLabel("Scope:"))
+        params_layout.addWidget(self.scope_combo)
+        params_group.setLayout(params_layout)
+        layout.addWidget(params_group)
+
+        controls = QHBoxLayout()
+        self.use_current = QCheckBox("Use Current Address")
+        self.use_current.stateChanged.connect(self._apply_current_address)
+        self.execute_button = QPushButton("Execute Query")
+        self.execute_button.clicked.connect(self._execute_query)
+        controls.addWidget(self.use_current)
+        controls.addStretch()
+        controls.addWidget(self.execute_button)
+        layout.addLayout(controls)
+
+        self.results_table = QTableWidget(0, 5)
+        self.results_table.setHorizontalHeaderLabels(["#", "Function", "Address", "Score", "Summary"])
+        self.results_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.results_table.itemSelectionChanged.connect(self._on_result_selected)
+        layout.addWidget(self.results_table)
+
+        self.details = QTextEdit()
+        self.details.setReadOnly(True)
+        layout.addWidget(self.details)
+
+        details_controls = QHBoxLayout()
+        self.go_to_button = QPushButton("Go To")
+        self.go_to_button.setEnabled(False)
+        self.go_to_button.clicked.connect(self._go_to_selected)
+        details_controls.addWidget(self.go_to_button)
+        details_controls.addStretch()
+        layout.addLayout(details_controls)
+
+        self.setLayout(layout)
+
+    def _execute_query(self):
+        query_type = self._get_selected_query_type()
+        args = self._build_args(query_type)
+        if args is None:
+            return
+        self.execute_button.setEnabled(False)
+        self.execute_button.setText("Executing...")
+        self.query_requested.emit(query_type, args)
+
+    def handle_query_result(self, json_result: str):
+        self.execute_button.setEnabled(True)
+        self.execute_button.setText("Execute Query")
+        self._populate_results(json_result)
+
+    def update_current_address(self, address: int):
+        self._current_address = address
+        if self.use_current.isChecked():
+            self.address_field.setText(f"0x{address:x}")
+
+    def _populate_results(self, json_result: str):
+        self.results_table.setRowCount(0)
+        self._last_results = []
+        if not json_result:
+            return
+        try:
+            parsed = json.loads(json_result)
+        except Exception:
+            self.details.setPlainText("Failed to parse results.")
+            return
+
+        results = parsed.get("results") if isinstance(parsed, dict) else parsed
+        if isinstance(results, dict):
+            results = [results]
+        if not results:
+            return
+        self._last_results = results
+        for idx, entry in enumerate(results, 1):
+            row = self.results_table.rowCount()
+            self.results_table.insertRow(row)
+            name = entry.get("function_name") or entry.get("name") or "Unknown"
+            address = entry.get("address", "-")
+            score = entry.get("score", "-")
+            summary = entry.get("summary") or entry.get("description") or ""
+            if len(summary) > 80:
+                summary = summary[:77] + "..."
+            self.results_table.setItem(row, 0, QTableWidgetItem(str(idx)))
+            self.results_table.setItem(row, 1, QTableWidgetItem(name))
+            self.results_table.setItem(row, 2, QTableWidgetItem(str(address)))
+            self.results_table.setItem(row, 3, QTableWidgetItem(str(score)))
+            self.results_table.setItem(row, 4, QTableWidgetItem(summary))
+
+    def _on_result_selected(self):
+        items = self.results_table.selectedItems()
+        if not items:
+            return
+        row = items[0].row()
+        if row >= len(self._last_results):
+            return
+        result = self._last_results[row]
+        address = result.get("address")
+        self._selected_address = address
+        details = json.dumps(result, indent=2)
+        self.details.setPlainText(details)
+        self.go_to_button.setEnabled(bool(address))
+
+    def _go_to_selected(self):
+        if not self._selected_address:
+            return
+        addr = str(self._selected_address)
+        if addr.startswith("0x"):
+            value = int(addr, 16)
+        else:
+            value = int(addr, 16)
+        self.navigate_requested.emit(value)
+
+    def _get_selected_query_type(self) -> str:
+        for button in self.type_group.buttons():
+            if button.isChecked():
+                return button.property("query_value")
+        return "ga_search_semantic"
+
+    def _build_args(self, query_type: str) -> Optional[Dict[str, Any]]:
+        args: Dict[str, Any] = {}
+        if query_type == "ga_search_semantic":
+            query = self.query_field.text().strip()
+            if not query:
+                return None
+            args["query"] = query
+            args["limit"] = int(self.limit_spin.value())
+        elif query_type in ("ga_get_semantic_analysis", "ga_get_module_summary", "ga_get_activity_analysis"):
+            addr = self.address_field.text().strip()
+            if addr:
+                args["address"] = addr
+        elif query_type == "ga_get_similar_functions":
+            addr = self.address_field.text().strip()
+            if addr:
+                args["address"] = addr
+            args["limit"] = int(self.limit_spin.value())
+        elif query_type == "ga_get_call_context":
+            addr = self.address_field.text().strip()
+            if addr:
+                args["address"] = addr
+            args["depth"] = int(self.depth_spin.value())
+            args["direction"] = self.direction_combo.currentText()
+        elif query_type == "ga_get_security_analysis":
+            addr = self.address_field.text().strip()
+            if addr:
+                args["address"] = addr
+            args["scope"] = self.scope_combo.currentText()
+        return args
+
+    def _apply_current_address(self):
+        if self.use_current.isChecked() and self._current_address is not None:
+            self.address_field.setText(f"0x{self._current_address:x}")
+
+
+class QStackedFrame(QFrame):
+    def __init__(self):
+        super().__init__()
+        self._stack = QVBoxLayout()
+        self._widgets = []
+        self.setLayout(self._stack)
+
+    def addWidget(self, widget: QWidget):
+        widget.setVisible(False)
+        self._widgets.append(widget)
+        self._stack.addWidget(widget)
+
+    def setCurrentWidget(self, widget: QWidget):
+        for w in self._widgets:
+            w.setVisible(w is widget)

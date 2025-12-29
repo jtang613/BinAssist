@@ -2,7 +2,7 @@
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                               QPushButton, QTextBrowser, QTextEdit, QLineEdit, QSizePolicy, QCheckBox,
-                              QApplication)
+                              QApplication, QGroupBox, QGridLayout)
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QKeySequence, QFontDatabase
 import markdown
@@ -87,9 +87,18 @@ class ExplainTabView(QWidget):
         
         # Main text widget - HTML browser/Markdown editor
         self.create_main_text_widget(layout)
+
+        # Security analysis panel
+        self.create_security_panel(layout)
         
         # Bottom row - Action buttons
         self.create_bottom_row(layout)
+
+        # Main content should consume vertical space; security panel stays compact.
+        # (Both browser/editor exist in the layout; only one is visible at a time.)
+        layout.setStretchFactor(self.explain_browser, 1)
+        layout.setStretchFactor(self.explain_editor, 1)
+        layout.setStretchFactor(self.security_group, 0)
         
         self.setLayout(layout)
     
@@ -165,6 +174,58 @@ class ExplainTabView(QWidget):
         bottom_row.addWidget(self.clear_button)
         
         parent_layout.addLayout(bottom_row)
+
+    def create_security_panel(self, parent_layout):
+        """Create the security analysis panel below the explanation content."""
+        self.security_group = QGroupBox("Security Analysis")
+        self.security_group.setVisible(False)
+        # Keep compact: don't let this panel absorb spare vertical space.
+        self.security_group.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        self.security_group.setMaximumHeight(140)
+
+        grid = QGridLayout()
+        grid.setContentsMargins(8, 6, 8, 6)
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(2)
+
+        self.risk_label = QLabel("Risk: —")
+        self.activity_label = QLabel("Activity: —")
+        self.flags_label = QLabel("Flags: None")
+        self.network_label = QLabel("Network APIs")
+        self.file_label = QLabel("File I/O APIs")
+
+        self.network_text = QTextEdit()
+        self.network_text.setReadOnly(True)
+        self.network_text.setFixedHeight(36)
+        self.network_text.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
+        self.network_text.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.network_text.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.network_text.setLineWrapMode(QTextEdit.NoWrap)
+
+        self.file_text = QTextEdit()
+        self.file_text.setReadOnly(True)
+        self.file_text.setFixedHeight(36)
+        self.file_text.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
+        self.file_text.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.file_text.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.file_text.setLineWrapMode(QTextEdit.NoWrap)
+
+        grid.addWidget(self.risk_label, 0, 0)
+        grid.addWidget(self.activity_label, 0, 1)
+        grid.addWidget(self.flags_label, 1, 0, 1, 2)
+        grid.addWidget(self.network_label, 2, 0)
+        grid.addWidget(self.file_label, 2, 1)
+        grid.addWidget(self.network_text, 3, 0)
+        grid.addWidget(self.file_text, 3, 1)
+
+        # Prevent the grid from distributing extra height into row gaps.
+        for r in range(0, 4):
+            grid.setRowStretch(r, 0)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+
+        self.security_group.setLayout(grid)
+        parent_layout.addWidget(self.security_group)
     
     def toggle_edit_mode(self):
         # Prevent edit mode changes during query execution
@@ -224,6 +285,29 @@ class ExplainTabView(QWidget):
                 QTimer.singleShot(0, restore_scroll)
         else:
             self.explain_editor.setPlainText(markdown_text)
+
+    def update_security_info(self, risk_level, activity_profile, security_flags, network_apis, file_io_apis):
+        """Update the security analysis panel."""
+        self.risk_label.setText(f"Risk: {risk_level or '—'}")
+        self.activity_label.setText(f"Activity: {activity_profile or '—'}")
+
+        flags_text = ", ".join(security_flags) if security_flags else "None"
+        self.flags_label.setText(f"Flags: {flags_text}")
+
+        self.network_text.setPlainText("\n".join(network_apis) if network_apis else "(none detected)")
+        self.file_text.setPlainText("\n".join(file_io_apis) if file_io_apis else "(none detected)")
+
+        has_data = bool(risk_level or activity_profile or security_flags or network_apis or file_io_apis)
+        self.security_group.setVisible(has_data)
+
+    def clear_security_info(self):
+        """Clear and hide the security analysis panel."""
+        self.risk_label.setText("Risk: —")
+        self.activity_label.setText("Activity: —")
+        self.flags_label.setText("Flags: None")
+        self.network_text.clear()
+        self.file_text.clear()
+        self.security_group.setVisible(False)
     
     def is_rag_enabled(self):
         """Get the current state of the RAG checkbox"""

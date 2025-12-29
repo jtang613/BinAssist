@@ -170,6 +170,90 @@ class AnalysisDBService:
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_chat_hash ON BNChatHistory(binary_hash)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_chat_metadata_lookup ON BNChatMetadata(binary_hash, chat_id)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_system_prompt_active ON SystemPrompts(is_active)')
+
+                # GraphRAG tables (nodes, edges, and optional FTS)
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS GraphNodes (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        binary_hash TEXT NOT NULL,
+                        node_type TEXT NOT NULL,
+                        address INTEGER,
+                        name TEXT,
+                        raw_code TEXT,
+                        llm_summary TEXT,
+                        security_flags TEXT,
+                        network_apis TEXT,
+                        file_io_apis TEXT,
+                        ip_addresses TEXT,
+                        urls TEXT,
+                        file_paths TEXT,
+                        domains TEXT,
+                        registry_keys TEXT,
+                        activity_profile TEXT,
+                        risk_level TEXT,
+                        is_stale INTEGER DEFAULT 1,
+                        user_edited INTEGER DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(binary_hash, node_type, address)
+                    )
+                ''')
+
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS GraphEdges (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        binary_hash TEXT NOT NULL,
+                        source_id INTEGER NOT NULL,
+                        target_id INTEGER NOT NULL,
+                        edge_type TEXT NOT NULL,
+                        weight REAL DEFAULT 1.0,
+                        metadata TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(binary_hash, source_id, target_id, edge_type),
+                        FOREIGN KEY(source_id) REFERENCES GraphNodes(id),
+                        FOREIGN KEY(target_id) REFERENCES GraphNodes(id)
+                    )
+                ''')
+
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_graph_nodes_lookup ON GraphNodes(binary_hash, node_type, address)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_graph_nodes_name ON GraphNodes(name)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_graph_edges_source ON GraphEdges(source_id)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_graph_edges_target ON GraphEdges(target_id)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_graph_edges_type ON GraphEdges(edge_type)')
+
+                # Optional FTS5 index for semantic search
+                try:
+                    cursor.execute('''
+                        CREATE VIRTUAL TABLE IF NOT EXISTS GraphNodeFTS USING fts5(
+                            name,
+                            llm_summary,
+                            security_flags,
+                            content='GraphNodes',
+                            content_rowid='id'
+                        )
+                    ''')
+                    cursor.execute('''
+                        CREATE TRIGGER IF NOT EXISTS graph_nodes_ai AFTER INSERT ON GraphNodes BEGIN
+                            INSERT INTO GraphNodeFTS(rowid, name, llm_summary, security_flags)
+                            VALUES (new.id, new.name, new.llm_summary, new.security_flags);
+                        END;
+                    ''')
+                    cursor.execute('''
+                        CREATE TRIGGER IF NOT EXISTS graph_nodes_ad AFTER DELETE ON GraphNodes BEGIN
+                            INSERT INTO GraphNodeFTS(GraphNodeFTS, rowid, name, llm_summary, security_flags)
+                            VALUES ('delete', old.id, old.name, old.llm_summary, old.security_flags);
+                        END;
+                    ''')
+                    cursor.execute('''
+                        CREATE TRIGGER IF NOT EXISTS graph_nodes_au AFTER UPDATE ON GraphNodes BEGIN
+                            INSERT INTO GraphNodeFTS(GraphNodeFTS, rowid, name, llm_summary, security_flags)
+                            VALUES ('delete', old.id, old.name, old.llm_summary, old.security_flags);
+                            INSERT INTO GraphNodeFTS(rowid, name, llm_summary, security_flags)
+                            VALUES (new.id, new.name, new.llm_summary, new.security_flags);
+                        END;
+                    ''')
+                except Exception as e:
+                    log.log_warn(f"FTS5 not available for GraphNodeFTS: {e}")
                 
                 conn.commit()
                 log.log_info("AnalysisDB schema created successfully")
@@ -179,6 +263,14 @@ class AnalysisDBService:
                 raise RuntimeError(f"Failed to create database schema: {e}")
             finally:
                 conn.close()
+
+    def get_connection(self) -> sqlite3.Connection:
+        """Get a new SQLite connection with standard PRAGMAs applied."""
+        return self._get_connection()
+
+    def get_db_lock(self) -> threading.RLock:
+        """Expose the database lock for services coordinating multi-step operations."""
+        return self._db_lock
     
     def _run_migrations(self):
         """Run database migrations"""

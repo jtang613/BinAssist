@@ -95,6 +95,8 @@ class DatabaseMigrations:
                 (1, DatabaseMigrations._migration_001_initial_schema),
                 (2, DatabaseMigrations._migration_002_add_indexes),
                 (3, DatabaseMigrations._migration_003_native_message_storage),
+                (4, DatabaseMigrations._migration_004_graphrag_schema),
+                (5, DatabaseMigrations._migration_005_graphrag_columns),
                 # Add future migrations here
             ]
             
@@ -252,6 +254,130 @@ class DatabaseMigrations:
             
         except Exception as e:
             log.log_error(f"Migration 003 failed: {e}")
+            return False
+
+    @staticmethod
+    def _migration_004_graphrag_schema(db_path: str) -> bool:
+        """Migration 004: GraphRAG schema (nodes, edges, optional FTS)"""
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS GraphNodes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    binary_hash TEXT NOT NULL,
+                    node_type TEXT NOT NULL,
+                    address INTEGER,
+                    name TEXT,
+                    raw_code TEXT,
+                    llm_summary TEXT,
+                    security_flags TEXT,
+                    network_apis TEXT,
+                    file_io_apis TEXT,
+                    ip_addresses TEXT,
+                    urls TEXT,
+                    file_paths TEXT,
+                    domains TEXT,
+                    registry_keys TEXT,
+                    activity_profile TEXT,
+                    risk_level TEXT,
+                    is_stale INTEGER DEFAULT 1,
+                    user_edited INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(binary_hash, node_type, address)
+                )
+            ''')
+
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS GraphEdges (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    binary_hash TEXT NOT NULL,
+                    source_id INTEGER NOT NULL,
+                    target_id INTEGER NOT NULL,
+                    edge_type TEXT NOT NULL,
+                    weight REAL DEFAULT 1.0,
+                    metadata TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(binary_hash, source_id, target_id, edge_type),
+                    FOREIGN KEY(source_id) REFERENCES GraphNodes(id),
+                    FOREIGN KEY(target_id) REFERENCES GraphNodes(id)
+                )
+            ''')
+
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_graph_nodes_lookup ON GraphNodes(binary_hash, node_type, address)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_graph_nodes_name ON GraphNodes(name)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_graph_edges_source ON GraphEdges(source_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_graph_edges_target ON GraphEdges(target_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_graph_edges_type ON GraphEdges(edge_type)')
+
+            # Optional FTS5 index for semantic search
+            try:
+                cursor.execute('''
+                    CREATE VIRTUAL TABLE IF NOT EXISTS GraphNodeFTS USING fts5(
+                        name,
+                        llm_summary,
+                        security_flags,
+                        content='GraphNodes',
+                        content_rowid='id'
+                    )
+                ''')
+                cursor.execute('''
+                    CREATE TRIGGER IF NOT EXISTS graph_nodes_ai AFTER INSERT ON GraphNodes BEGIN
+                        INSERT INTO GraphNodeFTS(rowid, name, llm_summary, security_flags)
+                        VALUES (new.id, new.name, new.llm_summary, new.security_flags);
+                    END;
+                ''')
+                cursor.execute('''
+                    CREATE TRIGGER IF NOT EXISTS graph_nodes_ad AFTER DELETE ON GraphNodes BEGIN
+                        INSERT INTO GraphNodeFTS(GraphNodeFTS, rowid, name, llm_summary, security_flags)
+                        VALUES ('delete', old.id, old.name, old.llm_summary, old.security_flags);
+                    END;
+                ''')
+                cursor.execute('''
+                    CREATE TRIGGER IF NOT EXISTS graph_nodes_au AFTER UPDATE ON GraphNodes BEGIN
+                        INSERT INTO GraphNodeFTS(GraphNodeFTS, rowid, name, llm_summary, security_flags)
+                        VALUES ('delete', old.id, old.name, old.llm_summary, old.security_flags);
+                        INSERT INTO GraphNodeFTS(rowid, name, llm_summary, security_flags)
+                        VALUES (new.id, new.name, new.llm_summary, new.security_flags);
+                    END;
+                ''')
+            except Exception as e:
+                log.log_warn(f"FTS5 not available for GraphNodeFTS: {e}")
+
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            log.log_error(f"Migration 004 failed: {e}")
+            return False
+
+    @staticmethod
+    def _migration_005_graphrag_columns(db_path: str) -> bool:
+        """Migration 005: Add GraphRAG string reference columns."""
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            columns = [
+                "ALTER TABLE GraphNodes ADD COLUMN ip_addresses TEXT",
+                "ALTER TABLE GraphNodes ADD COLUMN urls TEXT",
+                "ALTER TABLE GraphNodes ADD COLUMN file_paths TEXT",
+                "ALTER TABLE GraphNodes ADD COLUMN domains TEXT",
+                "ALTER TABLE GraphNodes ADD COLUMN registry_keys TEXT",
+            ]
+            for sql in columns:
+                try:
+                    cursor.execute(sql)
+                except Exception:
+                    pass
+
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            log.log_error(f"Migration 005 failed: {e}")
             return False
 
 

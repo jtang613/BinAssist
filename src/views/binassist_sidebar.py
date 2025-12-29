@@ -12,11 +12,13 @@ from .query_tab_view import QueryTabView
 from .actions_tab_view import ActionsTabView
 from .rag_tab_view import RagTabView
 from .settings_tab_view import SettingsTabView
+from .semantic_graph_tab_view import SemanticGraphTabView
 from ..controllers.settings_controller import SettingsController
 from ..controllers.explain_controller import ExplainController
 from ..controllers.query_controller import QueryController
 from ..controllers.rag_controller import RAGController
 from ..controllers.actions_controller import ActionsController
+from ..controllers.semantic_graph_controller import SemanticGraphController
 
 
 class BinAssistSidebarWidget(SidebarWidget):
@@ -41,6 +43,7 @@ class BinAssistSidebarWidget(SidebarWidget):
         self.create_explain_tab()
         self.create_query_tab()
         self.create_actions_tab()
+        self.create_semantic_graph_tab()
         self.create_rag_tab()
         self.create_settings_tab()
         
@@ -94,6 +97,11 @@ class BinAssistSidebarWidget(SidebarWidget):
         self.rag_controller = RAGController(self.rag_tab)
         
         self.tab_widget.addTab(self.rag_tab, "RAG")
+
+    def create_semantic_graph_tab(self):
+        self.semantic_graph_tab = SemanticGraphTabView()
+        self.semantic_graph_controller = SemanticGraphController(self.semantic_graph_tab, self.data, self.frame)
+        self.tab_widget.addTab(self.semantic_graph_tab, "Semantic Graph")
     
     def create_settings_tab(self):
         self.settings_tab = SettingsTabView()
@@ -120,6 +128,8 @@ class BinAssistSidebarWidget(SidebarWidget):
             self.query_controller.set_current_offset(offset)
         if hasattr(self, 'actions_controller'):
             self.actions_controller.set_current_offset(offset)
+        if hasattr(self, 'semantic_graph_controller'):
+            self.semantic_graph_controller.set_current_offset(offset)
     
     def notifyViewChanged(self, view_frame):
         if view_frame is None:
@@ -141,6 +151,9 @@ class BinAssistSidebarWidget(SidebarWidget):
             if self.data is not None:
                 self.actions_controller.set_binary_view(self.data)
             self.actions_controller.set_view_frame(self.frame)
+        if hasattr(self, 'semantic_graph_controller'):
+            self.semantic_graph_controller.set_binary_view(self.data)
+            self.semantic_graph_controller.set_view_frame(self.frame)
     
     def contextMenuEvent(self, event):
         self.m_contextMenuManager.show(self.m_menu, self.actionHandler)

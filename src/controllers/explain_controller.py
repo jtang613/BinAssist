@@ -8,6 +8,7 @@ from ..services.binary_context_service import BinaryContextService, ViewLevel
 from ..services.llm_providers.provider_factory import LLMProviderFactory
 from ..services.settings_service import SettingsService
 from ..services.analysis_db_service import AnalysisDBService
+from ..services.graphrag.graphrag_service import GraphRAGService
 from ..services.rag_service import rag_service
 from ..services.models.rag_models import SearchRequest, SearchType
 from ..services.mcp_client_service import MCPClientService
@@ -42,6 +43,7 @@ class ExplainController:
         self.settings_service = SettingsService()
         self.llm_factory = LLMProviderFactory()
         self.analysis_db = AnalysisDBService()
+        self.graphrag_service = GraphRAGService.get_instance(self.analysis_db)
         
         # MCP integration components
         self.mcp_service = MCPClientService()
@@ -204,16 +206,31 @@ class ExplainController:
             function_start = self._get_function_start_address(current_offset)
             
             if binary_hash and function_start is not None:
+                node = self.graphrag_service.get_node_by_address(
+                    binary_hash, "FUNCTION", int(function_start)
+                )
+                if node and node.llm_summary and not node.is_stale:
+                    log.log_info("Using cached GraphRAG function analysis")
+                    self._current_analysis_address = function_start
+                    self._current_analysis_type = "explain_function"
+                    self.view.set_explanation_content(node.llm_summary)
+                    self._update_security_panel_from_node(node)
+                    self._set_query_state("function", False)
+                    return
+
                 cached_analysis = self.analysis_db.get_function_analysis(
                     binary_hash, function_start, "explain_function"
                 )
 
                 if cached_analysis and not self._should_refresh_cache(cached_analysis):
-                    log.log_info("Using cached function analysis")
-                    # Track analysis context for edit/save functionality
+                    log.log_info("Using cached function analysis (legacy)")
                     self._current_analysis_address = function_start
                     self._current_analysis_type = "explain_function"
                     self.view.set_explanation_content(cached_analysis['response'])
+                    if node:
+                        self._update_security_panel_from_node(node)
+                    else:
+                        self.view.clear_security_info()
                     self._set_query_state("function", False)
                     return
             
@@ -271,6 +288,20 @@ class ExplainController:
             self._query_llm_async(llm_query, active_provider)
             
             log.log_info("Function explanation sent to LLM")
+
+            try:
+                function_obj = self.context_service._binary_view.get_function_at(function_start)
+                if not function_obj:
+                    functions = self.context_service._binary_view.get_functions_containing(function_start)
+                    function_obj = functions[0] if functions else None
+                if function_obj and binary_hash:
+                    node = self.graphrag_service.index_function(
+                        self.context_service._binary_view, function_obj, binary_hash
+                    )
+                    if node:
+                        self._update_security_panel_from_node(node)
+            except Exception as e:
+                log.log_warn(f"Failed to index function for GraphRAG: {e}")
             
         except Exception as e:
             error_msg = f"Exception in explain_function: {str(e)}"
@@ -322,6 +353,13 @@ class ExplainController:
                     self._current_analysis_address = function_start
                     self._current_analysis_type = "explain_line"
                     self.view.set_explanation_content(cached_analysis['response'])
+                    node = self.graphrag_service.get_node_by_address(
+                        binary_hash, "FUNCTION", int(function_start)
+                    )
+                    if node:
+                        self._update_security_panel_from_node(node)
+                    else:
+                        self.view.clear_security_info()
                     self._set_query_state("line", False)
                     return
             
@@ -384,6 +422,15 @@ class ExplainController:
                 deleted_line = self.analysis_db.delete_function_analysis(
                     binary_hash, function_start, "explain_line"
                 )
+
+                node = self.graphrag_service.get_node_by_address(
+                    binary_hash, "FUNCTION", int(function_start)
+                )
+                if node:
+                    node.llm_summary = None
+                    node.user_edited = False
+                    node.is_stale = True
+                    self.graphrag_service.upsert_node(node)
                 
                 if deleted_function or deleted_line:
                     log.log_info(f"Deleted cached analysis for function at 0x{function_start:x}")
@@ -397,6 +444,7 @@ class ExplainController:
         
         # Reset display to default content
         self._show_default_content()
+        self.view.clear_security_info()
     
     def on_edit_mode_changed(self, is_edit_mode: bool):
         """Handle edit mode change - save edited content when exiting edit mode"""
@@ -450,6 +498,23 @@ class ExplainController:
                 metadata
             )
             log.log_info(f"Saved edited {analysis_type} to database for address {hex(analysis_address)}")
+
+            if analysis_type == "explain_function":
+                node = self.graphrag_service.get_node_by_address(
+                    binary_hash, "FUNCTION", int(analysis_address)
+                )
+                if node is None:
+                    function_obj = self.context_service._binary_view.get_function_at(analysis_address)
+                    if function_obj:
+                        node = self.graphrag_service.index_function(
+                            self.context_service._binary_view, function_obj, binary_hash
+                        )
+                if node:
+                    node.llm_summary = edited_content
+                    node.user_edited = True
+                    node.is_stale = False
+                    self.graphrag_service.upsert_node(node)
+                    self._update_security_panel_from_node(node)
 
             # Update tracked values for future edits
             self._current_analysis_address = analysis_address
@@ -803,6 +868,22 @@ Analyze the specific instruction/line of code below. Provide a detailed explanat
                         complete_content, metadata
                     )
                     log.log_info(f"Saved {query_type} analysis to database")
+
+                    if query_type == "explain_function":
+                        node = self.graphrag_service.get_node_by_address(
+                            binary_hash, "FUNCTION", int(function_start)
+                        )
+                        if node is None:
+                            function_obj = self.context_service._binary_view.get_function_at(function_start)
+                            if function_obj:
+                                node = self.graphrag_service.index_function(
+                                    self.context_service._binary_view, function_obj, binary_hash
+                                )
+                        if node:
+                            node.llm_summary = complete_content
+                            node.is_stale = False
+                            self.graphrag_service.upsert_node(node)
+                            self._update_security_panel_from_node(node)
 
             except Exception as e:
                 log.log_error(f"Failed to save analysis to database: {e}")
@@ -1340,6 +1421,16 @@ Analyze the specific instruction/line of code below. Provide a detailed explanat
             if not binary_hash or function_start is None:
                 # No binary context or not in a function - show default content
                 self._show_default_content()
+                self.view.clear_security_info()
+                return
+
+            node = self.graphrag_service.get_node_by_address(
+                binary_hash, "FUNCTION", int(function_start)
+            )
+            if node and node.llm_summary and not node.is_stale:
+                log.log_info(f"Auto-loaded GraphRAG analysis for offset 0x{offset:x}")
+                self.view.set_explanation_content(node.llm_summary)
+                self._update_security_panel_from_node(node)
                 return
             
             # Check for cached function analysis first (more comprehensive)
@@ -1350,6 +1441,10 @@ Analyze the specific instruction/line of code below. Provide a detailed explanat
             if cached_function:
                 log.log_info(f"Auto-loaded cached function analysis for offset 0x{offset:x}")
                 self.view.set_explanation_content(cached_function['response'])
+                if node:
+                    self._update_security_panel_from_node(node)
+                else:
+                    self.view.clear_security_info()
                 return
             
             # Check for cached line analysis
@@ -1360,19 +1455,41 @@ Analyze the specific instruction/line of code below. Provide a detailed explanat
             if cached_line:
                 log.log_info(f"Auto-loaded cached line analysis for offset 0x{offset:x}")
                 self.view.set_explanation_content(cached_line['response'])
+                if node:
+                    self._update_security_panel_from_node(node)
+                else:
+                    self.view.clear_security_info()
                 return
             
             # No cached analysis found - show default content
             self._show_default_content()
+            if node:
+                self._update_security_panel_from_node(node)
+            else:
+                self.view.clear_security_info()
             
         except Exception as e:
             log.log_error(f"Failed to load cached analysis for offset 0x{offset:x}: {e}")
             self._show_default_content()
+            self.view.clear_security_info()
     
     def _show_default_content(self):
         """Show default content when no cached analysis is available"""
         default_content = "No explanation available. Click 'Explain Function' or 'Explain Line' to generate content."
         self.view.set_explanation_content(default_content)
+
+    def _update_security_panel_from_node(self, node):
+        """Update the security panel based on a GraphRAG node."""
+        if not node:
+            self.view.clear_security_info()
+            return
+        self.view.update_security_info(
+            node.risk_level,
+            node.activity_profile,
+            node.security_flags,
+            node.network_apis,
+            node.file_io_apis
+        )
     
     # RLHF methods
     
