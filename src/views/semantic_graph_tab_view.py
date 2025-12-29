@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 
 import json
-import math
+import shutil
+import subprocess
 from typing import Any, Dict, List, Optional
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFontDatabase, QTextCursor, QBrush, QColor, QPen
+from PySide6.QtGui import QFontDatabase, QTextCursor, QBrush, QColor, QPen, QPainterPath, QPainter
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTabWidget,
     QGroupBox, QGridLayout, QSplitter, QListWidget, QListWidgetItem, QTableWidget,
     QTableWidgetItem, QComboBox, QTextEdit, QCheckBox, QSpinBox, QGraphicsView,
-    QGraphicsScene, QGraphicsRectItem, QGraphicsLineItem, QGraphicsTextItem,
+    QGraphicsScene, QGraphicsPathItem, QGraphicsLineItem, QGraphicsTextItem, QGraphicsItem,
     QFrame, QRadioButton, QButtonGroup, QAbstractItemView, QInputDialog
 )
 
@@ -382,6 +383,10 @@ class SemanticGraphGraphView(QWidget):
     index_function_requested = Signal(int)
     reindex_requested = Signal()
 
+    NODE_WIDTH = 120
+    NODE_HEIGHT = 50
+    NODE_RADIUS = 6
+
     def __init__(self):
         super().__init__()
         self._nodes = []
@@ -455,7 +460,7 @@ class SemanticGraphGraphView(QWidget):
         self.scene = QGraphicsScene()
         self.scene.selectionChanged.connect(self._on_selection_changed)
         self.view = QGraphicsView(self.scene)
-        self.view.setRenderHint(self.view.renderHints())
+        self.view.setRenderHint(QPainter.Antialiasing, True)
         self.view.setBackgroundBrush(QBrush(self._colors["background"]))
         content_layout.addWidget(self.view)
 
@@ -518,13 +523,13 @@ class SemanticGraphGraphView(QWidget):
         self.scene.clear()
         self._node_items.clear()
 
-        positions = self._layout_nodes(center_node, nodes)
+        positions, edge_paths = self._layout_nodes(center_node, nodes, edges)
         for node in nodes:
             pos = positions.get(node["id"], (0, 0))
             item = self._add_node_item(node, pos[0], pos[1], node["id"] == center_node["id"])
             self._node_items[node["id"]] = item
 
-        for edge in edges:
+        for idx, edge in enumerate(edges):
             src = self._node_items.get(edge["source_id"])
             tgt = self._node_items.get(edge["target_id"])
             if src and tgt:
@@ -532,38 +537,219 @@ class SemanticGraphGraphView(QWidget):
                 pen = QPen(edge_color, edge_width)
                 if dash:
                     pen.setStyle(Qt.DashLine)
-                line = QGraphicsLineItem(src.rect().center().x() + src.x(),
-                                         src.rect().center().y() + src.y(),
-                                         tgt.rect().center().x() + tgt.x(),
-                                         tgt.rect().center().y() + tgt.y())
+                if edge_paths and idx in edge_paths:
+                    points = edge_paths[idx]
+                    if len(points) >= 2:
+                        path = QPainterPath()
+                        path.moveTo(points[0][0], points[0][1])
+                        for x, y in points[1:]:
+                            path.lineTo(x, y)
+                        path_item = QGraphicsPathItem(path)
+                        path_item.setPen(pen)
+                        path_item.setZValue(-1)
+                        self.scene.addItem(path_item)
+                        continue
+                src_center = src.sceneBoundingRect().center()
+                tgt_center = tgt.sceneBoundingRect().center()
+                line = QGraphicsLineItem(src_center.x(), src_center.y(),
+                                         tgt_center.x(), tgt_center.y())
                 line.setPen(pen)
+                line.setZValue(-1)
                 self.scene.addItem(line)
         self._zoom_fit()
 
     def _add_node_item(self, node: Dict[str, Any], x: float, y: float, is_center: bool):
-        rect = QGraphicsRectItem(0, 0, 120, 50)
+        path = QPainterPath()
+        path.addRoundedRect(0, 0, self.NODE_WIDTH, self.NODE_HEIGHT,
+                            self.NODE_RADIUS, self.NODE_RADIUS)
+        rect = QGraphicsPathItem(path)
         rect.setPos(x, y)
         fill, text_color = self._node_style(node, is_center)
         rect.setBrush(QBrush(fill))
         rect.setPen(QPen(QColor("#2a2d30"), 1))
-        rect.setFlag(QGraphicsRectItem.ItemIsSelectable)
+        rect.setFlag(QGraphicsItem.ItemIsSelectable)
         rect.setData(0, node)
         text = QGraphicsTextItem(node["label"])
         text.setDefaultTextColor(text_color)
         text.setParentItem(rect)
-        text.setPos(5, 5)
+        text.setPos(6, 5)
         self.scene.addItem(rect)
         return rect
 
-    def _layout_nodes(self, center_node: Dict[str, Any], nodes: List[Dict[str, Any]]):
-        positions = {center_node["id"]: (0, 0)}
-        radius = 200
-        others = [n for n in nodes if n["id"] != center_node["id"]]
-        count = len(others)
-        for i, node in enumerate(others):
-            angle = (2 * math.pi * i / max(1, count))
-            positions[node["id"]] = (radius * math.cos(angle), radius * math.sin(angle))
-        return positions
+    def _layout_nodes(self, center_node: Dict[str, Any], nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]):
+        graphviz_positions = self._layout_nodes_graphviz(nodes, edges)
+        if graphviz_positions:
+            return graphviz_positions
+
+        node_ids = {n["id"] for n in nodes}
+        outgoing = {}
+        incoming = {}
+        for edge in edges:
+            src = edge.get("source_id")
+            tgt = edge.get("target_id")
+            if src in node_ids and tgt in node_ids:
+                outgoing.setdefault(src, set()).add(tgt)
+                incoming.setdefault(tgt, set()).add(src)
+
+        levels = {center_node["id"]: 0}
+        max_hops = max(1, int(self.n_hops.value()))
+
+        # BFS to the right (callees/outgoing)
+        frontier = {center_node["id"]}
+        for depth in range(1, max_hops + 1):
+            next_frontier = set()
+            for nid in frontier:
+                for neighbor in outgoing.get(nid, set()):
+                    if neighbor not in levels:
+                        levels[neighbor] = depth
+                        next_frontier.add(neighbor)
+            frontier = next_frontier
+
+        # BFS to the left (callers/incoming)
+        frontier = {center_node["id"]}
+        for depth in range(1, max_hops + 1):
+            next_frontier = set()
+            for nid in frontier:
+                for neighbor in incoming.get(nid, set()):
+                    if neighbor not in levels:
+                        levels[neighbor] = -depth
+                        next_frontier.add(neighbor)
+            frontier = next_frontier
+
+        # Any remaining nodes (not reached) stay near center column
+        for node in nodes:
+            levels.setdefault(node["id"], 0)
+
+        level_map = {}
+        for node in nodes:
+            level_map.setdefault(levels[node["id"]], []).append(node)
+
+        x_spacing = 220
+        y_spacing = 90
+        positions = {}
+        for level, level_nodes in level_map.items():
+            level_nodes.sort(key=lambda n: n.get("label", ""))
+            count = len(level_nodes)
+            start_y = -((count - 1) * y_spacing) / 2.0
+            for idx, node in enumerate(level_nodes):
+                x = level * x_spacing
+                y = start_y + idx * y_spacing
+                positions[node["id"]] = (x, y)
+
+        return positions, None
+
+    def _layout_nodes_graphviz(self, nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]):
+        if shutil.which("dot") is None:
+            return None
+
+        node_width = self.NODE_WIDTH / 72.0
+        node_height = self.NODE_HEIGHT / 72.0
+        node_map = {node["id"]: f"n{node['id']}" for node in nodes}
+        edge_queue: Dict[tuple, List[int]] = {}
+        for idx, edge in enumerate(edges):
+            src = node_map.get(edge.get("source_id"))
+            tgt = node_map.get(edge.get("target_id"))
+            if src and tgt:
+                edge_queue.setdefault((src, tgt), []).append(idx)
+
+        lines = [
+            "digraph G {",
+            "  graph [rankdir=TB, splines=ortho, nodesep=0.35, ranksep=0.45, pad=0.2];",
+            f"  node [shape=box, width={node_width:.2f}, height={node_height:.2f}, fixedsize=true];",
+        ]
+        for node in nodes:
+            name = node_map[node["id"]]
+            label = node.get("label", name).replace("\"", "'")
+            lines.append(f"  {name} [label=\"{label}\"];")
+        for edge in edges:
+            src = node_map.get(edge.get("source_id"))
+            tgt = node_map.get(edge.get("target_id"))
+            if src and tgt:
+                lines.append(f"  {src} -> {tgt};")
+        lines.append("}")
+
+        dot_input = "\n".join(lines).encode()
+        try:
+            result = subprocess.run(
+                ["dot", "-Tplain"],
+                input=dot_input,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+        except Exception:
+            return None
+
+        positions = {}
+        edge_paths: Dict[int, List[tuple]] = {}
+        all_points = []
+        lines = result.stdout.decode(errors="ignore").splitlines()
+        for line in lines:
+            if not line.startswith("node "):
+                if not line.startswith("edge "):
+                    continue
+                parts = line.split()
+                if len(parts) < 4:
+                    continue
+                tail = parts[1]
+                head = parts[2]
+                try:
+                    count = int(parts[3])
+                except ValueError:
+                    continue
+                expected = 4 + (count * 2)
+                if len(parts) < expected:
+                    continue
+                points = []
+                for idx in range(count):
+                    try:
+                        x = float(parts[4 + idx * 2]) * 72.0
+                        y = float(parts[4 + idx * 2 + 1]) * 72.0
+                    except ValueError:
+                        points = []
+                        break
+                    points.append((x, y))
+                    all_points.append((x, y))
+                if not points:
+                    continue
+                queue = edge_queue.get((tail, head))
+                if queue:
+                    edge_idx = queue.pop(0)
+                    edge_paths[edge_idx] = points
+                continue
+            parts = line.split()
+            if len(parts) < 6:
+                continue
+            name = parts[1]
+            try:
+                x = float(parts[2]) * 72.0
+                y = float(parts[3]) * 72.0
+            except ValueError:
+                continue
+            positions[name] = (x, y)
+            all_points.append((x, y))
+
+        if not positions or not all_points:
+            return None
+
+        max_y = max(pos[1] for pos in all_points)
+        converted = [(pos[0], max_y - pos[1]) for pos in all_points]
+        min_x = min(pos[0] for pos in converted)
+        min_y = min(pos[1] for pos in converted)
+        mapped = {}
+        for node_id, name in node_map.items():
+            if name not in positions:
+                continue
+            x, y = positions[name]
+            mapped[node_id] = (
+                x - min_x - (self.NODE_WIDTH / 2.0),
+                (max_y - y) - min_y - (self.NODE_HEIGHT / 2.0),
+            )
+
+        mapped_edges = {}
+        for edge_idx, points in edge_paths.items():
+            mapped_edges[edge_idx] = [(x - min_x, (max_y - y) - min_y) for x, y in points]
+        return mapped, mapped_edges
 
     def _on_refresh(self):
         edge_types = []
