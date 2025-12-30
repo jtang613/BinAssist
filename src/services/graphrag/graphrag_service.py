@@ -5,6 +5,7 @@ from typing import Optional
 from .graph_store import GraphStore
 from .models import GraphNode, GraphEdge
 from .structure_extractor import StructureExtractor
+from .semantic_extractor import SemanticExtractor, ExtractionResult
 from ..analysis_db_service import AnalysisDBService
 
 try:
@@ -56,3 +57,8 @@ class GraphRAGService:
     def index_function(self, binary_view, function, binary_hash: str) -> Optional[GraphNode]:
         extractor = StructureExtractor(binary_view, self.store)
         return extractor.extract_function(function, binary_hash)
+
+    async def summarize_stale_nodes(self, binary_view, binary_hash: str, provider,
+                                    limit: int = 0, progress_callback=None) -> ExtractionResult:
+        extractor = SemanticExtractor(provider, self.store, binary_view, binary_hash)
+        return await extractor.summarize_stale_nodes(limit, progress_callback)

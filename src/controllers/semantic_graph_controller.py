@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 
+import asyncio
 import json
 from typing import Any, Dict, List, Optional, Set
 
 import binaryninja as bn
 
+from PySide6.QtCore import QThread, Signal
+
 from ..services.analysis_db_service import AnalysisDBService
+from ..services.settings_service import SettingsService
 from ..services.graphrag.graphrag_service import GraphRAGService
 from ..services.graphrag.graph_store import GraphStore
+from ..services.graphrag.taint_analyzer import TaintAnalyzer
+from ..services.graphrag.query_engine import GraphRAGQueryEngine
+from ..services.llm_providers.provider_factory import LLMProviderFactory
 
 try:
     import binaryninja
@@ -31,7 +38,12 @@ class SemanticGraphController:
         self.analysis_db = AnalysisDBService()
         self.graph_service = GraphRAGService.get_instance(self.analysis_db)
         self.graph_store = GraphStore(self.analysis_db)
+        self.settings_service = SettingsService()
+        self.llm_factory = LLMProviderFactory()
         self._current_offset = 0
+        self._semantic_worker = None
+        self._security_worker = None
+        self._reindex_worker = None
 
         self._connect_signals()
 
@@ -134,11 +146,24 @@ class SemanticGraphController:
     def handle_reindex(self):
         if not self.binary_view:
             return
+        if self._reindex_worker and self._reindex_worker.isRunning():
+            self._reindex_worker.cancel()
+            self.view.status_label.setText("Status: Stopping reindex...")
+            return
         binary_hash = self.analysis_db.get_binary_hash(self.binary_view)
-        self.graph_store.delete_graph(binary_hash)
-        for function in self.binary_view.functions:
-            self.graph_service.index_function(self.binary_view, function, binary_hash)
-        self.refresh_current_view()
+        self.view.status_label.setText("Status: Reindexing...")
+        self._set_reindex_button_running(True)
+        self._reindex_worker = ReindexWorker(
+            self.graph_service,
+            self.graph_store,
+            self.binary_view,
+            binary_hash,
+        )
+        self._reindex_worker.progress.connect(self._on_reindex_progress)
+        self._reindex_worker.completed.connect(self._on_reindex_complete)
+        self._reindex_worker.cancelled.connect(self._on_reindex_cancelled)
+        self._reindex_worker.failed.connect(self._on_reindex_error)
+        self._reindex_worker.start()
 
     def handle_reset(self):
         if not self.binary_view:
@@ -148,10 +173,50 @@ class SemanticGraphController:
         self.refresh_current_view()
 
     def handle_semantic_analysis(self):
-        log.log_info("Semantic analysis not yet implemented for BinAssist.")
+        if not self.binary_view:
+            return
+        provider_config = self.settings_service.get_active_llm_provider()
+        if not provider_config:
+            log.log_warn("No active LLM provider configured for semantic analysis.")
+            self.view.status_label.setText("Status: No LLM provider configured")
+            return
+
+        if self._semantic_worker and self._semantic_worker.isRunning():
+            self._semantic_worker.cancel()
+            self.view.status_label.setText("Status: Stopping semantic analysis...")
+            return
+
+        binary_hash = self.analysis_db.get_binary_hash(self.binary_view)
+        self.view.status_label.setText("Status: Running semantic analysis...")
+        self._set_semantic_button_running(True)
+        self._semantic_worker = SemanticAnalysisWorker(
+            provider_config,
+            self.llm_factory,
+            self.graph_service,
+            self.binary_view,
+            binary_hash,
+        )
+        self._semantic_worker.progress.connect(self._on_semantic_progress)
+        self._semantic_worker.completed.connect(self._on_semantic_complete)
+        self._semantic_worker.cancelled.connect(self._on_semantic_cancelled)
+        self._semantic_worker.failed.connect(self._on_semantic_error)
+        self._semantic_worker.start()
 
     def handle_security_analysis(self):
-        log.log_info("Security analysis not yet implemented for BinAssist.")
+        if not self.binary_view:
+            return
+        if self._security_worker and self._security_worker.isRunning():
+            self._security_worker.cancel()
+            self.view.status_label.setText("Status: Stopping security analysis...")
+            return
+        binary_hash = self.analysis_db.get_binary_hash(self.binary_view)
+        self.view.status_label.setText("Status: Running security analysis...")
+        self._set_security_button_running(True)
+        self._security_worker = SecurityAnalysisWorker(self.graph_store, binary_hash)
+        self._security_worker.completed.connect(self._on_security_complete)
+        self._security_worker.cancelled.connect(self._on_security_cancelled)
+        self._security_worker.failed.connect(self._on_security_error)
+        self._security_worker.start()
 
     def handle_refresh_names(self):
         if not self.binary_view:
@@ -249,57 +314,44 @@ class SemanticGraphController:
             self.view.search_view.handle_query_result(json.dumps({"error": str(e)}))
 
     def _execute_query(self, binary_hash: str, query_type: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        engine = GraphRAGQueryEngine(self.graph_store, binary_hash)
         if query_type == "ga_search_semantic":
-            results = self.graph_store.search_nodes(binary_hash, args.get("query", ""), args.get("limit", 20))
-            return {"results": [self._node_to_result(n) for n in results]}
+            results = engine.search_semantic(args.get("query", ""), args.get("limit", 20))
+            return {"results": results}
         if query_type == "ga_get_semantic_analysis":
-            node = self._node_from_args(binary_hash, args)
-            return self._node_to_result(node) if node else {"error": "Not indexed"}
+            address = self._resolve_address_arg(binary_hash, args)
+            if address is None:
+                return {"error": "Address required"}
+            return engine.get_semantic_analysis(address)
         if query_type == "ga_get_similar_functions":
-            node = self._node_from_args(binary_hash, args)
-            if not node:
+            address = self._resolve_address_arg(binary_hash, args)
+            if address is None:
                 return {"results": []}
-            results = self.graph_store.search_nodes(binary_hash, node.name or "", args.get("limit", 10))
-            filtered = [self._node_to_result(n) for n in results if n.id != node.id]
-            return {"results": filtered}
+            results = engine.get_similar_functions(address, args.get("limit", 10))
+            return {"results": results}
         if query_type == "ga_get_call_context":
-            node = self._node_from_args(binary_hash, args)
-            if not node:
-                return {"error": "Not indexed"}
-            callers = self.graph_store.get_callers(binary_hash, node.id, "CALLS")
-            callees = self._get_callees(binary_hash, node.id)
-            return {
-                "function_name": node.name,
-                "address": f"0x{node.address:x}",
-                "summary": node.llm_summary,
-                "callers": [self._node_to_result(n) for n in callers],
-                "callees": [self._node_to_result(n) for n in callees],
-            }
+            address = self._resolve_address_arg(binary_hash, args)
+            if address is None:
+                return {"error": "Address required"}
+            depth = int(args.get("depth", 1))
+            direction = args.get("direction", "both")
+            return engine.get_call_context(address, depth, direction)
         if query_type == "ga_get_security_analysis":
-            node = self._node_from_args(binary_hash, args)
-            if not node:
-                return {"error": "Not indexed"}
-            return {
-                "function_name": node.name,
-                "address": f"0x{node.address:x}",
-                "security_flags": node.security_flags,
-                "risk_level": node.risk_level,
-                "activity_profile": node.activity_profile,
-            }
+            scope = (args.get("scope") or "function").lower()
+            if scope == "binary":
+                return engine.get_binary_security_analysis()
+            address = self._resolve_address_arg(binary_hash, args)
+            if address is None:
+                return {"error": "Address required"}
+            return engine.get_security_analysis(address)
         if query_type == "ga_get_module_summary":
-            return {"module_summary": "Community detection not yet available in BinAssist."}
+            address = self._resolve_address_arg(binary_hash, args) or 0
+            return engine.get_module_summary(address)
         if query_type == "ga_get_activity_analysis":
-            node = self._node_from_args(binary_hash, args)
-            if not node:
-                return {"error": "Not indexed"}
-            return {
-                "function_name": node.name,
-                "address": f"0x{node.address:x}",
-                "network_apis": node.network_apis,
-                "file_io_apis": node.file_io_apis,
-                "risk_level": node.risk_level,
-                "activity_profile": node.activity_profile,
-            }
+            address = self._resolve_address_arg(binary_hash, args)
+            if address is None:
+                return {"error": "Address required"}
+            return engine.get_activity_analysis(address)
         return {"error": f"Unknown query type: {query_type}"}
 
     def _node_from_args(self, binary_hash: str, args: Dict[str, Any]):
@@ -314,6 +366,15 @@ class SemanticGraphController:
         else:
             address = int(addr)
         return self.graph_service.get_node_by_address(binary_hash, "FUNCTION", address)
+
+    def _resolve_address_arg(self, binary_hash: str, args: Dict[str, Any]) -> Optional[int]:
+        addr = args.get("address")
+        if not addr:
+            function = self._get_function_at(self._current_offset)
+            return int(function.start) if function else None
+        if isinstance(addr, str):
+            return int(addr, 16) if addr.startswith("0x") else int(addr, 16)
+        return int(addr)
 
     def _get_function_at(self, address: int):
         if not self.binary_view:
@@ -426,3 +487,188 @@ class SemanticGraphController:
                 if node:
                     callees.append(node)
         return callees
+
+    def _on_semantic_progress(self, processed: int, total: int, summarized: int, errors: int):
+        self.view.status_label.setText(
+            f"Status: Summarizing... {processed}/{total} ({errors} errors)"
+        )
+
+    def _on_semantic_complete(self, summarized: int, errors: int, elapsed_ms: int):
+        self.view.status_label.setText(
+            f"Status: Semantic analysis complete ({summarized} summaries, {errors} errors)"
+        )
+        self._set_semantic_button_running(False)
+        self.refresh_current_view()
+
+    def _on_semantic_cancelled(self):
+        self.view.status_label.setText("Status: Semantic analysis stopped")
+        self._set_semantic_button_running(False)
+
+    def _on_semantic_error(self, message: str):
+        log.log_error(f"Semantic analysis failed: {message}")
+        self.view.status_label.setText("Status: Semantic analysis failed")
+        self._set_semantic_button_running(False)
+
+    def _on_security_complete(self, path_count: int, edges_created: int):
+        self.view.status_label.setText(
+            f"Status: Security analysis complete ({path_count} paths, {edges_created} edges)"
+        )
+        self._set_security_button_running(False)
+        self.refresh_current_view()
+
+    def _on_security_cancelled(self):
+        self.view.status_label.setText("Status: Security analysis stopped")
+        self._set_security_button_running(False)
+
+    def _on_security_error(self, message: str):
+        log.log_error(f"Security analysis failed: {message}")
+        self.view.status_label.setText("Status: Security analysis failed")
+        self._set_security_button_running(False)
+
+    def _on_reindex_progress(self, processed: int, total: int):
+        self.view.status_label.setText(f"Status: Reindexing... {processed}/{total}")
+
+    def _on_reindex_complete(self, processed: int):
+        self.view.status_label.setText(f"Status: Reindex complete ({processed} functions)")
+        self._set_reindex_button_running(False)
+        self.refresh_current_view()
+
+    def _on_reindex_cancelled(self, processed: int):
+        self.view.status_label.setText(f"Status: Reindex stopped ({processed} functions)")
+        self._set_reindex_button_running(False)
+        self.refresh_current_view()
+
+    def _on_reindex_error(self, message: str):
+        log.log_error(f"Reindex failed: {message}")
+        self.view.status_label.setText("Status: Reindex failed")
+        self._set_reindex_button_running(False)
+
+    def _set_reindex_button_running(self, running: bool):
+        if hasattr(self.view, "reindex_button"):
+            self.view.reindex_button.setText("Stop" if running else "ReIndex Binary")
+
+    def _set_semantic_button_running(self, running: bool):
+        if hasattr(self.view, "semantic_button"):
+            self.view.semantic_button.setText("Stop" if running else "Semantic Analysis")
+
+    def _set_security_button_running(self, running: bool):
+        if hasattr(self.view, "security_button"):
+            self.view.security_button.setText("Stop" if running else "Security Analysis")
+
+
+class SemanticAnalysisWorker(QThread):
+    progress = Signal(int, int, int, int)
+    completed = Signal(int, int, int)
+    cancelled = Signal()
+    failed = Signal(str)
+
+    def __init__(self, provider_config, llm_factory, graph_service,
+                 binary_view, binary_hash: str, limit: int = 0):
+        super().__init__()
+        self.provider_config = provider_config
+        self.llm_factory = llm_factory
+        self.graph_service = graph_service
+        self.binary_view = binary_view
+        self.binary_hash = binary_hash
+        self.limit = limit
+        self._cancelled = False
+        self._extractor = None
+
+    def cancel(self):
+        self._cancelled = True
+        if self._extractor:
+            self._extractor.cancel()
+
+    def run(self):
+        try:
+            asyncio.run(self._async_run())
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+    async def _async_run(self):
+        provider = self.llm_factory.create_provider(self.provider_config)
+        from ..services.graphrag.semantic_extractor import SemanticExtractor
+        self._extractor = SemanticExtractor(
+            provider,
+            self.graph_service.store,
+            self.binary_view,
+            self.binary_hash,
+        )
+        result = await self._extractor.summarize_stale_nodes(
+            self.limit,
+            self._progress_callback,
+        )
+        if self._cancelled or (self._extractor and self._extractor.cancelled):
+            self.cancelled.emit()
+            return
+        self.completed.emit(result.summarized, result.errors, result.elapsed_ms)
+
+    def _progress_callback(self, processed: int, total: int, summarized: int, errors: int):
+        self.progress.emit(processed, total, summarized, errors)
+
+
+class SecurityAnalysisWorker(QThread):
+    completed = Signal(int, int)
+    cancelled = Signal()
+    failed = Signal(str)
+
+    def __init__(self, graph_store: GraphStore, binary_hash: str, max_paths: int = 100):
+        super().__init__()
+        self.graph_store = graph_store
+        self.binary_hash = binary_hash
+        self.max_paths = max_paths
+        self._cancelled = False
+        self._analyzer = None
+
+    def cancel(self):
+        self._cancelled = True
+        if self._analyzer:
+            self._analyzer.cancel()
+
+    def run(self):
+        try:
+            self._analyzer = TaintAnalyzer(self.graph_store, self.binary_hash)
+            paths = self._analyzer.find_taint_paths(self.max_paths, create_edges=True)
+            if self._cancelled or (self._analyzer and self._analyzer.cancelled):
+                self.cancelled.emit()
+                return
+            edges_created = len(paths)
+            self.completed.emit(len(paths), edges_created)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class ReindexWorker(QThread):
+    progress = Signal(int, int)
+    completed = Signal(int)
+    cancelled = Signal(int)
+    failed = Signal(str)
+
+    def __init__(self, graph_service: GraphRAGService, graph_store: GraphStore,
+                 binary_view, binary_hash: str):
+        super().__init__()
+        self.graph_service = graph_service
+        self.graph_store = graph_store
+        self.binary_view = binary_view
+        self.binary_hash = binary_hash
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        try:
+            self.graph_store.delete_graph(self.binary_hash)
+            functions = list(self.binary_view.functions)
+            total = len(functions)
+            processed = 0
+            for function in functions:
+                if self._cancelled:
+                    self.cancelled.emit(processed)
+                    return
+                self.graph_service.index_function(self.binary_view, function, self.binary_hash)
+                processed += 1
+                self.progress.emit(processed, total)
+            self.completed.emit(processed)
+        except Exception as exc:
+            self.failed.emit(str(exc))

@@ -407,3 +407,98 @@ class GraphStore:
                 return results
             finally:
                 conn.close()
+
+    def get_stale_nodes(self, binary_hash: str, limit: int = 0) -> List[GraphNode]:
+        if not binary_hash:
+            return []
+        limit_value = limit if limit > 0 else 1000000
+        with self._db_lock:
+            conn = self.analysis_db.get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT id, binary_hash, node_type, address, name, raw_code,
+                           llm_summary, security_flags, network_apis, file_io_apis,
+                           ip_addresses, urls, file_paths, domains, registry_keys,
+                           activity_profile, risk_level, is_stale, user_edited,
+                           created_at, updated_at
+                    FROM GraphNodes
+                    WHERE binary_hash = ?
+                      AND (is_stale = 1 OR llm_summary IS NULL OR llm_summary = '')
+                    LIMIT ?
+                ''', (binary_hash, limit_value))
+                rows = cursor.fetchall()
+                results = []
+                for row in rows:
+                    results.append(GraphNode(
+                        id=row[0],
+                        binary_hash=row[1],
+                        node_type=row[2],
+                        address=row[3],
+                        name=row[4],
+                        raw_code=row[5],
+                        llm_summary=row[6],
+                        security_flags=self._deserialize_list(row[7]),
+                        network_apis=self._deserialize_list(row[8]),
+                        file_io_apis=self._deserialize_list(row[9]),
+                        ip_addresses=self._deserialize_list(row[10]),
+                        urls=self._deserialize_list(row[11]),
+                        file_paths=self._deserialize_list(row[12]),
+                        domains=self._deserialize_list(row[13]),
+                        registry_keys=self._deserialize_list(row[14]),
+                        activity_profile=row[15],
+                        risk_level=row[16],
+                        is_stale=bool(row[17]),
+                        user_edited=bool(row[18]),
+                        created_at=row[19],
+                        updated_at=row[20],
+                    ))
+                return results
+            finally:
+                conn.close()
+
+    def get_nodes_by_type(self, binary_hash: str, node_type: str = "FUNCTION") -> List[GraphNode]:
+        if not binary_hash:
+            return []
+        with self._db_lock:
+            conn = self.analysis_db.get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT id, binary_hash, node_type, address, name, raw_code,
+                           llm_summary, security_flags, network_apis, file_io_apis,
+                           ip_addresses, urls, file_paths, domains, registry_keys,
+                           activity_profile, risk_level, is_stale, user_edited,
+                           created_at, updated_at
+                    FROM GraphNodes
+                    WHERE binary_hash = ? AND node_type = ?
+                ''', (binary_hash, node_type))
+                rows = cursor.fetchall()
+                results = []
+                for row in rows:
+                    results.append(GraphNode(
+                        id=row[0],
+                        binary_hash=row[1],
+                        node_type=row[2],
+                        address=row[3],
+                        name=row[4],
+                        raw_code=row[5],
+                        llm_summary=row[6],
+                        security_flags=self._deserialize_list(row[7]),
+                        network_apis=self._deserialize_list(row[8]),
+                        file_io_apis=self._deserialize_list(row[9]),
+                        ip_addresses=self._deserialize_list(row[10]),
+                        urls=self._deserialize_list(row[11]),
+                        file_paths=self._deserialize_list(row[12]),
+                        domains=self._deserialize_list(row[13]),
+                        registry_keys=self._deserialize_list(row[14]),
+                        activity_profile=row[15],
+                        risk_level=row[16],
+                        is_stale=bool(row[17]),
+                        user_edited=bool(row[18]),
+                        created_at=row[19],
+                        updated_at=row[20],
+                    ))
+                return results
+            finally:
+                conn.close()

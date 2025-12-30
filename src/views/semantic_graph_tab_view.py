@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QGroupBox, QGridLayout, QSplitter, QListWidget, QListWidgetItem, QTableWidget,
     QTableWidgetItem, QComboBox, QTextEdit, QCheckBox, QSpinBox, QGraphicsView,
     QGraphicsScene, QGraphicsPathItem, QGraphicsLineItem, QGraphicsTextItem, QGraphicsItem,
+    QScrollArea,
     QFrame, QRadioButton, QButtonGroup, QAbstractItemView, QInputDialog
 )
 
@@ -227,7 +228,11 @@ class SemanticGraphListView(QWidget):
         self.flags_container = QWidget()
         self.flags_layout = QVBoxLayout()
         self.flags_container.setLayout(self.flags_layout)
-        flags_group = self._wrap_group("SECURITY FLAGS", self.flags_container)
+        self.flags_scroll = QScrollArea()
+        self.flags_scroll.setWidgetResizable(True)
+        self.flags_scroll.setFrameShape(QFrame.NoFrame)
+        self.flags_scroll.setWidget(self.flags_container)
+        flags_group = self._wrap_group("SECURITY FLAGS", self.flags_scroll)
         right.addWidget(flags_group)
 
         self.add_flag_button = QPushButton("+ Add Custom Flag...")
@@ -843,6 +848,7 @@ class SemanticGraphSearchView(QWidget):
         self._last_results = []
         self._selected_address = None
         self._current_address = None
+        self._current_query_type = "ga_search_semantic"
         self._build_ui()
 
     def _build_ui(self):
@@ -925,6 +931,7 @@ class SemanticGraphSearchView(QWidget):
         args = self._build_args(query_type)
         if args is None:
             return
+        self._current_query_type = query_type
         self.execute_button.setEnabled(False)
         self.execute_button.setText("Executing...")
         self.query_requested.emit(query_type, args)
@@ -932,14 +939,14 @@ class SemanticGraphSearchView(QWidget):
     def handle_query_result(self, json_result: str):
         self.execute_button.setEnabled(True)
         self.execute_button.setText("Execute Query")
-        self._populate_results(json_result)
+        self._populate_results(json_result, self._current_query_type)
 
     def update_current_address(self, address: int):
         self._current_address = address
         if self.use_current.isChecked():
             self.address_field.setText(f"0x{address:x}")
 
-    def _populate_results(self, json_result: str):
+    def _populate_results(self, json_result: str, query_type: str):
         self.results_table.setRowCount(0)
         self._last_results = []
         if not json_result:
@@ -950,9 +957,7 @@ class SemanticGraphSearchView(QWidget):
             self.details.setPlainText("Failed to parse results.")
             return
 
-        results = parsed.get("results") if isinstance(parsed, dict) else parsed
-        if isinstance(results, dict):
-            results = [results]
+        results = self._normalize_results(parsed, query_type)
         if not results:
             return
         self._last_results = results
@@ -971,6 +976,85 @@ class SemanticGraphSearchView(QWidget):
             self.results_table.setItem(row, 3, QTableWidgetItem(str(score)))
             self.results_table.setItem(row, 4, QTableWidgetItem(summary))
 
+    def _normalize_results(self, parsed: object, query_type: str) -> List[Dict[str, Any]]:
+        if isinstance(parsed, dict) and parsed.get("error"):
+            self.details.setPlainText(parsed.get("error"))
+            return []
+        if query_type in ("ga_search_semantic", "ga_get_similar_functions"):
+            results = parsed.get("results") if isinstance(parsed, dict) else parsed
+            if isinstance(results, dict):
+                results = [results]
+            return results or []
+        if query_type == "ga_get_semantic_analysis":
+            if isinstance(parsed, dict):
+                return [parsed]
+            return []
+        if query_type == "ga_get_call_context":
+            return self._flatten_call_context(parsed if isinstance(parsed, dict) else {})
+        if query_type == "ga_get_security_analysis":
+            return [self._flatten_security_analysis(parsed if isinstance(parsed, dict) else {})]
+        if query_type == "ga_get_module_summary":
+            if isinstance(parsed, dict):
+                return [{
+                    "name": "Module Summary",
+                    "address": parsed.get("address", "-"),
+                    "summary": parsed.get("module_summary", ""),
+                }]
+            return []
+        if query_type == "ga_get_activity_analysis":
+            if isinstance(parsed, dict):
+                summary = f"Activity: {parsed.get('activity_profile', 'NONE')} | Risk: {parsed.get('risk_level', 'LOW')}"
+                return [{
+                    "function_name": parsed.get("function_name", "Unknown"),
+                    "address": parsed.get("address", "-"),
+                    "summary": summary,
+                    "score": "-",
+                }]
+            return []
+        return []
+
+    def _flatten_call_context(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        results = []
+        center = payload.get("function") or {}
+        if center:
+            results.append({
+                "function_name": f"Center: {center.get('function_name', 'Unknown')}",
+                "address": center.get("address", "-"),
+                "summary": center.get("summary", ""),
+                "score": "-",
+                "security_flags": center.get("security_flags", []),
+            })
+        for caller in payload.get("callers", []) or []:
+            label = f"Caller[d{caller.get('depth', 1)}]: {caller.get('function_name', 'Unknown')}"
+            results.append({
+                "function_name": label,
+                "address": caller.get("address", "-"),
+                "summary": caller.get("summary", ""),
+                "score": "-",
+                "security_flags": caller.get("security_flags", []),
+            })
+        for callee in payload.get("callees", []) or []:
+            label = f"Callee[d{callee.get('depth', 1)}]: {callee.get('function_name', 'Unknown')}"
+            results.append({
+                "function_name": label,
+                "address": callee.get("address", "-"),
+                "summary": callee.get("summary", ""),
+                "score": "-",
+                "security_flags": callee.get("security_flags", []),
+            })
+        return results
+
+    def _flatten_security_analysis(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        name = payload.get("name", "Unknown")
+        flags = payload.get("security_flags", [])
+        summary = "Flags: " + (", ".join(flags) if flags else "None")
+        return {
+            "name": name,
+            "summary": summary,
+            "score": "-",
+            "address": payload.get("address", "-"),
+        }
+
     def _on_result_selected(self):
         items = self.results_table.selectedItems()
         if not items:
@@ -983,7 +1067,22 @@ class SemanticGraphSearchView(QWidget):
         self._selected_address = address
         details = json.dumps(result, indent=2)
         self.details.setPlainText(details)
-        self.go_to_button.setEnabled(bool(address))
+        self.go_to_button.setEnabled(self._is_valid_address(address))
+
+    def _is_valid_address(self, address: object) -> bool:
+        if address is None:
+            return False
+        if isinstance(address, int):
+            return True
+        if isinstance(address, str):
+            addr = address.strip().lower()
+            if addr.startswith("0x") and len(addr) > 2:
+                try:
+                    int(addr, 16)
+                    return True
+                except ValueError:
+                    return False
+        return False
 
     def _go_to_selected(self):
         if not self._selected_address:

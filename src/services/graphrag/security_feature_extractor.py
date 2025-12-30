@@ -21,6 +21,11 @@ except ImportError:
 
 class SecurityFeatureExtractor:
     """Extracts security-relevant features from Binary Ninja functions."""
+    CALL_PATTERN = re.compile(r"\b([A-Za-z_@][A-Za-z0-9_@!:.]*)\s*\(")
+    CALL_KEYWORDS = {
+        "if", "for", "while", "switch", "case", "return", "sizeof",
+        "do", "catch", "try", "else", "new", "delete",
+    }
 
     NETWORK_APIS = {
         "socket", "bind", "listen", "accept", "connect", "close", "shutdown",
@@ -262,14 +267,19 @@ class SecurityFeatureExtractor:
 
     def __init__(self, binary_view):
         self.binary_view = binary_view
+        self._network_lookup = {api.lower(): api for api in self.NETWORK_APIS}
+        self._file_lookup = {api.lower(): api for api in self.FILE_IO_APIS}
+        self._crypto_lookup = {api.lower(): api for api in self.CRYPTO_APIS}
+        self._process_lookup = {api.lower(): api for api in self.PROCESS_APIS}
+        self._dangerous_lookup = {name.lower(): vuln for name, vuln in self.DANGEROUS_FUNCTIONS.items()}
 
-    def extract_features(self, function) -> SecurityFeatures:
+    def extract_features(self, function, raw_code: Optional[str] = None) -> SecurityFeatures:
         features = SecurityFeatures()
         if function is None or self.binary_view is None:
             return features
 
         try:
-            self._extract_api_calls(function, features)
+            self._extract_api_calls(function, features, raw_code)
             self._extract_string_references(function, features)
             features.calculate_activity_profile()
             features.calculate_risk_level()
@@ -278,37 +288,113 @@ class SecurityFeatureExtractor:
 
         return features
 
-    def _extract_api_calls(self, function, features: SecurityFeatures) -> None:
+    def _extract_api_calls(self, function, features: SecurityFeatures,
+                           raw_code: Optional[str] = None) -> None:
         try:
-            callees = getattr(function, "callees", None) or []
-            for callee in callees:
-                name = getattr(callee, "name", None)
-                if not name:
-                    continue
+            for name in self._iter_call_target_names(function, raw_code):
                 normalized = self._normalize_function_name(name)
+                lower = normalized.lower()
 
-                if name in self.NETWORK_APIS or normalized in self.NETWORK_APIS:
-                    features.add_network_api(normalized)
-                if name in self.FILE_IO_APIS or normalized in self.FILE_IO_APIS:
-                    features.add_file_io_api(normalized)
-                if name in self.CRYPTO_APIS or normalized in self.CRYPTO_APIS:
-                    features.add_crypto_api(normalized)
-                if name in self.PROCESS_APIS or normalized in self.PROCESS_APIS:
-                    features.add_process_api(normalized)
+                network_match = self._network_lookup.get(lower)
+                if network_match:
+                    features.add_network_api(network_match)
 
-                vuln_type = self.DANGEROUS_FUNCTIONS.get(name) or self.DANGEROUS_FUNCTIONS.get(normalized)
+                file_match = self._file_lookup.get(lower)
+                if file_match:
+                    features.add_file_io_api(file_match)
+
+                crypto_match = self._crypto_lookup.get(lower)
+                if crypto_match:
+                    features.add_crypto_api(crypto_match)
+
+                process_match = self._process_lookup.get(lower)
+                if process_match:
+                    features.add_process_api(process_match)
+
+                vuln_type = self._dangerous_lookup.get(lower)
                 if vuln_type:
                     features.add_dangerous_function(normalized, vuln_type)
         except Exception as e:
             log.log_warn(f"Error extracting API calls: {e}")
+
+    def _iter_call_target_names(self, function, raw_code: Optional[str] = None) -> Iterable[str]:
+        names = set()
+        callees = getattr(function, "callees", None) or []
+        for callee in callees:
+            name = getattr(callee, "name", None)
+            if name:
+                names.add(name)
+
+        call_sites = getattr(function, "call_sites", None) or []
+        for site in call_sites:
+            target = None
+            for attr in ("destination", "dest", "function", "callee"):
+                target = getattr(site, attr, None)
+                if target is not None:
+                    break
+            name = None
+            if target is None:
+                continue
+            if hasattr(target, "name"):
+                name = getattr(target, "name", None)
+            elif isinstance(target, int):
+                name = self._resolve_symbol_name(target)
+
+            if name:
+                names.add(name)
+
+        if raw_code:
+            for call_name in self._extract_calls_from_code(raw_code):
+                names.add(call_name)
+        return names
+
+    def _extract_calls_from_code(self, raw_code: str) -> Iterable[str]:
+        names = set()
+        if not raw_code:
+            return names
+        for match in self.CALL_PATTERN.findall(raw_code):
+            candidate = match.strip()
+            if not candidate:
+                continue
+            lower = candidate.lower()
+            if lower in self.CALL_KEYWORDS:
+                continue
+            names.add(candidate)
+        return names
+
+    def _resolve_symbol_name(self, address: int) -> Optional[str]:
+        if not self.binary_view:
+            return None
+        try:
+            func = self.binary_view.get_function_at(address)
+            if func and getattr(func, "name", None):
+                return func.name
+            symbol = self.binary_view.get_symbol_at(address)
+            if symbol and getattr(symbol, "name", None):
+                return symbol.name
+        except Exception:
+            return None
+        return None
 
     def _normalize_function_name(self, name: str) -> str:
         if not name:
             return name
 
         normalized = name
+
+        if "::" in normalized:
+            normalized = normalized.split("::")[-1]
+        if "!" in normalized:
+            normalized = normalized.split("!")[-1]
+        if "." in normalized:
+            normalized = normalized.split(".")[-1]
+
+        if normalized.startswith("@"):
+            normalized = normalized[1:]
         if normalized.startswith("__imp_"):
             normalized = normalized[6:]
+        if normalized.lower().startswith("imp_"):
+            normalized = normalized[4:]
 
         while normalized.startswith("_") and len(normalized) > 1:
             normalized = normalized[1:]

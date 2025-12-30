@@ -5,6 +5,7 @@ from typing import Optional
 from .graph_store import GraphStore
 from .models import GraphNode, GraphEdge
 from .security_feature_extractor import SecurityFeatureExtractor
+from ..binary_context_service import BinaryContextService, ViewLevel
 
 try:
     import binaryninja
@@ -27,6 +28,7 @@ class StructureExtractor:
         self.binary_view = binary_view
         self.graph_store = graph_store
         self.security_extractor = SecurityFeatureExtractor(binary_view)
+        self.context_service = BinaryContextService(binary_view)
 
     def extract_function(self, function, binary_hash: str) -> Optional[GraphNode]:
         if function is None or not binary_hash:
@@ -44,7 +46,8 @@ class StructureExtractor:
         else:
             node.name = function.name
 
-        features = self.security_extractor.extract_features(function)
+        raw_code = self._get_raw_code(address)
+        features = self.security_extractor.extract_features(function, raw_code)
         node.network_apis = sorted(features.network_apis)
         node.file_io_apis = sorted(features.file_io_apis)
         node.ip_addresses = sorted(features.ip_addresses)
@@ -55,6 +58,8 @@ class StructureExtractor:
         node.activity_profile = features.get_activity_profile()
         node.risk_level = features.get_risk_level()
         node.security_flags = features.generate_security_flags()
+        if raw_code:
+            node.raw_code = raw_code
         node.is_stale = True
 
         node = self.graph_store.upsert_node(node)
@@ -96,3 +101,23 @@ class StructureExtractor:
                 if "CALLS_VULNERABLE_FUNCTION" not in node.security_flags:
                     node.security_flags.append("CALLS_VULNERABLE_FUNCTION")
                     self.graph_store.upsert_node(node)
+
+    def _get_raw_code(self, address: int) -> Optional[str]:
+        if not address:
+            return None
+        for level in (ViewLevel.PSEUDO_C, ViewLevel.HLIL, ViewLevel.MLIL, ViewLevel.LLIL, ViewLevel.ASM):
+            result = self.context_service.get_code_at_level(address, level, context_lines=0)
+            if result.get("error"):
+                continue
+            lines = result.get("lines") or []
+            parts = []
+            for line in lines:
+                if isinstance(line, dict):
+                    content = line.get("content")
+                else:
+                    content = str(line)
+                if content:
+                    parts.append(content.rstrip())
+            if parts:
+                return "\n".join(parts).strip()
+        return None
