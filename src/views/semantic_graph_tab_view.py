@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 
 import json
+import math
 import shutil
 import subprocess
 from typing import Any, Dict, List, Optional
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFontDatabase, QTextCursor, QBrush, QColor, QPen, QPainterPath, QPainter
+from PySide6.QtCore import Qt, Signal, QPointF
+from PySide6.QtGui import (
+    QFont, QFontDatabase, QTextCursor, QBrush, QColor, QPen,
+    QPainterPath, QPainter, QPolygonF
+)
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTabWidget,
     QGroupBox, QGridLayout, QSplitter, QListWidget, QListWidgetItem, QTableWidget,
     QTableWidgetItem, QComboBox, QTextEdit, QCheckBox, QSpinBox, QGraphicsView,
     QGraphicsScene, QGraphicsPathItem, QGraphicsLineItem, QGraphicsTextItem, QGraphicsItem,
+    QGraphicsPolygonItem,
     QScrollArea,
     QFrame, QRadioButton, QButtonGroup, QAbstractItemView, QInputDialog
 )
@@ -389,14 +394,19 @@ class SemanticGraphGraphView(QWidget):
     reindex_requested = Signal()
 
     NODE_WIDTH = 120
-    NODE_HEIGHT = 50
+    NODE_HEIGHT = 60
     NODE_RADIUS = 6
+    NODE_TEXT_SCALE = 0.8
+    EDGE_LABEL_SCALE = 0.7
+    ARROW_SIZE = 8.0
+    EDGE_STUB_RATIO = 0.2
 
     def __init__(self):
         super().__init__()
         self._nodes = []
         self._edges = []
         self._node_items = {}
+        self._node_sizes = {}
         self._selected_node = None
         self._colors = {
             "background": QColor("#1f2123"),
@@ -528,12 +538,15 @@ class SemanticGraphGraphView(QWidget):
         self.scene.clear()
         self._node_items.clear()
 
-        positions, edge_paths = self._layout_nodes(center_node, nodes, edges)
+        self._node_sizes = self._compute_node_sizes(nodes)
+        positions, _ = self._layout_nodes(center_node, nodes, edges, self._node_sizes)
         for node in nodes:
             pos = positions.get(node["id"], (0, 0))
-            item = self._add_node_item(node, pos[0], pos[1], node["id"] == center_node["id"])
+            width = self._node_sizes.get(node["id"], self.NODE_WIDTH)
+            item = self._add_node_item(node, pos[0], pos[1], node["id"] == center_node["id"], width)
             self._node_items[node["id"]] = item
 
+        edge_paths = self._compute_edge_paths(edges)
         for idx, edge in enumerate(edges):
             src = self._node_items.get(edge["source_id"])
             tgt = self._node_items.get(edge["target_id"])
@@ -551,21 +564,33 @@ class SemanticGraphGraphView(QWidget):
                             path.lineTo(x, y)
                         path_item = QGraphicsPathItem(path)
                         path_item.setPen(pen)
-                        path_item.setZValue(-1)
+                        path_item.setZValue(-2)
                         self.scene.addItem(path_item)
+                        self._add_edge_label(points, edge["type"], edge_color)
+                        self._add_arrowhead(points[-2], points[-1], edge_color)
                         continue
                 src_center = src.sceneBoundingRect().center()
                 tgt_center = tgt.sceneBoundingRect().center()
                 line = QGraphicsLineItem(src_center.x(), src_center.y(),
                                          tgt_center.x(), tgt_center.y())
                 line.setPen(pen)
-                line.setZValue(-1)
+                line.setZValue(-2)
                 self.scene.addItem(line)
-        self._zoom_fit()
+                self._add_edge_label(
+                    [(src_center.x(), src_center.y()), (tgt_center.x(), tgt_center.y())],
+                    edge["type"],
+                    edge_color,
+                )
+                self._add_arrowhead(
+                    (src_center.x(), src_center.y()),
+                    (tgt_center.x(), tgt_center.y()),
+                    edge_color,
+                )
+        self._zoom_reset(self._node_items.get(center_node["id"]))
 
-    def _add_node_item(self, node: Dict[str, Any], x: float, y: float, is_center: bool):
+    def _add_node_item(self, node: Dict[str, Any], x: float, y: float, is_center: bool, width: float):
         path = QPainterPath()
-        path.addRoundedRect(0, 0, self.NODE_WIDTH, self.NODE_HEIGHT,
+        path.addRoundedRect(0, 0, width, self.NODE_HEIGHT,
                             self.NODE_RADIUS, self.NODE_RADIUS)
         rect = QGraphicsPathItem(path)
         rect.setPos(x, y)
@@ -574,15 +599,109 @@ class SemanticGraphGraphView(QWidget):
         rect.setPen(QPen(QColor("#2a2d30"), 1))
         rect.setFlag(QGraphicsItem.ItemIsSelectable)
         rect.setData(0, node)
-        text = QGraphicsTextItem(node["label"])
+        label = node["label"]
+        address = node.get("address", 0)
+        text = QGraphicsTextItem(f"{label}\n0x{address:x}")
+        text.setFont(self._node_font())
         text.setDefaultTextColor(text_color)
         text.setParentItem(rect)
-        text.setPos(6, 5)
+        text.setTextWidth(width - 12)
+        text.setPos(6, 4)
         self.scene.addItem(rect)
         return rect
 
-    def _layout_nodes(self, center_node: Dict[str, Any], nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]):
-        graphviz_positions = self._layout_nodes_graphviz(nodes, edges)
+    def _compute_edge_paths(self, edges: List[Dict[str, Any]]) -> Dict[int, List[tuple]]:
+        side_edges: Dict[tuple, List[tuple]] = {}
+        edge_sides: Dict[int, tuple] = {}
+        edge_centers: Dict[int, tuple] = {}
+
+        for idx, edge in enumerate(edges):
+            src = self._node_items.get(edge["source_id"])
+            tgt = self._node_items.get(edge["target_id"])
+            if not src or not tgt:
+                continue
+            src_center = src.sceneBoundingRect().center()
+            tgt_center = tgt.sceneBoundingRect().center()
+            if tgt_center.y() >= src_center.y():
+                src_side, tgt_side = "bottom", "top"
+            else:
+                src_side, tgt_side = "top", "bottom"
+            edge_sides[idx] = (src_side, tgt_side)
+            edge_centers[idx] = (src_center, tgt_center)
+            side_edges.setdefault((edge["source_id"], src_side), []).append((tgt_center.x(), idx))
+            side_edges.setdefault((edge["target_id"], tgt_side), []).append((src_center.x(), idx))
+
+        edge_offsets: Dict[tuple, float] = {}
+        for key, entries in side_edges.items():
+            node_id, _ = key
+            node_item = self._node_items.get(node_id)
+            node_width = node_item.sceneBoundingRect().width() if node_item else self.NODE_WIDTH
+            count = len(entries)
+            entries.sort(key=lambda item: item[0])
+            available = max(10.0, node_width - 20.0)
+            if count == 1:
+                offsets = [0.0]
+            else:
+                step = available / (count - 1)
+                offsets = [-(available / 2.0) + step * idx for idx in range(count)]
+            for offset, (_, edge_idx) in zip(offsets, entries):
+                edge_offsets[(key[0], key[1], edge_idx)] = offset
+
+        paths: Dict[int, List[tuple]] = {}
+        stub_len = self.NODE_HEIGHT * self.EDGE_STUB_RATIO
+        for idx, edge in enumerate(edges):
+            src = self._node_items.get(edge["source_id"])
+            tgt = self._node_items.get(edge["target_id"])
+            if not src or not tgt or idx not in edge_sides:
+                continue
+            src_side, tgt_side = edge_sides[idx]
+            src_rect = src.sceneBoundingRect()
+            tgt_rect = tgt.sceneBoundingRect()
+            src_center_x = src_rect.center().x()
+            tgt_center_x = tgt_rect.center().x()
+            src_offset = edge_offsets.get((edge["source_id"], src_side, idx), 0.0)
+            tgt_offset = edge_offsets.get((edge["target_id"], tgt_side, idx), 0.0)
+
+            src_x = src_center_x + src_offset
+            tgt_x = tgt_center_x + tgt_offset
+            src_y = src_rect.top() if src_side == "top" else src_rect.bottom()
+            tgt_y = tgt_rect.top() if tgt_side == "top" else tgt_rect.bottom()
+            src_stub = (src_x, src_y - stub_len) if src_side == "top" else (src_x, src_y + stub_len)
+            tgt_stub = (tgt_x, tgt_y - stub_len) if tgt_side == "top" else (tgt_x, tgt_y + stub_len)
+            paths[idx] = [(src_x, src_y), src_stub, tgt_stub, (tgt_x, tgt_y)]
+        return paths
+
+    def _node_font(self) -> QFont:
+        font = QFont()
+        base_size = font.pointSizeF() if font.pointSizeF() > 0 else float(font.pointSize())
+        if base_size <= 0:
+            base_size = 10.0
+        font.setPointSizeF(max(6.0, base_size * self.NODE_TEXT_SCALE))
+        return font
+
+    def _compute_node_sizes(self, nodes: List[Dict[str, Any]]) -> Dict[str, float]:
+        font = self._node_font()
+        sizes = {}
+        max_width = self.NODE_WIDTH * 3
+        padding = 20.0
+        for node in nodes:
+            label = node.get("label", "")
+            address = node.get("address", 0)
+            text_item = QGraphicsTextItem(f"{label}\n0x{address:x}")
+            text_item.setFont(font)
+            width = text_item.boundingRect().width() + padding
+            width = max(self.NODE_WIDTH, min(max_width, width))
+            sizes[node["id"]] = width
+        return sizes
+
+    def _layout_nodes(
+        self,
+        center_node: Dict[str, Any],
+        nodes: List[Dict[str, Any]],
+        edges: List[Dict[str, Any]],
+        node_sizes: Dict[str, float],
+    ):
+        graphviz_positions = self._layout_nodes_graphviz(nodes, edges, node_sizes)
         if graphviz_positions:
             return graphviz_positions
 
@@ -599,7 +718,7 @@ class SemanticGraphGraphView(QWidget):
         levels = {center_node["id"]: 0}
         max_hops = max(1, int(self.n_hops.value()))
 
-        # BFS to the right (callees/outgoing)
+        # BFS to the next row (callees/outgoing)
         frontier = {center_node["id"]}
         for depth in range(1, max_hops + 1):
             next_frontier = set()
@@ -610,7 +729,7 @@ class SemanticGraphGraphView(QWidget):
                         next_frontier.add(neighbor)
             frontier = next_frontier
 
-        # BFS to the left (callers/incoming)
+        # BFS to the previous row (callers/incoming)
         frontier = {center_node["id"]}
         for depth in range(1, max_hops + 1):
             next_frontier = set()
@@ -629,27 +748,32 @@ class SemanticGraphGraphView(QWidget):
         for node in nodes:
             level_map.setdefault(levels[node["id"]], []).append(node)
 
-        x_spacing = 220
-        y_spacing = 90
+        max_width = max(node_sizes.values()) if node_sizes else self.NODE_WIDTH
+        x_spacing = max(self.NODE_WIDTH, max_width) + 60.0
+        y_spacing = 180
         positions = {}
         for level, level_nodes in level_map.items():
             level_nodes.sort(key=lambda n: n.get("label", ""))
             count = len(level_nodes)
-            start_y = -((count - 1) * y_spacing) / 2.0
+            start_x = -((count - 1) * x_spacing) / 2.0
             for idx, node in enumerate(level_nodes):
-                x = level * x_spacing
-                y = start_y + idx * y_spacing
+                x = start_x + idx * x_spacing
+                y = level * y_spacing
                 positions[node["id"]] = (x, y)
 
         return positions, None
 
-    def _layout_nodes_graphviz(self, nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]):
+    def _layout_nodes_graphviz(
+        self,
+        nodes: List[Dict[str, Any]],
+        edges: List[Dict[str, Any]],
+        node_sizes: Dict[str, float],
+    ):
         if shutil.which("dot") is None:
             return None
 
-        node_width = self.NODE_WIDTH / 72.0
         node_height = self.NODE_HEIGHT / 72.0
-        node_map = {node["id"]: f"n{node['id']}" for node in nodes}
+        node_map = {node["id"]: f"n{idx}" for idx, node in enumerate(nodes)}
         edge_queue: Dict[tuple, List[int]] = {}
         for idx, edge in enumerate(edges):
             src = node_map.get(edge.get("source_id"))
@@ -659,13 +783,15 @@ class SemanticGraphGraphView(QWidget):
 
         lines = [
             "digraph G {",
-            "  graph [rankdir=TB, splines=ortho, nodesep=0.35, ranksep=0.45, pad=0.2];",
-            f"  node [shape=box, width={node_width:.2f}, height={node_height:.2f}, fixedsize=true];",
+            "  graph [rankdir=TB, splines=polyline, nodesep=0.35, ranksep=0.9, pad=0.2];",
+            f"  node [shape=box, height={node_height:.2f}, fixedsize=true];",
         ]
         for node in nodes:
             name = node_map[node["id"]]
             label = node.get("label", name).replace("\"", "'")
-            lines.append(f"  {name} [label=\"{label}\"];")
+            width = node_sizes.get(node["id"], self.NODE_WIDTH)
+            width_in = width / 72.0
+            lines.append(f"  {name} [label=\"{label}\", width={width_in:.2f}];")
         for edge in edges:
             src = node_map.get(edge.get("source_id"))
             tgt = node_map.get(edge.get("target_id"))
@@ -746,8 +872,9 @@ class SemanticGraphGraphView(QWidget):
             if name not in positions:
                 continue
             x, y = positions[name]
+            node_width = node_sizes.get(node_id, self.NODE_WIDTH)
             mapped[node_id] = (
-                x - min_x - (self.NODE_WIDTH / 2.0),
+                x - min_x - (node_width / 2.0),
                 (max_y - y) - min_y - (self.NODE_HEIGHT / 2.0),
             )
 
@@ -755,6 +882,65 @@ class SemanticGraphGraphView(QWidget):
         for edge_idx, points in edge_paths.items():
             mapped_edges[edge_idx] = [(x - min_x, (max_y - y) - min_y) for x, y in points]
         return mapped, mapped_edges
+
+    def _add_edge_label(self, points: List[tuple], label: str, color: QColor) -> None:
+        if not points or len(points) < 2:
+            return
+        mid_x, mid_y = self._midpoint(points)
+        text_item = QGraphicsTextItem(label)
+        font = text_item.font()
+        base_size = font.pointSizeF() if font.pointSizeF() > 0 else float(font.pointSize())
+        font.setPointSizeF(max(6.0, base_size * self.EDGE_LABEL_SCALE))
+        text_item.setFont(font)
+        text_item.setDefaultTextColor(color)
+        text_item.setPos(mid_x + 4, mid_y + 2)
+        text_item.setZValue(-1)
+        self.scene.addItem(text_item)
+
+    def _add_arrowhead(self, start: tuple, end: tuple, color: QColor) -> None:
+        sx, sy = start
+        ex, ey = end
+        dx = ex - sx
+        dy = ey - sy
+        length = math.hypot(dx, dy)
+        if length == 0:
+            return
+        ux = dx / length
+        uy = dy / length
+        left_x = ex - self.ARROW_SIZE * ux + (self.ARROW_SIZE / 2.0) * uy
+        left_y = ey - self.ARROW_SIZE * uy - (self.ARROW_SIZE / 2.0) * ux
+        right_x = ex - self.ARROW_SIZE * ux - (self.ARROW_SIZE / 2.0) * uy
+        right_y = ey - self.ARROW_SIZE * uy + (self.ARROW_SIZE / 2.0) * ux
+        polygon = QPolygonF()
+        polygon.append(QPointF(ex, ey))
+        polygon.append(QPointF(left_x, left_y))
+        polygon.append(QPointF(right_x, right_y))
+        arrow = QGraphicsPolygonItem(polygon)
+        arrow.setBrush(QBrush(color))
+        arrow.setPen(QPen(color))
+        arrow.setZValue(-1)
+        self.scene.addItem(arrow)
+
+    @staticmethod
+    def _midpoint(points: List[tuple]) -> tuple:
+        total = 0.0
+        segments = []
+        for idx in range(len(points) - 1):
+            x1, y1 = points[idx]
+            x2, y2 = points[idx + 1]
+            length = math.hypot(x2 - x1, y2 - y1)
+            segments.append((length, x1, y1, x2, y2))
+            total += length
+        if total == 0:
+            x1, y1 = points[0]
+            return x1, y1
+        half = total / 2.0
+        for length, x1, y1, x2, y2 in segments:
+            if half <= length:
+                ratio = half / length if length else 0
+                return (x1 + (x2 - x1) * ratio, y1 + (y2 - y1) * ratio)
+            half -= length
+        return points[-1]
 
     def _on_refresh(self):
         edge_types = []
@@ -787,6 +973,8 @@ class SemanticGraphGraphView(QWidget):
         self._selected_node = node
         self.selected_label.setText(f"Selected: {node['label']}")
         summary = node.get("summary", "")
+        if summary:
+            summary = summary.replace("\n", " ").replace("\r", " ").strip()
         if summary and len(summary) > 100:
             summary = summary[:97] + "..."
         self.summary_label.setText(summary)
@@ -821,6 +1009,14 @@ class SemanticGraphGraphView(QWidget):
 
     def _zoom_fit(self):
         self.view.fitInView(self.scene.itemsBoundingRect(), Qt.KeepAspectRatio)
+        self._update_zoom_label()
+
+    def _zoom_reset(self, center_item: Optional[QGraphicsItem] = None):
+        self.view.resetTransform()
+        if center_item:
+            self.view.centerOn(center_item.sceneBoundingRect().center())
+        else:
+            self.view.centerOn(self.scene.itemsBoundingRect().center())
         self._update_zoom_label()
 
     def _update_zoom_label(self):

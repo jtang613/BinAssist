@@ -276,11 +276,9 @@ class SemanticGraphController:
         self.refresh_current_view()
 
     def handle_edge_click(self, target_id: str):
-        try:
-            node_id = int(target_id)
-        except Exception:
+        if not target_id:
             return
-        node = self.graph_store.get_node_by_id(node_id)
+        node = self.graph_store.get_node_by_id(str(target_id))
         if node and node.address is not None:
             self.handle_navigate(node.address)
 
@@ -422,21 +420,28 @@ class SemanticGraphController:
         return results
 
     def _collect_graph(self, binary_hash: str, center_id: int, n_hops: int, edge_types: Set[str]):
+        max_nodes = 50
         visited = {center_id}
-        frontier = {center_id}
+        queue = [(center_id, 0)]
         all_edges = []
-        for _ in range(n_hops):
-            next_frontier = set()
-            for node_id in frontier:
-                for edge in self.graph_store.get_edges_for_node(binary_hash, node_id):
-                    if edge_types and edge.edge_type not in edge_types:
-                        continue
-                    all_edges.append(edge)
-                    neighbor = edge.target_id if edge.source_id == node_id else edge.source_id
-                    if neighbor not in visited:
-                        visited.add(neighbor)
-                        next_frontier.add(neighbor)
-            frontier = next_frontier
+
+        while queue and len(visited) < max_nodes:
+            node_id, depth = queue.pop(0)
+            if depth >= n_hops:
+                continue
+            for edge in self.graph_store.get_edges_for_node(binary_hash, node_id):
+                if edge_types and edge.edge_type not in edge_types:
+                    continue
+                all_edges.append(edge)
+                neighbor = edge.target_id if edge.source_id == node_id else edge.source_id
+                if neighbor in visited:
+                    continue
+                visited.add(neighbor)
+                if len(visited) >= max_nodes:
+                    break
+                queue.append((neighbor, depth + 1))
+            if len(visited) >= max_nodes:
+                break
 
         nodes = []
         for node_id in visited:
@@ -446,6 +451,8 @@ class SemanticGraphController:
 
         edge_rows = []
         for edge in all_edges:
+            if edge.source_id not in visited or edge.target_id not in visited:
+                continue
             edge_rows.append({
                 "id": edge.id,
                 "source_id": edge.source_id,

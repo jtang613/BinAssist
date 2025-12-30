@@ -6,13 +6,15 @@ from typing import List, Optional
 
 @dataclass
 class GraphNode:
-    id: Optional[int] = None
+    id: Optional[str] = None
     binary_hash: str = ""
     node_type: str = "FUNCTION"
     address: Optional[int] = None
     name: Optional[str] = None
     raw_code: Optional[str] = None
     llm_summary: Optional[str] = None
+    confidence: float = 0.0
+    embedding: Optional[bytes] = None
     security_flags: List[str] = field(default_factory=list)
     network_apis: List[str] = field(default_factory=list)
     file_io_apis: List[str] = field(default_factory=list)
@@ -23,6 +25,7 @@ class GraphNode:
     registry_keys: List[str] = field(default_factory=list)
     activity_profile: Optional[str] = None
     risk_level: Optional[str] = None
+    analysis_depth: int = 0
     is_stale: bool = True
     user_edited: bool = False
     created_at: Optional[str] = None
@@ -31,10 +34,10 @@ class GraphNode:
 
 @dataclass
 class GraphEdge:
-    id: Optional[int] = None
+    id: Optional[str] = None
     binary_hash: str = ""
-    source_id: int = 0
-    target_id: int = 0
+    source_id: str = ""
+    target_id: str = ""
     edge_type: str = ""
     weight: float = 1.0
     metadata: Optional[str] = None

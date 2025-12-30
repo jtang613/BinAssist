@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import json
+import time
+import uuid
 from typing import Any, Dict, List, Optional
 
 from .models import GraphNode, GraphEdge
@@ -43,6 +45,10 @@ class GraphStore:
         except Exception:
             return []
 
+    @staticmethod
+    def _now_ms() -> int:
+        return int(time.time() * 1000)
+
     def get_node_by_address(self, binary_hash: str, node_type: str, address: int) -> Optional[GraphNode]:
         if not binary_hash:
             return None
@@ -51,12 +57,13 @@ class GraphStore:
             try:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    SELECT id, binary_hash, node_type, address, name, raw_code, llm_summary,
-                           security_flags, network_apis, file_io_apis, ip_addresses, urls,
-                           file_paths, domains, registry_keys, activity_profile,
-                           risk_level, is_stale, user_edited, created_at, updated_at
-                    FROM GraphNodes
-                    WHERE binary_hash = ? AND node_type = ? AND address = ?
+                    SELECT id, binary_id, type, address, name, raw_content, llm_summary,
+                           confidence, embedding, security_flags, network_apis, file_io_apis,
+                           ip_addresses, urls, file_paths, domains, registry_keys, risk_level,
+                           activity_profile, analysis_depth, created_at, updated_at,
+                           is_stale, user_edited
+                    FROM graph_nodes
+                    WHERE binary_id = ? AND type = ? AND address = ?
                 ''', (binary_hash, node_type, address))
                 row = cursor.fetchone()
                 if not row:
@@ -69,25 +76,28 @@ class GraphStore:
                     name=row[4],
                     raw_code=row[5],
                     llm_summary=row[6],
-                    security_flags=self._deserialize_list(row[7]),
-                    network_apis=self._deserialize_list(row[8]),
-                    file_io_apis=self._deserialize_list(row[9]),
-                    ip_addresses=self._deserialize_list(row[10]),
-                    urls=self._deserialize_list(row[11]),
-                    file_paths=self._deserialize_list(row[12]),
-                    domains=self._deserialize_list(row[13]),
-                    registry_keys=self._deserialize_list(row[14]),
-                    activity_profile=row[15],
-                    risk_level=row[16],
-                    is_stale=bool(row[17]),
-                    user_edited=bool(row[18]),
-                    created_at=row[19],
-                    updated_at=row[20],
+                    confidence=row[7] if row[7] is not None else 0.0,
+                    embedding=row[8],
+                    security_flags=self._deserialize_list(row[9]),
+                    network_apis=self._deserialize_list(row[10]),
+                    file_io_apis=self._deserialize_list(row[11]),
+                    ip_addresses=self._deserialize_list(row[12]),
+                    urls=self._deserialize_list(row[13]),
+                    file_paths=self._deserialize_list(row[14]),
+                    domains=self._deserialize_list(row[15]),
+                    registry_keys=self._deserialize_list(row[16]),
+                    risk_level=row[17],
+                    activity_profile=row[18],
+                    analysis_depth=row[19] if row[19] is not None else 0,
+                    created_at=row[20],
+                    updated_at=row[21],
+                    is_stale=bool(row[22]),
+                    user_edited=bool(row[23]),
                 )
             finally:
                 conn.close()
 
-    def get_node_by_id(self, node_id: int) -> Optional[GraphNode]:
+    def get_node_by_id(self, node_id: str) -> Optional[GraphNode]:
         if not node_id:
             return None
         with self._db_lock:
@@ -95,13 +105,14 @@ class GraphStore:
             try:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    SELECT id, binary_hash, node_type, address, name, raw_code, llm_summary,
-                           security_flags, network_apis, file_io_apis, ip_addresses, urls,
-                           file_paths, domains, registry_keys, activity_profile,
-                           risk_level, is_stale, user_edited, created_at, updated_at
-                    FROM GraphNodes
+                    SELECT id, binary_id, type, address, name, raw_content, llm_summary,
+                           confidence, embedding, security_flags, network_apis, file_io_apis,
+                           ip_addresses, urls, file_paths, domains, registry_keys, risk_level,
+                           activity_profile, analysis_depth, created_at, updated_at,
+                           is_stale, user_edited
+                    FROM graph_nodes
                     WHERE id = ?
-                ''', (node_id,))
+                ''', (str(node_id),))
                 row = cursor.fetchone()
                 if not row:
                     return None
@@ -113,20 +124,23 @@ class GraphStore:
                     name=row[4],
                     raw_code=row[5],
                     llm_summary=row[6],
-                    security_flags=self._deserialize_list(row[7]),
-                    network_apis=self._deserialize_list(row[8]),
-                    file_io_apis=self._deserialize_list(row[9]),
-                    ip_addresses=self._deserialize_list(row[10]),
-                    urls=self._deserialize_list(row[11]),
-                    file_paths=self._deserialize_list(row[12]),
-                    domains=self._deserialize_list(row[13]),
-                    registry_keys=self._deserialize_list(row[14]),
-                    activity_profile=row[15],
-                    risk_level=row[16],
-                    is_stale=bool(row[17]),
-                    user_edited=bool(row[18]),
-                    created_at=row[19],
-                    updated_at=row[20],
+                    confidence=row[7] if row[7] is not None else 0.0,
+                    embedding=row[8],
+                    security_flags=self._deserialize_list(row[9]),
+                    network_apis=self._deserialize_list(row[10]),
+                    file_io_apis=self._deserialize_list(row[11]),
+                    ip_addresses=self._deserialize_list(row[12]),
+                    urls=self._deserialize_list(row[13]),
+                    file_paths=self._deserialize_list(row[14]),
+                    domains=self._deserialize_list(row[15]),
+                    registry_keys=self._deserialize_list(row[16]),
+                    risk_level=row[17],
+                    activity_profile=row[18],
+                    analysis_depth=row[19] if row[19] is not None else 0,
+                    created_at=row[20],
+                    updated_at=row[21],
+                    is_stale=bool(row[22]),
+                    user_edited=bool(row[23]),
                 )
             finally:
                 conn.close()
@@ -137,6 +151,11 @@ class GraphStore:
         if node.address is None:
             raise ValueError("address is required for GraphNode upsert")
 
+        if not node.id:
+            existing = self.get_node_by_address(node.binary_hash, node.node_type, node.address)
+            node.id = existing.id if existing else str(uuid.uuid4())
+
+        now_ms = self._now_ms()
         security_flags = self._serialize_list(node.security_flags)
         network_apis = self._serialize_list(node.network_apis)
         file_io_apis = self._serialize_list(node.file_io_apis)
@@ -151,16 +170,22 @@ class GraphStore:
             try:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT INTO GraphNodes (
-                        binary_hash, node_type, address, name, raw_code, llm_summary,
-                        security_flags, network_apis, file_io_apis, ip_addresses, urls,
-                        file_paths, domains, registry_keys, activity_profile,
-                        risk_level, is_stale, user_edited, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    ON CONFLICT(binary_hash, node_type, address) DO UPDATE SET
+                    INSERT INTO graph_nodes (
+                        id, type, address, binary_id, name, raw_content, llm_summary,
+                        confidence, embedding, security_flags, network_apis, file_io_apis,
+                        ip_addresses, urls, file_paths, domains, registry_keys, risk_level,
+                        activity_profile, analysis_depth, created_at, updated_at, is_stale,
+                        user_edited
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        type = excluded.type,
+                        address = excluded.address,
+                        binary_id = excluded.binary_id,
                         name = excluded.name,
-                        raw_code = excluded.raw_code,
+                        raw_content = excluded.raw_content,
                         llm_summary = excluded.llm_summary,
+                        confidence = excluded.confidence,
+                        embedding = excluded.embedding,
                         security_flags = excluded.security_flags,
                         network_apis = excluded.network_apis,
                         file_io_apis = excluded.file_io_apis,
@@ -169,18 +194,22 @@ class GraphStore:
                         file_paths = excluded.file_paths,
                         domains = excluded.domains,
                         registry_keys = excluded.registry_keys,
-                        activity_profile = excluded.activity_profile,
                         risk_level = excluded.risk_level,
+                        activity_profile = excluded.activity_profile,
+                        analysis_depth = excluded.analysis_depth,
+                        updated_at = excluded.updated_at,
                         is_stale = excluded.is_stale,
-                        user_edited = excluded.user_edited,
-                        updated_at = CURRENT_TIMESTAMP
+                        user_edited = excluded.user_edited
                 ''', (
-                    node.binary_hash,
+                    node.id,
                     node.node_type,
                     node.address,
+                    node.binary_hash,
                     node.name,
                     node.raw_code,
                     node.llm_summary,
+                    node.confidence,
+                    node.embedding,
                     security_flags,
                     network_apis,
                     file_io_apis,
@@ -189,20 +218,15 @@ class GraphStore:
                     file_paths,
                     domains,
                     registry_keys,
-                    node.activity_profile,
                     node.risk_level,
+                    node.activity_profile,
+                    node.analysis_depth,
+                    now_ms,
+                    now_ms,
                     1 if node.is_stale else 0,
                     1 if node.user_edited else 0
                 ))
                 conn.commit()
-
-                cursor.execute('''
-                    SELECT id FROM GraphNodes
-                    WHERE binary_hash = ? AND node_type = ? AND address = ?
-                ''', (node.binary_hash, node.node_type, node.address))
-                row = cursor.fetchone()
-                if row:
-                    node.id = row[0]
                 return node
             finally:
                 conn.close()
@@ -212,48 +236,58 @@ class GraphStore:
             raise ValueError("binary_hash is required for GraphEdge insert")
         if not edge.source_id or not edge.target_id or not edge.edge_type:
             raise ValueError("source_id, target_id, and edge_type are required for GraphEdge insert")
+        if not edge.id:
+            edge.id = str(uuid.uuid4())
 
+        now_ms = self._now_ms()
         with self._db_lock:
             conn = self.analysis_db.get_connection()
             try:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT INTO GraphEdges (
-                        binary_hash, source_id, target_id, edge_type, weight, metadata
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(binary_hash, source_id, target_id, edge_type) DO NOTHING
+                    SELECT 1 FROM graph_edges
+                    WHERE source_id = ? AND target_id = ? AND type = ?
+                    LIMIT 1
+                ''', (edge.source_id, edge.target_id, edge.edge_type))
+                if cursor.fetchone():
+                    return edge
+                cursor.execute('''
+                    INSERT INTO graph_edges (
+                        id, source_id, target_id, type, weight, metadata, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ''', (
-                    edge.binary_hash,
+                    edge.id,
                     edge.source_id,
                     edge.target_id,
                     edge.edge_type,
                     edge.weight,
-                    edge.metadata
+                    edge.metadata,
+                    now_ms
                 ))
                 conn.commit()
-                if cursor.lastrowid:
-                    edge.id = cursor.lastrowid
                 return edge
             finally:
                 conn.close()
 
-    def get_callers(self, binary_hash: str, node_id: int, edge_type: str = "CALLS") -> List[GraphNode]:
-        if not binary_hash:
+    def get_callers(self, binary_hash: str, node_id: str, edge_type: str = "CALLS") -> List[GraphNode]:
+        if not binary_hash or not node_id:
             return []
         with self._db_lock:
             conn = self.analysis_db.get_connection()
             try:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    SELECT n.id, n.binary_hash, n.node_type, n.address, n.name, n.raw_code,
-                           n.llm_summary, n.security_flags, n.network_apis, n.file_io_apis,
-                           n.ip_addresses, n.urls, n.file_paths, n.domains, n.registry_keys,
-                           n.activity_profile, n.risk_level, n.is_stale, n.user_edited,
-                           n.created_at, n.updated_at
-                    FROM GraphEdges e
-                    JOIN GraphNodes n ON n.id = e.source_id
-                    WHERE e.binary_hash = ? AND e.target_id = ? AND e.edge_type = ?
-                ''', (binary_hash, node_id, edge_type))
+                    SELECT n.id, n.binary_id, n.type, n.address, n.name, n.raw_content,
+                           n.llm_summary, n.confidence, n.embedding, n.security_flags,
+                           n.network_apis, n.file_io_apis, n.ip_addresses, n.urls,
+                           n.file_paths, n.domains, n.registry_keys, n.risk_level,
+                           n.activity_profile, n.analysis_depth, n.created_at, n.updated_at,
+                           n.is_stale, n.user_edited
+                    FROM graph_edges e
+                    JOIN graph_nodes n ON n.id = e.source_id
+                    JOIN graph_nodes t ON t.id = e.target_id
+                    WHERE t.id = ? AND e.type = ? AND n.binary_id = ? AND t.binary_id = ?
+                ''', (str(node_id), edge_type, binary_hash, binary_hash))
                 rows = cursor.fetchall()
                 callers = []
                 for row in rows:
@@ -265,26 +299,29 @@ class GraphStore:
                         name=row[4],
                         raw_code=row[5],
                         llm_summary=row[6],
-                        security_flags=self._deserialize_list(row[7]),
-                        network_apis=self._deserialize_list(row[8]),
-                        file_io_apis=self._deserialize_list(row[9]),
-                        ip_addresses=self._deserialize_list(row[10]),
-                        urls=self._deserialize_list(row[11]),
-                        file_paths=self._deserialize_list(row[12]),
-                        domains=self._deserialize_list(row[13]),
-                        registry_keys=self._deserialize_list(row[14]),
-                        activity_profile=row[15],
-                        risk_level=row[16],
-                        is_stale=bool(row[17]),
-                        user_edited=bool(row[18]),
-                        created_at=row[19],
-                        updated_at=row[20],
+                        confidence=row[7] if row[7] is not None else 0.0,
+                        embedding=row[8],
+                        security_flags=self._deserialize_list(row[9]),
+                        network_apis=self._deserialize_list(row[10]),
+                        file_io_apis=self._deserialize_list(row[11]),
+                        ip_addresses=self._deserialize_list(row[12]),
+                        urls=self._deserialize_list(row[13]),
+                        file_paths=self._deserialize_list(row[14]),
+                        domains=self._deserialize_list(row[15]),
+                        registry_keys=self._deserialize_list(row[16]),
+                        risk_level=row[17],
+                        activity_profile=row[18],
+                        analysis_depth=row[19] if row[19] is not None else 0,
+                        created_at=row[20],
+                        updated_at=row[21],
+                        is_stale=bool(row[22]),
+                        user_edited=bool(row[23]),
                     ))
                 return callers
             finally:
                 conn.close()
 
-    def get_edges_for_node(self, binary_hash: str, node_id: int) -> List[GraphEdge]:
+    def get_edges_for_node(self, binary_hash: str, node_id: str) -> List[GraphEdge]:
         if not binary_hash or not node_id:
             return []
         with self._db_lock:
@@ -292,22 +329,25 @@ class GraphStore:
             try:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    SELECT id, binary_hash, source_id, target_id, edge_type, weight, metadata, created_at
-                    FROM GraphEdges
-                    WHERE binary_hash = ? AND (source_id = ? OR target_id = ?)
-                ''', (binary_hash, node_id, node_id))
+                    SELECT e.id, e.source_id, e.target_id, e.type, e.weight, e.metadata, e.created_at
+                    FROM graph_edges e
+                    JOIN graph_nodes s ON s.id = e.source_id
+                    JOIN graph_nodes t ON t.id = e.target_id
+                    WHERE (e.source_id = ? OR e.target_id = ?)
+                      AND s.binary_id = ? AND t.binary_id = ?
+                ''', (str(node_id), str(node_id), binary_hash, binary_hash))
                 rows = cursor.fetchall()
                 edges = []
                 for row in rows:
                     edges.append(GraphEdge(
                         id=row[0],
-                        binary_hash=row[1],
-                        source_id=row[2],
-                        target_id=row[3],
-                        edge_type=row[4],
-                        weight=row[5] if row[5] is not None else 1.0,
-                        metadata=row[6],
-                        created_at=row[7],
+                        binary_hash=binary_hash,
+                        source_id=row[1],
+                        target_id=row[2],
+                        edge_type=row[3],
+                        weight=row[4] if row[4] is not None else 1.0,
+                        metadata=row[5],
+                        created_at=row[6],
                     ))
                 return edges
             finally:
@@ -320,13 +360,19 @@ class GraphStore:
             conn = self.analysis_db.get_connection()
             try:
                 cursor = conn.cursor()
-                cursor.execute('SELECT COUNT(*) FROM GraphNodes WHERE binary_hash = ?', (binary_hash,))
+                cursor.execute('SELECT COUNT(*) FROM graph_nodes WHERE binary_id = ?', (binary_hash,))
                 nodes = cursor.fetchone()[0]
-                cursor.execute('SELECT COUNT(*) FROM GraphEdges WHERE binary_hash = ?', (binary_hash,))
+                cursor.execute('''
+                    SELECT COUNT(*)
+                    FROM graph_edges e
+                    JOIN graph_nodes s ON s.id = e.source_id
+                    JOIN graph_nodes t ON t.id = e.target_id
+                    WHERE s.binary_id = ? AND t.binary_id = ?
+                ''', (binary_hash, binary_hash))
                 edges = cursor.fetchone()[0]
-                cursor.execute('SELECT COUNT(*) FROM GraphNodes WHERE binary_hash = ? AND is_stale = 1', (binary_hash,))
+                cursor.execute('SELECT COUNT(*) FROM graph_nodes WHERE binary_id = ? AND is_stale = 1', (binary_hash,))
                 stale = cursor.fetchone()[0]
-                cursor.execute('SELECT MAX(updated_at) FROM GraphNodes WHERE binary_hash = ?', (binary_hash,))
+                cursor.execute('SELECT MAX(updated_at) FROM graph_nodes WHERE binary_id = ?', (binary_hash,))
                 last = cursor.fetchone()[0]
                 return {"nodes": nodes, "edges": edges, "stale": stale, "last_indexed": last}
             finally:
@@ -339,8 +385,7 @@ class GraphStore:
             conn = self.analysis_db.get_connection()
             try:
                 cursor = conn.cursor()
-                cursor.execute('DELETE FROM GraphEdges WHERE binary_hash = ?', (binary_hash,))
-                cursor.execute('DELETE FROM GraphNodes WHERE binary_hash = ?', (binary_hash,))
+                cursor.execute('DELETE FROM graph_nodes WHERE binary_id = ?', (binary_hash,))
                 conn.commit()
             finally:
                 conn.close()
@@ -356,25 +401,27 @@ class GraphStore:
                 cursor = conn.cursor()
                 try:
                     cursor.execute('''
-                        SELECT n.id, n.binary_hash, n.node_type, n.address, n.name, n.raw_code,
-                               n.llm_summary, n.security_flags, n.network_apis, n.file_io_apis,
-                               n.ip_addresses, n.urls, n.file_paths, n.domains, n.registry_keys,
-                               n.activity_profile, n.risk_level, n.is_stale, n.user_edited,
-                               n.created_at, n.updated_at
-                        FROM GraphNodeFTS f
-                        JOIN GraphNodes n ON n.id = f.rowid
-                        WHERE n.binary_hash = ? AND GraphNodeFTS MATCH ?
+                        SELECT n.id, n.binary_id, n.type, n.address, n.name, n.raw_content,
+                               n.llm_summary, n.confidence, n.embedding, n.security_flags,
+                               n.network_apis, n.file_io_apis, n.ip_addresses, n.urls,
+                               n.file_paths, n.domains, n.registry_keys, n.risk_level,
+                               n.activity_profile, n.analysis_depth, n.created_at, n.updated_at,
+                               n.is_stale, n.user_edited
+                        FROM node_fts f
+                        JOIN graph_nodes n ON n.id = f.id
+                        WHERE n.binary_id = ? AND node_fts MATCH ?
                         LIMIT ?
                     ''', (binary_hash, query, limit))
                 except Exception:
                     cursor.execute('''
-                        SELECT id, binary_hash, node_type, address, name, raw_code,
-                               llm_summary, security_flags, network_apis, file_io_apis,
-                               ip_addresses, urls, file_paths, domains, registry_keys,
-                               activity_profile, risk_level, is_stale, user_edited,
-                               created_at, updated_at
-                        FROM GraphNodes
-                        WHERE binary_hash = ? AND (name LIKE ? OR llm_summary LIKE ?)
+                        SELECT id, binary_id, type, address, name, raw_content,
+                               llm_summary, confidence, embedding, security_flags,
+                               network_apis, file_io_apis, ip_addresses, urls,
+                               file_paths, domains, registry_keys, risk_level,
+                               activity_profile, analysis_depth, created_at, updated_at,
+                               is_stale, user_edited
+                        FROM graph_nodes
+                        WHERE binary_id = ? AND (name LIKE ? OR llm_summary LIKE ?)
                         LIMIT ?
                     ''', (binary_hash, f"%{query}%", f"%{query}%", limit))
 
@@ -389,20 +436,23 @@ class GraphStore:
                         name=row[4],
                         raw_code=row[5],
                         llm_summary=row[6],
-                        security_flags=self._deserialize_list(row[7]),
-                        network_apis=self._deserialize_list(row[8]),
-                        file_io_apis=self._deserialize_list(row[9]),
-                        ip_addresses=self._deserialize_list(row[10]),
-                        urls=self._deserialize_list(row[11]),
-                        file_paths=self._deserialize_list(row[12]),
-                        domains=self._deserialize_list(row[13]),
-                        registry_keys=self._deserialize_list(row[14]),
-                        activity_profile=row[15],
-                        risk_level=row[16],
-                        is_stale=bool(row[17]),
-                        user_edited=bool(row[18]),
-                        created_at=row[19],
-                        updated_at=row[20],
+                        confidence=row[7] if row[7] is not None else 0.0,
+                        embedding=row[8],
+                        security_flags=self._deserialize_list(row[9]),
+                        network_apis=self._deserialize_list(row[10]),
+                        file_io_apis=self._deserialize_list(row[11]),
+                        ip_addresses=self._deserialize_list(row[12]),
+                        urls=self._deserialize_list(row[13]),
+                        file_paths=self._deserialize_list(row[14]),
+                        domains=self._deserialize_list(row[15]),
+                        registry_keys=self._deserialize_list(row[16]),
+                        risk_level=row[17],
+                        activity_profile=row[18],
+                        analysis_depth=row[19] if row[19] is not None else 0,
+                        created_at=row[20],
+                        updated_at=row[21],
+                        is_stale=bool(row[22]),
+                        user_edited=bool(row[23]),
                     ))
                 return results
             finally:
@@ -417,13 +467,14 @@ class GraphStore:
             try:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    SELECT id, binary_hash, node_type, address, name, raw_code,
-                           llm_summary, security_flags, network_apis, file_io_apis,
-                           ip_addresses, urls, file_paths, domains, registry_keys,
-                           activity_profile, risk_level, is_stale, user_edited,
-                           created_at, updated_at
-                    FROM GraphNodes
-                    WHERE binary_hash = ?
+                    SELECT id, binary_id, type, address, name, raw_content,
+                           llm_summary, confidence, embedding, security_flags,
+                           network_apis, file_io_apis, ip_addresses, urls,
+                           file_paths, domains, registry_keys, risk_level,
+                           activity_profile, analysis_depth, created_at, updated_at,
+                           is_stale, user_edited
+                    FROM graph_nodes
+                    WHERE binary_id = ?
                       AND (is_stale = 1 OR llm_summary IS NULL OR llm_summary = '')
                     LIMIT ?
                 ''', (binary_hash, limit_value))
@@ -438,20 +489,23 @@ class GraphStore:
                         name=row[4],
                         raw_code=row[5],
                         llm_summary=row[6],
-                        security_flags=self._deserialize_list(row[7]),
-                        network_apis=self._deserialize_list(row[8]),
-                        file_io_apis=self._deserialize_list(row[9]),
-                        ip_addresses=self._deserialize_list(row[10]),
-                        urls=self._deserialize_list(row[11]),
-                        file_paths=self._deserialize_list(row[12]),
-                        domains=self._deserialize_list(row[13]),
-                        registry_keys=self._deserialize_list(row[14]),
-                        activity_profile=row[15],
-                        risk_level=row[16],
-                        is_stale=bool(row[17]),
-                        user_edited=bool(row[18]),
-                        created_at=row[19],
-                        updated_at=row[20],
+                        confidence=row[7] if row[7] is not None else 0.0,
+                        embedding=row[8],
+                        security_flags=self._deserialize_list(row[9]),
+                        network_apis=self._deserialize_list(row[10]),
+                        file_io_apis=self._deserialize_list(row[11]),
+                        ip_addresses=self._deserialize_list(row[12]),
+                        urls=self._deserialize_list(row[13]),
+                        file_paths=self._deserialize_list(row[14]),
+                        domains=self._deserialize_list(row[15]),
+                        registry_keys=self._deserialize_list(row[16]),
+                        risk_level=row[17],
+                        activity_profile=row[18],
+                        analysis_depth=row[19] if row[19] is not None else 0,
+                        created_at=row[20],
+                        updated_at=row[21],
+                        is_stale=bool(row[22]),
+                        user_edited=bool(row[23]),
                     ))
                 return results
             finally:
@@ -465,13 +519,14 @@ class GraphStore:
             try:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    SELECT id, binary_hash, node_type, address, name, raw_code,
-                           llm_summary, security_flags, network_apis, file_io_apis,
-                           ip_addresses, urls, file_paths, domains, registry_keys,
-                           activity_profile, risk_level, is_stale, user_edited,
-                           created_at, updated_at
-                    FROM GraphNodes
-                    WHERE binary_hash = ? AND node_type = ?
+                    SELECT id, binary_id, type, address, name, raw_content,
+                           llm_summary, confidence, embedding, security_flags,
+                           network_apis, file_io_apis, ip_addresses, urls,
+                           file_paths, domains, registry_keys, risk_level,
+                           activity_profile, analysis_depth, created_at, updated_at,
+                           is_stale, user_edited
+                    FROM graph_nodes
+                    WHERE binary_id = ? AND type = ?
                 ''', (binary_hash, node_type))
                 rows = cursor.fetchall()
                 results = []
@@ -484,20 +539,23 @@ class GraphStore:
                         name=row[4],
                         raw_code=row[5],
                         llm_summary=row[6],
-                        security_flags=self._deserialize_list(row[7]),
-                        network_apis=self._deserialize_list(row[8]),
-                        file_io_apis=self._deserialize_list(row[9]),
-                        ip_addresses=self._deserialize_list(row[10]),
-                        urls=self._deserialize_list(row[11]),
-                        file_paths=self._deserialize_list(row[12]),
-                        domains=self._deserialize_list(row[13]),
-                        registry_keys=self._deserialize_list(row[14]),
-                        activity_profile=row[15],
-                        risk_level=row[16],
-                        is_stale=bool(row[17]),
-                        user_edited=bool(row[18]),
-                        created_at=row[19],
-                        updated_at=row[20],
+                        confidence=row[7] if row[7] is not None else 0.0,
+                        embedding=row[8],
+                        security_flags=self._deserialize_list(row[9]),
+                        network_apis=self._deserialize_list(row[10]),
+                        file_io_apis=self._deserialize_list(row[11]),
+                        ip_addresses=self._deserialize_list(row[12]),
+                        urls=self._deserialize_list(row[13]),
+                        file_paths=self._deserialize_list(row[14]),
+                        domains=self._deserialize_list(row[15]),
+                        registry_keys=self._deserialize_list(row[16]),
+                        risk_level=row[17],
+                        activity_profile=row[18],
+                        analysis_depth=row[19] if row[19] is not None else 0,
+                        created_at=row[20],
+                        updated_at=row[21],
+                        is_stale=bool(row[22]),
+                        user_edited=bool(row[23]),
                     ))
                 return results
             finally:

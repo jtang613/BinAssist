@@ -86,6 +86,270 @@ class AnalysisDBService:
         conn.execute('PRAGMA foreign_keys = ON')
         conn.execute('PRAGMA journal_mode = WAL')
         return conn
+
+    def _table_exists(self, cursor: sqlite3.Cursor, table_name: str) -> bool:
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,)
+        )
+        return cursor.fetchone() is not None
+
+    def _table_columns(self, cursor: sqlite3.Cursor, table_name: str) -> List[str]:
+        cursor.execute(f"PRAGMA table_info({table_name})")
+        return [row[1] for row in cursor.fetchall()]
+
+    def _normalize_column_type(self, type_value: Optional[str]) -> str:
+        if not type_value:
+            return ""
+        normalized = type_value.strip().upper()
+        base_type = normalized.split()[0]
+        return "INTEGER" if base_type == "INT" else base_type
+
+    def _next_backup_name(self, cursor: sqlite3.Cursor, table_name: str) -> str:
+        suffix = 1
+        while self._table_exists(cursor, f"{table_name}_backup_{suffix}"):
+            suffix += 1
+        return f"{table_name}_backup_{suffix}"
+
+    def _rename_table_with_counter(self, cursor: sqlite3.Cursor, table_name: str) -> Optional[str]:
+        if not self._table_exists(cursor, table_name):
+            return None
+        backup_name = self._next_backup_name(cursor, table_name)
+        cursor.execute(f"ALTER TABLE {table_name} RENAME TO {backup_name}")
+        return backup_name
+
+    def _drop_graph_nodes_triggers(self, cursor: sqlite3.Cursor) -> None:
+        cursor.execute("DROP TRIGGER IF EXISTS graph_nodes_ai")
+        cursor.execute("DROP TRIGGER IF EXISTS graph_nodes_ad")
+        cursor.execute("DROP TRIGGER IF EXISTS graph_nodes_au")
+
+    def _ensure_table_schema(
+        self,
+        cursor: sqlite3.Cursor,
+        table_name: str,
+        expected_schema: Dict[str, str],
+        create_sql: str,
+    ) -> bool:
+        renamed = False
+        if self._table_exists(cursor, table_name):
+            cursor.execute(f"PRAGMA table_info({table_name})")
+            existing_rows = cursor.fetchall()
+            existing_schema = {
+                row[1]: self._normalize_column_type(row[2]) for row in existing_rows
+            }
+            expected_schema_norm = {
+                name: self._normalize_column_type(col_type)
+                for name, col_type in expected_schema.items()
+            }
+            if set(existing_schema.keys()) != set(expected_schema_norm.keys()):
+                self._rename_table_with_counter(cursor, table_name)
+                renamed = True
+            else:
+                for name, expected_type in expected_schema_norm.items():
+                    if expected_type and existing_schema.get(name) != expected_type:
+                        self._rename_table_with_counter(cursor, table_name)
+                        renamed = True
+                        break
+        cursor.execute(create_sql)
+        return renamed
+
+    def _ensure_graphrag_schema(self, cursor: sqlite3.Cursor) -> None:
+        expected_nodes = {
+            "id": "TEXT",
+            "type": "TEXT",
+            "address": "INTEGER",
+            "binary_id": "TEXT",
+            "name": "TEXT",
+            "raw_content": "TEXT",
+            "llm_summary": "TEXT",
+            "confidence": "REAL",
+            "embedding": "BLOB",
+            "security_flags": "TEXT",
+            "network_apis": "TEXT",
+            "file_io_apis": "TEXT",
+            "ip_addresses": "TEXT",
+            "urls": "TEXT",
+            "file_paths": "TEXT",
+            "domains": "TEXT",
+            "registry_keys": "TEXT",
+            "risk_level": "TEXT",
+            "activity_profile": "TEXT",
+            "analysis_depth": "INTEGER",
+            "created_at": "INTEGER",
+            "updated_at": "INTEGER",
+            "is_stale": "INTEGER",
+            "user_edited": "INTEGER",
+        }
+        expected_edges = {
+            "id": "TEXT",
+            "source_id": "TEXT",
+            "target_id": "TEXT",
+            "type": "TEXT",
+            "weight": "REAL",
+            "metadata": "TEXT",
+            "created_at": "INTEGER",
+        }
+        expected_communities = {
+            "id": "TEXT",
+            "level": "INTEGER",
+            "binary_id": "TEXT",
+            "parent_community_id": "TEXT",
+            "name": "TEXT",
+            "summary": "TEXT",
+            "member_count": "INTEGER",
+            "is_stale": "INTEGER",
+            "created_at": "INTEGER",
+            "updated_at": "INTEGER",
+        }
+        expected_members = {
+            "community_id": "TEXT",
+            "node_id": "TEXT",
+            "membership_score": "REAL",
+        }
+        expected_fts = [
+            "id",
+            "name",
+            "llm_summary",
+            "security_flags",
+        ]
+
+        for legacy in ("GraphNodes", "GraphEdges", "GraphNodeFTS", "GraphCommunities", "CommunityMembers"):
+            if self._table_exists(cursor, legacy):
+                self._rename_table_with_counter(cursor, legacy)
+
+        self._drop_graph_nodes_triggers(cursor)
+
+        nodes_renamed = self._ensure_table_schema(cursor, "graph_nodes", expected_nodes, '''
+            CREATE TABLE IF NOT EXISTS graph_nodes (
+                id TEXT PRIMARY KEY,
+                type TEXT NOT NULL,
+                address INTEGER,
+                binary_id TEXT NOT NULL,
+                name TEXT,
+                raw_content TEXT,
+                llm_summary TEXT,
+                confidence REAL DEFAULT 0.0,
+                embedding BLOB,
+                security_flags TEXT,
+                network_apis TEXT,
+                file_io_apis TEXT,
+                ip_addresses TEXT,
+                urls TEXT,
+                file_paths TEXT,
+                domains TEXT,
+                registry_keys TEXT,
+                risk_level TEXT,
+                activity_profile TEXT,
+                analysis_depth INTEGER DEFAULT 0,
+                created_at INTEGER,
+                updated_at INTEGER,
+                is_stale INTEGER DEFAULT 0,
+                user_edited INTEGER DEFAULT 0
+            )
+        ''')
+
+        if nodes_renamed and self._table_exists(cursor, "graph_edges"):
+            self._rename_table_with_counter(cursor, "graph_edges")
+
+        self._ensure_table_schema(cursor, "graph_edges", expected_edges, '''
+            CREATE TABLE IF NOT EXISTS graph_edges (
+                id TEXT PRIMARY KEY,
+                source_id TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                weight REAL DEFAULT 1.0,
+                metadata TEXT,
+                created_at INTEGER,
+                FOREIGN KEY(source_id) REFERENCES graph_nodes(id) ON DELETE CASCADE,
+                FOREIGN KEY(target_id) REFERENCES graph_nodes(id) ON DELETE CASCADE
+            )
+        ''')
+
+        communities_renamed = self._ensure_table_schema(cursor, "graph_communities", expected_communities, '''
+            CREATE TABLE IF NOT EXISTS graph_communities (
+                id TEXT PRIMARY KEY,
+                level INTEGER NOT NULL,
+                binary_id TEXT NOT NULL,
+                parent_community_id TEXT,
+                name TEXT,
+                summary TEXT,
+                member_count INTEGER DEFAULT 0,
+                is_stale INTEGER DEFAULT 1,
+                created_at INTEGER,
+                updated_at INTEGER,
+                FOREIGN KEY (parent_community_id) REFERENCES graph_communities(id) ON DELETE SET NULL
+            )
+        ''')
+
+        if (nodes_renamed or communities_renamed) and self._table_exists(cursor, "community_members"):
+            self._rename_table_with_counter(cursor, "community_members")
+
+        self._ensure_table_schema(cursor, "community_members", expected_members, '''
+            CREATE TABLE IF NOT EXISTS community_members (
+                community_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                membership_score REAL DEFAULT 1.0,
+                PRIMARY KEY (community_id, node_id),
+                FOREIGN KEY (community_id) REFERENCES graph_communities(id) ON DELETE CASCADE,
+                FOREIGN KEY (node_id) REFERENCES graph_nodes(id) ON DELETE CASCADE
+            )
+        ''')
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_nodes_address ON graph_nodes(address)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_nodes_type ON graph_nodes(type)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_nodes_binary ON graph_nodes(binary_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_nodes_name ON graph_nodes(name)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_nodes_stale ON graph_nodes(binary_id, is_stale)")
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_edges_source ON graph_edges(source_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_edges_target ON graph_edges(target_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_edges_type ON graph_edges(type)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_edges_source_type ON graph_edges(source_id, type)")
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_communities_binary ON graph_communities(binary_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_communities_level ON graph_communities(level)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_communities_parent ON graph_communities(parent_community_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_community_members_node ON community_members(node_id)")
+
+        if nodes_renamed or self._table_exists(cursor, "node_fts"):
+            existing_fts_columns = self._table_columns(cursor, "node_fts") if self._table_exists(cursor, "node_fts") else []
+            if nodes_renamed or set(existing_fts_columns) != set(expected_fts):
+                self._rename_table_with_counter(cursor, "node_fts")
+
+        try:
+            cursor.execute('''
+                CREATE VIRTUAL TABLE IF NOT EXISTS node_fts USING fts5(
+                    id,
+                    name,
+                    llm_summary,
+                    security_flags,
+                    content='graph_nodes',
+                    content_rowid='rowid'
+                )
+            ''')
+            self._drop_graph_nodes_triggers(cursor)
+            cursor.execute('''
+                CREATE TRIGGER IF NOT EXISTS graph_nodes_ai AFTER INSERT ON graph_nodes BEGIN
+                    INSERT INTO node_fts(rowid, id, name, llm_summary, security_flags)
+                    VALUES (new.rowid, new.id, new.name, new.llm_summary, new.security_flags);
+                END;
+            ''')
+            cursor.execute('''
+                CREATE TRIGGER IF NOT EXISTS graph_nodes_ad AFTER DELETE ON graph_nodes BEGIN
+                    INSERT INTO node_fts(node_fts, rowid, id, name, llm_summary, security_flags)
+                    VALUES ('delete', old.rowid, old.id, old.name, old.llm_summary, old.security_flags);
+                END;
+            ''')
+            cursor.execute('''
+                CREATE TRIGGER IF NOT EXISTS graph_nodes_au AFTER UPDATE ON graph_nodes BEGIN
+                    INSERT INTO node_fts(node_fts, rowid, id, name, llm_summary, security_flags)
+                    VALUES ('delete', old.rowid, old.id, old.name, old.llm_summary, old.security_flags);
+                    INSERT INTO node_fts(rowid, id, name, llm_summary, security_flags)
+                    VALUES (new.rowid, new.id, new.name, new.llm_summary, new.security_flags);
+                END;
+            ''')
+        except Exception as e:
+            log.log_warn(f"FTS5 not available for node_fts: {e}")
     
     def _create_tables(self):
         """Create database schema"""
@@ -171,89 +435,8 @@ class AnalysisDBService:
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_chat_metadata_lookup ON BNChatMetadata(binary_hash, chat_id)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_system_prompt_active ON SystemPrompts(is_active)')
 
-                # GraphRAG tables (nodes, edges, and optional FTS)
-                cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS GraphNodes (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        binary_hash TEXT NOT NULL,
-                        node_type TEXT NOT NULL,
-                        address INTEGER,
-                        name TEXT,
-                        raw_code TEXT,
-                        llm_summary TEXT,
-                        security_flags TEXT,
-                        network_apis TEXT,
-                        file_io_apis TEXT,
-                        ip_addresses TEXT,
-                        urls TEXT,
-                        file_paths TEXT,
-                        domains TEXT,
-                        registry_keys TEXT,
-                        activity_profile TEXT,
-                        risk_level TEXT,
-                        is_stale INTEGER DEFAULT 1,
-                        user_edited INTEGER DEFAULT 0,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        UNIQUE(binary_hash, node_type, address)
-                    )
-                ''')
-
-                cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS GraphEdges (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        binary_hash TEXT NOT NULL,
-                        source_id INTEGER NOT NULL,
-                        target_id INTEGER NOT NULL,
-                        edge_type TEXT NOT NULL,
-                        weight REAL DEFAULT 1.0,
-                        metadata TEXT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        UNIQUE(binary_hash, source_id, target_id, edge_type),
-                        FOREIGN KEY(source_id) REFERENCES GraphNodes(id),
-                        FOREIGN KEY(target_id) REFERENCES GraphNodes(id)
-                    )
-                ''')
-
-                cursor.execute('CREATE INDEX IF NOT EXISTS idx_graph_nodes_lookup ON GraphNodes(binary_hash, node_type, address)')
-                cursor.execute('CREATE INDEX IF NOT EXISTS idx_graph_nodes_name ON GraphNodes(name)')
-                cursor.execute('CREATE INDEX IF NOT EXISTS idx_graph_edges_source ON GraphEdges(source_id)')
-                cursor.execute('CREATE INDEX IF NOT EXISTS idx_graph_edges_target ON GraphEdges(target_id)')
-                cursor.execute('CREATE INDEX IF NOT EXISTS idx_graph_edges_type ON GraphEdges(edge_type)')
-
-                # Optional FTS5 index for semantic search
-                try:
-                    cursor.execute('''
-                        CREATE VIRTUAL TABLE IF NOT EXISTS GraphNodeFTS USING fts5(
-                            name,
-                            llm_summary,
-                            security_flags,
-                            content='GraphNodes',
-                            content_rowid='id'
-                        )
-                    ''')
-                    cursor.execute('''
-                        CREATE TRIGGER IF NOT EXISTS graph_nodes_ai AFTER INSERT ON GraphNodes BEGIN
-                            INSERT INTO GraphNodeFTS(rowid, name, llm_summary, security_flags)
-                            VALUES (new.id, new.name, new.llm_summary, new.security_flags);
-                        END;
-                    ''')
-                    cursor.execute('''
-                        CREATE TRIGGER IF NOT EXISTS graph_nodes_ad AFTER DELETE ON GraphNodes BEGIN
-                            INSERT INTO GraphNodeFTS(GraphNodeFTS, rowid, name, llm_summary, security_flags)
-                            VALUES ('delete', old.id, old.name, old.llm_summary, old.security_flags);
-                        END;
-                    ''')
-                    cursor.execute('''
-                        CREATE TRIGGER IF NOT EXISTS graph_nodes_au AFTER UPDATE ON GraphNodes BEGIN
-                            INSERT INTO GraphNodeFTS(GraphNodeFTS, rowid, name, llm_summary, security_flags)
-                            VALUES ('delete', old.id, old.name, old.llm_summary, old.security_flags);
-                            INSERT INTO GraphNodeFTS(rowid, name, llm_summary, security_flags)
-                            VALUES (new.id, new.name, new.llm_summary, new.security_flags);
-                        END;
-                    ''')
-                except Exception as e:
-                    log.log_warn(f"FTS5 not available for GraphNodeFTS: {e}")
+                # GraphRAG tables (nodes, edges, communities, and optional FTS)
+                self._ensure_graphrag_schema(cursor)
                 
                 conn.commit()
                 log.log_info("AnalysisDB schema created successfully")
