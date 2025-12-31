@@ -101,7 +101,7 @@ class LLMQueryThread(QThread):
                     # User or assistant message
                     role = MessageRole.USER if msg["role"] == "user" else MessageRole.ASSISTANT
                     content = msg["content"]
-                    
+
                     # Handle tool calls for assistant messages
                     tool_calls = None
                     if msg.get("tool_calls"):
@@ -117,18 +117,29 @@ class LLMQueryThread(QThread):
                                         arguments = json.loads(arguments)
                                     except:
                                         arguments = {}
-                                
+
                                 tool_call = ToolCall(
                                     id=tc.get("id", ""),
                                     name=func_data.get("name", ""),
                                     arguments=arguments
                                 )
                                 tool_calls.append(tool_call)
-                    
+
+                    # Preserve thinking_blocks and reasoning_content for LiteLLM Anthropic thinking
+                    # These are stored in native_content to be used when preparing messages
+                    native_content = None
+                    if role == MessageRole.ASSISTANT:
+                        if msg.get("thinking_blocks") or msg.get("reasoning_content"):
+                            native_content = {
+                                "thinking_blocks": msg.get("thinking_blocks"),
+                                "reasoning_content": msg.get("reasoning_content")
+                            }
+
                     chat_messages.append(ChatMessage(
                         role=role,
                         content=content,
-                        tool_calls=tool_calls
+                        tool_calls=tool_calls,
+                        native_content=native_content
                     ))
             
             # Create chat request
@@ -158,8 +169,13 @@ class LLMQueryThread(QThread):
                     ]
                 if msg.tool_call_id:
                     debug_msg["tool_call_id"] = msg.tool_call_id
+                if msg.native_content:
+                    debug_msg["has_native_content"] = True
+                    if isinstance(msg.native_content, dict):
+                        debug_msg["has_thinking_blocks"] = bool(msg.native_content.get("thinking_blocks"))
+                        debug_msg["has_reasoning_content"] = bool(msg.native_content.get("reasoning_content"))
                 debug_messages.append(debug_msg)
-            
+
             log.log_info(f"🔍 LLM REQUEST DEBUG - Initial Query ({len(request.messages)} messages):")
             log.log_info(json.dumps(debug_messages, indent=2))
             
@@ -296,20 +312,31 @@ class LLMContinuationThread(QThread):
                                         arguments = json.loads(arguments)
                                     except:
                                         arguments = {}
-                                
+
                                 tool_call = ToolCall(
                                     id=tc.get("id", ""),
                                     name=func_data.get("name", ""),
                                     arguments=arguments
                                 )
                                 tool_calls.append(tool_call)
-                    
+
+                    # Preserve thinking_blocks and reasoning_content for LiteLLM Anthropic thinking
+                    # These are stored in native_content to be used when preparing messages
+                    native_content = None
+                    if role == MessageRole.ASSISTANT:
+                        if msg.get("thinking_blocks") or msg.get("reasoning_content"):
+                            native_content = {
+                                "thinking_blocks": msg.get("thinking_blocks"),
+                                "reasoning_content": msg.get("reasoning_content")
+                            }
+
                     chat_messages.append(ChatMessage(
                         role=role,
                         content=content,
-                        tool_calls=tool_calls
+                        tool_calls=tool_calls,
+                        native_content=native_content
                     ))
-            
+
             # Create continuation request
             request = ChatRequest(
                 messages=chat_messages,
@@ -337,8 +364,13 @@ class LLMContinuationThread(QThread):
                     ]
                 if msg.tool_call_id:
                     debug_msg["tool_call_id"] = msg.tool_call_id
+                if msg.native_content:
+                    debug_msg["has_native_content"] = True
+                    if isinstance(msg.native_content, dict):
+                        debug_msg["has_thinking_blocks"] = bool(msg.native_content.get("thinking_blocks"))
+                        debug_msg["has_reasoning_content"] = bool(msg.native_content.get("reasoning_content"))
                 debug_messages.append(debug_msg)
-            
+
             log.log_info(f"🔍 LLM REQUEST DEBUG - Continuation ({len(request.messages)} messages):")
             log.log_info(json.dumps(debug_messages, indent=2))
             
@@ -2211,12 +2243,13 @@ Tool Usage Guidelines:
         # Store tool calls and mark execution as active
         self._pending_tool_calls = tool_calls
         self._tool_execution_active = True
-        
-        # Save the initial assistant response (before tool execution) - only for initial calls
+
+        # Update in-memory message (but don't save to DB - the native_message_callback
+        # already saved the assistant message WITH tool_calls during streaming)
         if self._llm_response_buffer and not hasattr(self, '_initial_response_saved'):
-            self._update_last_assistant_message(self._llm_response_buffer, final_update=True)
+            self._update_last_assistant_message(self._llm_response_buffer, final_update=False)
             self._initial_response_saved = True
-        
+
         # Execute tool calls using common helpers
         self._create_tool_call_messages(tool_calls)
         self._setup_tool_executor(tool_calls)

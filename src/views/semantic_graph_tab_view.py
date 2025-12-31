@@ -4,6 +4,7 @@ import json
 import math
 import shutil
 import subprocess
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from PySide6.QtCore import Qt, Signal, QPointF
@@ -144,7 +145,7 @@ class SemanticGraphTabView(QWidget):
         if node_count == 0:
             self.stats_label.setText("Graph Stats: Not indexed")
         else:
-            timestamp = last_indexed or "unknown"
+            timestamp = self._format_timestamp(last_indexed)
             self.stats_label.setText(
                 f"Graph Stats: {node_count} nodes | {edge_count} edges | {stale_count} stale | Last indexed: {timestamp}"
             )
@@ -154,6 +155,25 @@ class SemanticGraphTabView(QWidget):
 
     def get_current_address(self) -> int:
         return self._current_address
+
+    @staticmethod
+    def _format_timestamp(value: Optional[str]) -> str:
+        if value is None:
+            return "unknown"
+        if isinstance(value, (int, float)):
+            epoch = float(value)
+        else:
+            text = str(value).strip()
+            if text.isdigit():
+                epoch = float(text)
+            else:
+                return text or "unknown"
+        if epoch > 1e12:
+            epoch /= 1000.0
+        try:
+            return datetime.fromtimestamp(epoch).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return "unknown"
 
 
 class SemanticGraphListView(QWidget):

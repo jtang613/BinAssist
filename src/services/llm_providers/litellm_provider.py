@@ -17,7 +17,7 @@ except ImportError:
 from .openai_provider import OpenAIProvider
 from .base_provider import APIProviderError, AuthenticationError, RateLimitError, NetworkError
 from ..models.llm_models import (
-    ChatMessage, ChatRequest, ChatResponse, ToolCall, Usage
+    ChatMessage, ChatRequest, ChatResponse, ToolCall, Usage, MessageRole
 )
 from ..models.provider_types import ProviderType
 from ..models.reasoning_models import ReasoningConfig
@@ -126,6 +126,7 @@ class LiteLLMProvider(OpenAIProvider):
         - bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0 -> anthropic
         - bedrock/amazon.nova-pro-v1:0 -> amazon
         - bedrock/meta.llama3-70b-instruct-v1:0 -> meta
+        - bedrock/gpt-oss-120b -> openai
         - claude-3-5-sonnet -> anthropic (non-Bedrock)
         - gpt-4o -> openai (non-Bedrock)
         """
@@ -143,6 +144,8 @@ class LiteLLMProvider(OpenAIProvider):
                 return 'cohere'
             elif 'ai21' in model_lower:
                 return 'ai21'
+            elif 'gpt' in model_lower or 'openai' in model_lower:
+                return 'openai'
 
         # Non-Bedrock LiteLLM models
         if 'claude' in model_lower or 'anthropic' in model_lower:
@@ -212,14 +215,34 @@ class LiteLLMProvider(OpenAIProvider):
             completion_kwargs["tools"] = []
             log.log_debug("LiteLLM: Added empty tools array for compatibility")
 
-        # Handle reasoning effort
+        # Handle reasoning effort based on model family
         reasoning_effort_str = self.config.get('reasoning_effort', 'none')
         if reasoning_effort_str and reasoning_effort_str != 'none':
-            # LITELLM/BEDROCK QUIRK #2: Don't use reasoning_effort parameter
-            # LiteLLM/Bedrock interpret this as requiring tool calling, causing errors
-            # Skip reasoning_effort for all LiteLLM providers to avoid compatibility issues
-            log.log_debug(f"LiteLLM: Skipping reasoning_effort param (not supported via LiteLLM proxy)")
-            # Note: Reasoning/thinking may still work via model's native capabilities
+            if self.model_family == 'openai':
+                # OpenAI models (including gpt-oss) support reasoning_effort parameter
+                from ..models.reasoning_models import ReasoningConfig
+                reasoning_config = ReasoningConfig.from_string(reasoning_effort_str)
+                effort = reasoning_config.get_openai_reasoning_effort()
+                if effort:
+                    completion_kwargs["reasoning_effort"] = effort
+                    log.log_info(f"LiteLLM: Using reasoning_effort={effort} for OpenAI model {self.model}")
+            elif self.model_family == 'anthropic':
+                # Anthropic models via LiteLLM need thinking params passed through extra_body
+                # so they get forwarded to Bedrock/Anthropic backend
+                from ..models.reasoning_models import ReasoningConfig
+                reasoning_config = ReasoningConfig.from_string(reasoning_effort_str)
+                budget_tokens = reasoning_config.get_anthropic_budget()
+                if budget_tokens:
+                    # Use extra_body to pass Anthropic-native parameters through the proxy
+                    completion_kwargs["extra_body"] = completion_kwargs.get("extra_body", {})
+                    completion_kwargs["extra_body"]["thinking"] = {
+                        "type": "enabled",
+                        "budget_tokens": budget_tokens
+                    }
+                    log.log_info(f"LiteLLM: Using thinking.budget_tokens={budget_tokens} for Anthropic model {self.model}")
+            else:
+                # Other model families - skip reasoning_effort
+                log.log_debug(f"LiteLLM: Skipping reasoning_effort param for {self.model_family} model family")
 
         return completion_kwargs
 
@@ -227,33 +250,60 @@ class LiteLLMProvider(OpenAIProvider):
         """
         Convert BinAssist ChatMessage objects to LiteLLM format.
 
-        Handles Bedrock Anthropic thinking block format:
-        - When thinking enabled, assistant messages must start with thinking blocks
+        LiteLLM expects OpenAI format and handles translation to backend formats
+        (Anthropic, Bedrock, etc.) internally. We must use OpenAI format here.
+
+        For Anthropic models with extended thinking, we must include thinking_blocks
+        in assistant messages to satisfy Anthropic's requirement that assistant messages
+        start with thinking blocks when thinking is enabled.
         """
-        # Start with OpenAI format conversion
-        openai_messages = super()._prepare_messages(messages)
+        # Use OpenAI format - LiteLLM handles translation to Anthropic/Bedrock
+        result = super()._prepare_messages(messages)
 
-        # BEDROCK ANTHROPIC QUIRK: Thinking blocks must come first in assistant messages
-        if self.is_bedrock and self.model_family == 'anthropic':
-            reasoning_enabled = self.config.get('reasoning_effort', 'none') != 'none'
+        # Check if thinking is enabled for Anthropic models
+        reasoning_effort_str = self.config.get('reasoning_effort', 'none')
+        thinking_enabled = (
+            reasoning_effort_str and
+            reasoning_effort_str != 'none' and
+            self.model_family == 'anthropic'
+        )
 
-            if reasoning_enabled:
-                # For Bedrock Anthropic with thinking enabled, we need to ensure
-                # assistant messages with thinking blocks have them first.
-                # However, OpenAI format messages are text-based, not multi-part content.
-                #
-                # Since LiteLLM translates OpenAI format to Bedrock format,
-                # and the error occurs at Bedrock level, we may need to pass
-                # native_content or rely on LiteLLM's translation.
-                #
-                # For now, log a warning if this combination is used.
-                log.log_warn(
-                    "LiteLLM: Bedrock Anthropic with thinking enabled may have "
-                    "format compatibility issues. Consider disabling reasoning_effort "
-                    "or using native Anthropic provider."
-                )
+        # Enhance messages with thinking_blocks if present in native_content
+        for i, msg in enumerate(messages):
+            if msg.role == MessageRole.ASSISTANT and hasattr(msg, 'native_content') and msg.native_content:
+                native = msg.native_content
 
-        return openai_messages
+                # Check for thinking_blocks in native_content
+                if isinstance(native, dict):
+                    thinking_blocks = native.get('thinking_blocks')
+                    reasoning_content = native.get('reasoning_content')
+
+                    if thinking_blocks:
+                        result[i]['thinking_blocks'] = thinking_blocks
+                        log.log_debug(f"LiteLLM: Added {len(thinking_blocks)} thinking_blocks to message {i}")
+
+                    if reasoning_content:
+                        result[i]['reasoning_content'] = reasoning_content
+                        log.log_debug(f"LiteLLM: Added reasoning_content ({len(reasoning_content)} chars) to message {i}")
+
+        # Debug: Log the messages being sent to LiteLLM
+        log.log_info(f"🔍 LITELLM _prepare_messages DEBUG - {len(messages)} ChatMessages -> {len(result)} API messages:")
+        for i, msg in enumerate(result):
+            role = msg.get('role', 'unknown')
+            content_preview = str(msg.get('content', ''))[:100]
+            has_tool_calls = 'tool_calls' in msg
+            has_tool_call_id = 'tool_call_id' in msg
+            has_thinking = 'thinking_blocks' in msg or 'reasoning_content' in msg
+            log.log_info(f"  [{i}] role={role}, has_tool_calls={has_tool_calls}, has_tool_call_id={has_tool_call_id}, has_thinking={has_thinking}, content={content_preview}...")
+            if has_tool_calls:
+                for tc in msg['tool_calls']:
+                    log.log_info(f"       tool_call: id={tc.get('id', 'N/A')}, name={tc.get('function', {}).get('name', 'N/A')}")
+            if has_tool_call_id:
+                log.log_info(f"       tool_call_id={msg.get('tool_call_id')}, name={msg.get('name', 'N/A')}")
+            if has_thinking:
+                log.log_info(f"       thinking_blocks={len(msg.get('thinking_blocks', []))}, reasoning_content={len(msg.get('reasoning_content', '')) if msg.get('reasoning_content') else 0} chars")
+
+        return result
 
     def get_provider_type(self) -> ProviderType:
         """Return LITELLM provider type"""
@@ -334,6 +384,16 @@ class LiteLLMProvider(OpenAIProvider):
                         }
                         for tc in choice.message.tool_calls
                     ]
+
+                # Capture thinking blocks from LiteLLM response (Anthropic models)
+                # LiteLLM returns these fields for Anthropic extended thinking
+                if hasattr(choice.message, 'reasoning_content') and choice.message.reasoning_content:
+                    native_message["reasoning_content"] = choice.message.reasoning_content
+                    log.log_info(f"LiteLLM: Captured reasoning_content ({len(choice.message.reasoning_content)} chars)")
+
+                if hasattr(choice.message, 'thinking_blocks') and choice.message.thinking_blocks:
+                    native_message["thinking_blocks"] = choice.message.thinking_blocks
+                    log.log_info(f"LiteLLM: Captured {len(choice.message.thinking_blocks)} thinking_blocks")
 
                 if response.usage:
                     native_message["usage"] = {
@@ -416,18 +476,38 @@ class LiteLLMProvider(OpenAIProvider):
             # Fall back to non-streaming if Meta model + tools
             # Note: Applies to all Meta models since they're typically routed through Bedrock
             request_tools = getattr(request, 'tools', None)
-            needs_nonstreaming_fallback = (
-                self.model_family == 'meta' and
+
+            # Check if thinking is enabled
+            reasoning_effort_str = self.config.get('reasoning_effort', 'none')
+            thinking_enabled = reasoning_effort_str and reasoning_effort_str != 'none'
+
+            # LITELLM/ANTHROPIC QUIRK: Streaming with thinking + tools doesn't provide signatures
+            # Anthropic requires signatures on thinking blocks for tool calling continuation
+            # Fall back to non-streaming for Anthropic models with thinking + tools
+            needs_nonstreaming_for_thinking = (
+                self.model_family == 'anthropic' and
+                thinking_enabled and
                 request_tools and len(request_tools) > 0
             )
 
+            needs_nonstreaming_fallback = (
+                (self.model_family == 'meta' and request_tools and len(request_tools) > 0) or
+                needs_nonstreaming_for_thinking
+            )
+
             if needs_nonstreaming_fallback:
-                log.log_info(
-                    f"LiteLLM: Using non-streaming mode for Meta model '{self.model}' with tools "
-                    f"(streaming+tools not supported on Bedrock)"
-                )
-                # Call non-streaming API
-                non_streaming_response = await self.chat_completion(request)
+                if needs_nonstreaming_for_thinking:
+                    log.log_info(
+                        f"LiteLLM: Using non-streaming mode for Anthropic model '{self.model}' with thinking+tools "
+                        f"(streaming doesn't provide thinking block signatures required for tool continuation)"
+                    )
+                else:
+                    log.log_info(
+                        f"LiteLLM: Using non-streaming mode for Meta model '{self.model}' with tools "
+                        f"(streaming+tools not supported on Bedrock)"
+                    )
+                # Call non-streaming API with native_message_callback to capture thinking_blocks
+                non_streaming_response = await self.chat_completion(request, native_message_callback)
 
                 # Simulate streaming by yielding the response in chunks
                 # First yield content if present
@@ -467,7 +547,9 @@ class LiteLLMProvider(OpenAIProvider):
             stream = self._client.chat.completions.create(**completion_kwargs)
 
             accumulated_content = ""
+            accumulated_reasoning = ""  # Track reasoning content for thinking-enabled models
             building_tool_calls = {}  # tool_index -> partial tool data
+            thinking_blocks = []  # Store complete thinking blocks when received
 
             # Batching variables to reduce UI update frequency
             batch_content = ""
@@ -482,6 +564,10 @@ class LiteLLMProvider(OpenAIProvider):
 
                     choice = chunk.choices[0]
                     delta = choice.delta
+
+                    # Handle reasoning content delta (LiteLLM Anthropic thinking)
+                    if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                        accumulated_reasoning += delta.reasoning_content
 
                     # Handle content delta with batching
                     if delta.content is not None and delta.content:
@@ -556,6 +642,47 @@ class LiteLLMProvider(OpenAIProvider):
                                     arguments=arguments
                                 )
                                 final_tool_calls.append(tool_call)
+
+                        # Call native message callback with complete streaming response
+                        if native_message_callback:
+                            native_message = {
+                                "role": "assistant",
+                                "content": accumulated_content,
+                                "model": self.model,
+                                "finish_reason": choice.finish_reason,
+                                "streaming": True  # Mark as reconstructed from streaming
+                            }
+
+                            # Add tool calls if present
+                            if final_tool_calls:
+                                native_message["tool_calls"] = [
+                                    {
+                                        "id": tc.id,
+                                        "type": "function",
+                                        "function": {
+                                            "name": tc.name,
+                                            "arguments": json.dumps(tc.arguments) if isinstance(tc.arguments, dict) else tc.arguments
+                                        }
+                                    }
+                                    for tc in final_tool_calls
+                                ]
+
+                            # Add thinking/reasoning content if present (Anthropic models)
+                            if accumulated_reasoning:
+                                native_message["reasoning_content"] = accumulated_reasoning
+                                log.log_info(f"LiteLLM streaming: Captured reasoning_content ({len(accumulated_reasoning)} chars)")
+                                # Create thinking_blocks structure for Anthropic compatibility
+                                thinking_blocks.append({
+                                    "type": "thinking",
+                                    "thinking": accumulated_reasoning,
+                                    "signature": None  # Signature not available in streaming
+                                })
+
+                            if thinking_blocks:
+                                native_message["thinking_blocks"] = thinking_blocks
+                                log.log_info(f"LiteLLM streaming: Captured {len(thinking_blocks)} thinking_blocks")
+
+                            native_message_callback(native_message, self.get_provider_type())
 
                         # Emit final response with tool calls
                         final_response = ChatResponse(

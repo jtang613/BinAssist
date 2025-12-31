@@ -150,10 +150,12 @@ class OpenAIProvider(BaseLLMProvider):
                 
                 openai_msg["tool_calls"] = tool_calls_list
             
-            # Add tool call id if this is a tool response
+            # Add tool call id and name if this is a tool response
             if hasattr(msg, 'tool_call_id') and msg.tool_call_id:
                 openai_msg["tool_call_id"] = msg.tool_call_id
-            
+            if hasattr(msg, 'name') and msg.name:
+                openai_msg["name"] = msg.name
+
             openai_messages.append(openai_msg)
         
         return openai_messages

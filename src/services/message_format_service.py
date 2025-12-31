@@ -375,9 +375,12 @@ class MessageFormatService:
     
     def __init__(self):
         """Initialize message format service with provider adapters"""
+        openai_adapter = OpenAIMessageAdapter()
         self._adapters: Dict[ProviderType, MessageFormatAdapter] = {
             ProviderType.ANTHROPIC: AnthropicMessageAdapter(),
-            ProviderType.OPENAI: OpenAIMessageAdapter(),
+            ProviderType.OPENAI: openai_adapter,
+            ProviderType.OPENWEBUI: openai_adapter,
+            ProviderType.LMSTUDIO: openai_adapter,
             ProviderType.OLLAMA: OllamaMessageAdapter(),
             ProviderType.LITELLM: LiteLLMMessageAdapter()
         }
