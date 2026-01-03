@@ -55,7 +55,6 @@ class SemanticGraphController:
         self.view.reindex_requested.connect(self.handle_reindex)
         self.view.semantic_analysis_requested.connect(self.handle_semantic_analysis)
         self.view.security_analysis_requested.connect(self.handle_security_analysis)
-        self.view.community_detection_requested.connect(self.handle_community_detection)
         self.view.refresh_names_requested.connect(self.handle_refresh_names)
         self.view.navigate_requested.connect(self.handle_navigate)
 
@@ -221,17 +220,14 @@ class SemanticGraphController:
         self._security_worker.failed.connect(self._on_security_error)
         self._security_worker.start()
 
-    def handle_community_detection(self, force: bool = True):
-        """Handle community detection request."""
+    def _start_community_detection(self, force: bool = True):
+        """Start community detection as part of reindex workflow."""
         if not self.binary_view:
             return
         if self._community_worker and self._community_worker.isRunning():
-            self._community_worker.cancel()
-            self.view.status_label.setText("Status: Stopping community detection...")
-            return
+            return  # Already running
         binary_hash = self.analysis_db.get_binary_hash(self.binary_view)
         self.view.status_label.setText("Status: Detecting communities...")
-        self._set_community_button_running(True)
         self._community_worker = CommunityDetectionWorker(
             self.graph_store,
             binary_hash,
@@ -565,19 +561,16 @@ class SemanticGraphController:
 
     def _on_community_complete(self, count: int):
         self.view.status_label.setText(
-            f"Status: Community detection complete ({count} communities)"
+            f"Status: Reindex complete ({count} communities detected)"
         )
-        self._set_community_button_running(False)
         self.refresh_current_view()
 
     def _on_community_cancelled(self):
         self.view.status_label.setText("Status: Community detection stopped")
-        self._set_community_button_running(False)
 
     def _on_community_error(self, message: str):
         log.log_error(f"Community detection failed: {message}")
         self.view.status_label.setText("Status: Community detection failed")
-        self._set_community_button_running(False)
 
     def _on_reindex_progress(self, processed: int, total: int):
         self.view.status_label.setText(f"Status: Reindexing... {processed}/{total}")
@@ -587,7 +580,7 @@ class SemanticGraphController:
         self._set_reindex_button_running(False)
         self.refresh_current_view()
         # Auto-trigger community detection after reindex
-        self.handle_community_detection(force=True)
+        self._start_community_detection(force=True)
 
     def _on_reindex_cancelled(self, processed: int):
         self.view.status_label.setText(f"Status: Reindex stopped ({processed} functions)")
@@ -610,10 +603,6 @@ class SemanticGraphController:
     def _set_security_button_running(self, running: bool):
         if hasattr(self.view, "security_button"):
             self.view.security_button.setText("Stop" if running else "Security Analysis")
-
-    def _set_community_button_running(self, running: bool):
-        if hasattr(self.view, "community_button"):
-            self.view.community_button.setText("Stop" if running else "Detect Communities")
 
 
 class SemanticAnalysisWorker(QThread):
