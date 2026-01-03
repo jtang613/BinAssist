@@ -7,7 +7,7 @@ _A comprehensive LLM-powered Binary Ninja plugin for intelligent binary analysis
 
 BinAssist is an advanced LLM plugin designed to enhance binary analysis and reverse engineering workflows through intelligent automation. It leverages local and remote LLM capabilities to provide context-aware assistance throughout the binary analysis process. It supports fully agentic reverse engineering through its MCP client and MCP servers like [BinAssistMCP](https://github.com/jtang613/BinAssistMCP)
 
-The plugin supports any OpenAI v1-compatible or Anthropic API, making it compatible with popular LLM providers including Ollama, LM Studio, Open-WebUI, OpenAI, Anthropic, and others.
+The plugin supports any OpenAI v1-compatible or Anthropic API, making it compatible with popular LLM providers including Ollama, LM Studio, Open-WebUI, OpenAI, Anthropic, AWS Bedrock (via LiteLLM), and others.
 
 **Recommended models:**
 - **With Reasoning Support**: Claude Sonnet 4+, OpenAI o1/o3/gpt-5, GPT-OSS (supports extended thinking for complex analysis)
@@ -48,6 +48,25 @@ The plugin supports any OpenAI v1-compatible or Anthropic API, making it compati
 - **Status Tracking**: Real-time feedback on action application success/failure
 - **Tool-Based Architecture**: Uses native LLM tool calling for precise suggestions
 
+### Semantic Graph Tab
+- **GraphRAG Architecture**: Graph-based Retrieval-Augmented Generation for binary analysis
+- **ReIndex Binary**: Build a semantic graph of all functions with call relationships
+- **Semantic Analysis**: LLM-powered function summarization and categorization
+  - Automatic purpose inference from function names and behavior
+  - Security flag detection (network, file I/O, crypto, etc.)
+  - Activity profiling and risk assessment
+- **Security Analysis**: Taint analysis for vulnerability detection
+  - Source-to-sink path finding (e.g., `recv` → `strcpy`)
+  - Automatic detection of dangerous API usage patterns
+  - TAINT_FLOWS_TO and VULNERABLE_VIA edge creation
+- **Community Detection**: Function clustering using Label Propagation algorithm
+  - Groups related functions based on call relationships
+  - Automatic module/purpose inference (Network I/O, Crypto, File Operations, etc.)
+  - Runs automatically after ReIndex completes
+- **Visual Graph View**: Interactive visualization of function relationships
+- **Full-Text Search**: FTS5-powered search across function names and summaries
+- **Query Tools**: MCP-exposed tools for LLM to query the semantic graph
+
 ### Advanced Capabilities
 - **ReAct Autonomous Agent**: Full implementation of the ReAct framework for multi-step analysis
 - **Extended Thinking/Reasoning Effort**: Provider-agnostic reasoning control for deeper analysis
@@ -76,13 +95,13 @@ The plugin supports any OpenAI v1-compatible or Anthropic API, making it compati
 
 ### Planned Features
 - **Model Fine-tuning**: Leverage collected RLHF data for specialized model training
-- **Advanced RAG**: Enhanced document retrieval and code understanding with Graph-RAG
 - **Collaborative Features**: Share analysis insights and suggestions across teams
+- **Hierarchical Communities**: Multi-level community detection for large binaries
 
 ### Research Areas
 - **Domain-Specific Models**: Fine-tuned models for specific binary types
 - **Code Generation**: Automated exploit development and patching suggestions
-- **Vulnerability Detection**: AI-powered security analysis and reporting
+- **Enhanced Vulnerability Detection**: Expanded taint analysis with data flow tracking
 - **Performance Optimization**: Enhanced suggestion accuracy and speed
 
 ## Quick Start Guide
@@ -108,8 +127,10 @@ pip install -r requirements.txt
 2. Click the **🤖 robot icon** in the sidebar to open BinAssist
 3. Navigate between tabs based on your analysis needs:
    - **Explain**: Analyze functions and instructions
-   - **Query**: Interactive chat with the LLM  
+   - **Query**: Interactive chat with the LLM
    - **Actions**: Get intelligent improvement suggestions
+   - **Semantic Graph**: Build and explore the binary's semantic graph
+   - **RAG**: Manage external documentation for context
 
 ### 4. Workflow Examples
 
@@ -139,6 +160,15 @@ pip install -r requirements.txt
    - Builds understanding through iterative reasoning
    - Provides comprehensive analysis with step-by-step traces
 
+**Semantic Graph Analysis:**
+1. Go to the **Semantic Graph** tab
+2. Click **"ReIndex Binary"** to build the function graph
+   - Community detection runs automatically after indexing
+3. Use **"Semantic Analysis"** for LLM-powered function summaries
+4. Run **"Security Analysis"** to find vulnerable source→sink paths
+5. Explore the **Visual Graph** to see function relationships
+6. Use **Search** to find functions by name or summary content
+
 ## Screenshot
 ![Screenshot](https://raw.githubusercontent.com/jtang613/BinAssist/refs/heads/master/res/screenshot1.png)
 ![Screenshots](/res/screenshots.gif)
@@ -161,12 +191,17 @@ https://github.com/jtang613/BinAssist
 - `ExplainController`: Manages function and instruction analysis
 - `QueryController`: Handles interactive LLM conversations
 - `ActionsController`: Coordinates intelligent suggestion generation
+- `SemanticGraphController`: Orchestrates GraphRAG indexing and analysis
 
 **Services:**
 - `BinaryContextService`: Extracts and formats binary information
 - `ActionsService`: Validates and applies code improvements
 - `RLHFService`: Manages training data collection
 - `RAGService`: Handles document retrieval and context enhancement
+- `GraphRAGService`: Manages semantic graph indexing and queries
+- `GraphStore`: SQLite-backed graph node and edge storage
+- `CommunityDetector`: Label Propagation algorithm for function clustering
+- `TaintAnalyzer`: Source-to-sink vulnerability path detection
 
 **Threading:**
 - `ExplainLLMThread`: Background processing for explanations
@@ -223,6 +258,7 @@ ollama serve  # Runs on http://localhost:11434
 - **Open-WebUI**: Advanced local LLM interface GUI
 - **OpenAI API**: Cloud-based (requires API key)
 - **Anthropic API**: Cloud-based (requires API key)
+- **LiteLLM Proxy**: Access AWS Bedrock, Azure, and 100+ providers
 - **OpenRouter**: Access to multiple models via API
 
 ### Installation Steps
@@ -245,11 +281,14 @@ ollama serve  # Runs on http://localhost:11434
 
 **Required Python Packages:**
 ```
-anthropic              # LLM API communication
-openai                 # LLM API communication
+openai                 # OpenAI and LiteLLM provider API
+anthropic              # Anthropic Claude API
 pysqlite3              # Database operations
-markdown               # Documentation formatting  
-mcp                    # MCP client
+markdown               # Documentation formatting
+httpx                  # HTTP client for API calls
+anyio>=4.6             # Async I/O support
+mcp                    # Model Context Protocol client
+whoosh                 # Full-text search for RAG documents
 ```
 
 ## Contributing
