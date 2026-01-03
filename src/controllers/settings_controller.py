@@ -589,9 +589,13 @@ class SettingsController(QObject):
         self.view.mcp_provider_delete_requested.connect(self.delete_mcp_provider)
         self.view.mcp_provider_test_requested.connect(self.test_mcp_provider)
         
-        # Settings signals  
+        # Settings signals
         self.view.system_prompt_changed.connect(self.update_system_prompt)
         self.view.database_path_changed.connect(self.update_database_path)
+
+        # SymGraph.ai signals
+        self.view.symgraph_api_url_changed.connect(self.update_symgraph_api_url)
+        self.view.symgraph_api_key_changed.connect(self.update_symgraph_api_key)
     
     def load_initial_data(self):
         """Load initial data from service into view"""
@@ -658,7 +662,11 @@ class SettingsController(QObject):
             self.view.analysis_db_path.setText(self.service.get_setting('analysis_db_path', ''))
             self.view.rlhf_db_path.setText(self.service.get_setting('rlhf_db_path', ''))
             self.view.rag_index_path.setText(self.service.get_setting('rag_index_path', ''))
-            
+
+            # Load SymGraph.ai settings
+            self.view.set_symgraph_api_url(self.service.get_symgraph_api_url())
+            self.view.set_symgraph_api_key(self.service.get_symgraph_api_key())
+
         except Exception as e:
             self.show_error("Failed to load settings", str(e))
         finally:
@@ -1017,7 +1025,25 @@ class SettingsController(QObject):
             self.service.set_setting(setting_key, path_value, 'database')
         except Exception as e:
             self.show_error("Failed to Update Database Path", str(e))
-    
+
+    # SymGraph.ai methods
+
+    def update_symgraph_api_url(self, url):
+        """Handle SymGraph.ai API URL updates"""
+        try:
+            self.service.set_symgraph_api_url(url)
+            log.log_debug(f"Updated SymGraph.ai API URL: {url}")
+        except Exception as e:
+            self.show_error("Failed to Update SymGraph.ai API URL", str(e))
+
+    def update_symgraph_api_key(self, key):
+        """Handle SymGraph.ai API key updates"""
+        try:
+            self.service.set_symgraph_api_key(key)
+            log.log_debug("Updated SymGraph.ai API key")
+        except Exception as e:
+            self.show_error("Failed to Update SymGraph.ai API Key", str(e))
+
     # Utility methods
     
     def show_error(self, title, message):

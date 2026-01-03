@@ -23,6 +23,10 @@ class SettingsTabView(QWidget):
     
     system_prompt_changed = Signal(str)
     database_path_changed = Signal(str, str)  # path_type, path_value
+
+    # SymGraph.ai signals
+    symgraph_api_url_changed = Signal(str)
+    symgraph_api_key_changed = Signal(str)
     
     def __init__(self):
         super().__init__()
@@ -39,6 +43,7 @@ class SettingsTabView(QWidget):
         # Create all sections
         self.create_llm_provider_section(scroll_layout)
         self.create_mcp_provider_section(scroll_layout)
+        self.create_symgraph_section(scroll_layout)
         self.create_system_prompt_section(scroll_layout)
         self.create_database_paths_section(scroll_layout)
         
@@ -182,7 +187,73 @@ class SettingsTabView(QWidget):
         
         group_box.setLayout(layout)
         parent_layout.addWidget(group_box)
-    
+
+    def create_symgraph_section(self, parent_layout):
+        """Create the SymGraph.ai settings section"""
+        group_box = QGroupBox("SymGraph.ai")
+        layout = QVBoxLayout()
+
+        # API URL
+        url_layout = QHBoxLayout()
+        url_layout.addWidget(QLabel("API URL:"))
+        self.symgraph_url_field = QLineEdit()
+        self.symgraph_url_field.setPlaceholderText("https://api.symgraph.ai")
+        self.symgraph_url_field.setToolTip("SymGraph.ai API URL (for self-hosted instances)")
+        self.symgraph_url_field.editingFinished.connect(
+            lambda: self.symgraph_api_url_changed.emit(self.symgraph_url_field.text())
+        )
+        url_layout.addWidget(self.symgraph_url_field, 1)
+        layout.addLayout(url_layout)
+
+        # API Key
+        key_layout = QHBoxLayout()
+        key_layout.addWidget(QLabel("API Key:"))
+        self.symgraph_key_field = QLineEdit()
+        self.symgraph_key_field.setPlaceholderText("sg_xxxxx")
+        self.symgraph_key_field.setEchoMode(QLineEdit.Password)
+        self.symgraph_key_field.setToolTip("Your SymGraph.ai API key (required for push/pull operations)")
+        self.symgraph_key_field.editingFinished.connect(
+            lambda: self.symgraph_api_key_changed.emit(self.symgraph_key_field.text())
+        )
+        key_layout.addWidget(self.symgraph_key_field, 1)
+
+        # Show/hide key button
+        self.symgraph_key_toggle = QPushButton("Show")
+        self.symgraph_key_toggle.setMaximumWidth(60)
+        self.symgraph_key_toggle.clicked.connect(self._toggle_symgraph_key_visibility)
+        key_layout.addWidget(self.symgraph_key_toggle)
+
+        layout.addLayout(key_layout)
+
+        # Info label
+        info_label = QLabel(
+            "SymGraph.ai provides cloud-based symbol and graph data sharing. "
+            "Query operations are free; push/pull require an API key."
+        )
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addWidget(info_label)
+
+        group_box.setLayout(layout)
+        parent_layout.addWidget(group_box)
+
+    def _toggle_symgraph_key_visibility(self):
+        """Toggle visibility of the SymGraph API key field"""
+        if self.symgraph_key_field.echoMode() == QLineEdit.Password:
+            self.symgraph_key_field.setEchoMode(QLineEdit.Normal)
+            self.symgraph_key_toggle.setText("Hide")
+        else:
+            self.symgraph_key_field.setEchoMode(QLineEdit.Password)
+            self.symgraph_key_toggle.setText("Show")
+
+    def set_symgraph_api_url(self, url: str):
+        """Set the SymGraph.ai API URL field"""
+        self.symgraph_url_field.setText(url)
+
+    def set_symgraph_api_key(self, key: str):
+        """Set the SymGraph.ai API key field"""
+        self.symgraph_key_field.setText(key)
+
     def create_system_prompt_section(self, parent_layout):
         group_box = QGroupBox("System Prompt")
         layout = QVBoxLayout()
