@@ -14,6 +14,7 @@ from ..services.graphrag.graphrag_service import GraphRAGService
 from ..services.graphrag.graph_store import GraphStore
 from ..services.graphrag.taint_analyzer import TaintAnalyzer
 from ..services.graphrag.query_engine import GraphRAGQueryEngine
+from ..services.graphrag.community_detector import CommunityDetector
 from ..services.llm_providers.provider_factory import LLMProviderFactory
 
 try:
@@ -44,6 +45,7 @@ class SemanticGraphController:
         self._semantic_worker = None
         self._security_worker = None
         self._reindex_worker = None
+        self._community_worker = None
 
         self._connect_signals()
 
@@ -53,6 +55,7 @@ class SemanticGraphController:
         self.view.reindex_requested.connect(self.handle_reindex)
         self.view.semantic_analysis_requested.connect(self.handle_semantic_analysis)
         self.view.security_analysis_requested.connect(self.handle_security_analysis)
+        self.view.community_detection_requested.connect(self.handle_community_detection)
         self.view.refresh_names_requested.connect(self.handle_refresh_names)
         self.view.navigate_requested.connect(self.handle_navigate)
 
@@ -217,6 +220,29 @@ class SemanticGraphController:
         self._security_worker.cancelled.connect(self._on_security_cancelled)
         self._security_worker.failed.connect(self._on_security_error)
         self._security_worker.start()
+
+    def handle_community_detection(self, force: bool = True):
+        """Handle community detection request."""
+        if not self.binary_view:
+            return
+        if self._community_worker and self._community_worker.isRunning():
+            self._community_worker.cancel()
+            self.view.status_label.setText("Status: Stopping community detection...")
+            return
+        binary_hash = self.analysis_db.get_binary_hash(self.binary_view)
+        self.view.status_label.setText("Status: Detecting communities...")
+        self._set_community_button_running(True)
+        self._community_worker = CommunityDetectionWorker(
+            self.graph_store,
+            binary_hash,
+            min_size=2,
+            force=force,
+        )
+        self._community_worker.progress.connect(self._on_community_progress)
+        self._community_worker.completed.connect(self._on_community_complete)
+        self._community_worker.cancelled.connect(self._on_community_cancelled)
+        self._community_worker.failed.connect(self._on_community_error)
+        self._community_worker.start()
 
     def handle_refresh_names(self):
         if not self.binary_view:
@@ -532,13 +558,36 @@ class SemanticGraphController:
         self.view.status_label.setText("Status: Security analysis failed")
         self._set_security_button_running(False)
 
+    def _on_community_progress(self, iteration: int, max_iterations: int):
+        self.view.status_label.setText(
+            f"Status: Detecting communities... iteration {iteration}/{max_iterations}"
+        )
+
+    def _on_community_complete(self, count: int):
+        self.view.status_label.setText(
+            f"Status: Community detection complete ({count} communities)"
+        )
+        self._set_community_button_running(False)
+        self.refresh_current_view()
+
+    def _on_community_cancelled(self):
+        self.view.status_label.setText("Status: Community detection stopped")
+        self._set_community_button_running(False)
+
+    def _on_community_error(self, message: str):
+        log.log_error(f"Community detection failed: {message}")
+        self.view.status_label.setText("Status: Community detection failed")
+        self._set_community_button_running(False)
+
     def _on_reindex_progress(self, processed: int, total: int):
         self.view.status_label.setText(f"Status: Reindexing... {processed}/{total}")
 
     def _on_reindex_complete(self, processed: int):
-        self.view.status_label.setText(f"Status: Reindex complete ({processed} functions)")
+        self.view.status_label.setText(f"Status: Reindex complete ({processed} functions), detecting communities...")
         self._set_reindex_button_running(False)
         self.refresh_current_view()
+        # Auto-trigger community detection after reindex
+        self.handle_community_detection(force=True)
 
     def _on_reindex_cancelled(self, processed: int):
         self.view.status_label.setText(f"Status: Reindex stopped ({processed} functions)")
@@ -561,6 +610,10 @@ class SemanticGraphController:
     def _set_security_button_running(self, running: bool):
         if hasattr(self.view, "security_button"):
             self.view.security_button.setText("Stop" if running else "Security Analysis")
+
+    def _set_community_button_running(self, running: bool):
+        if hasattr(self.view, "community_button"):
+            self.view.community_button.setText("Stop" if running else "Detect Communities")
 
 
 class SemanticAnalysisWorker(QThread):
@@ -679,3 +732,44 @@ class ReindexWorker(QThread):
             self.completed.emit(processed)
         except Exception as exc:
             self.failed.emit(str(exc))
+
+
+class CommunityDetectionWorker(QThread):
+    """Worker thread for community detection using Label Propagation."""
+    progress = Signal(int, int)  # iteration, max_iterations
+    completed = Signal(int)       # communities_detected
+    cancelled = Signal()
+    failed = Signal(str)
+
+    def __init__(self, graph_store: GraphStore, binary_hash: str,
+                 min_size: int = 2, force: bool = False):
+        super().__init__()
+        self.graph_store = graph_store
+        self.binary_hash = binary_hash
+        self.min_size = min_size
+        self.force = force
+        self._cancelled = False
+        self._detector = None
+
+    def cancel(self):
+        self._cancelled = True
+        if self._detector:
+            self._detector.cancel()
+
+    def run(self):
+        try:
+            self._detector = CommunityDetector(self.graph_store, self.binary_hash)
+            count = self._detector.detect_communities(
+                min_size=self.min_size,
+                force=self.force,
+                progress_callback=self._progress_callback,
+            )
+            if self._cancelled or (self._detector and self._detector._cancelled):
+                self.cancelled.emit()
+                return
+            self.completed.emit(count)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+    def _progress_callback(self, iteration: int, max_iterations: int):
+        self.progress.emit(iteration, max_iterations)

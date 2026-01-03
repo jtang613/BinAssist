@@ -226,10 +226,52 @@ class GraphRAGQueryEngine:
         return result
 
     def get_module_summary(self, address: int) -> Dict[str, object]:
+        """Get the module/community summary for the function at the given address."""
+        node = self.graph_store.get_node_by_address(self.binary_hash, "FUNCTION", address)
+        if not node:
+            return {
+                "error": "Function not found in graph",
+                "address": f"0x{address:x}",
+            }
+
+        community = self.graph_store.get_community_for_node(node.id)
+        if not community:
+            return {
+                "message": "No community detected for this function. Run community detection first.",
+                "function_name": self._node_name(node),
+                "function_address": f"0x{address:x}",
+            }
+
+        members = self.graph_store.get_community_members(community["id"])
+        member_list = []
+        for member in members[:20]:
+            member_list.append({
+                "name": self._node_name(member),
+                "address": f"0x{member.address:x}" if member.address else "unknown",
+            })
+
         return {
-            "module_summary": "Community detection is not yet available in BinAssist.",
-            "address": f"0x{address:x}",
+            "community_id": community["id"],
+            "community_name": community["name"],
+            "inferred_purpose": community["summary"],
+            "member_count": community["member_count"],
+            "members": member_list,
+            "function_name": self._node_name(node),
+            "function_address": f"0x{address:x}",
         }
+
+    def get_all_communities(self) -> List[Dict[str, object]]:
+        """Get all communities for the binary."""
+        communities = self.graph_store.get_communities(self.binary_hash)
+        result = []
+        for community in communities:
+            result.append({
+                "community_id": community["id"],
+                "community_name": community["name"],
+                "inferred_purpose": community["summary"],
+                "member_count": community["member_count"],
+            })
+        return result
 
     def _collect_context(self, node_id: int, depth: int, callers: bool) -> List[Dict[str, object]]:
         results = []

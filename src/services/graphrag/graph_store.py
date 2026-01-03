@@ -560,3 +560,258 @@ class GraphStore:
                 return results
             finally:
                 conn.close()
+
+    # ==================== Community Detection Methods ====================
+
+    def get_edges_by_types(self, binary_hash: str, edge_types: List[str]) -> List[GraphEdge]:
+        """Get all edges of specified types for a binary (for community detection)."""
+        if not binary_hash or not edge_types:
+            return []
+        with self._db_lock:
+            conn = self.analysis_db.get_connection()
+            try:
+                cursor = conn.cursor()
+                placeholders = ','.join('?' * len(edge_types))
+                cursor.execute(f'''
+                    SELECT e.id, e.source_id, e.target_id, e.type, e.weight, e.metadata, e.created_at
+                    FROM graph_edges e
+                    JOIN graph_nodes s ON s.id = e.source_id
+                    JOIN graph_nodes t ON t.id = e.target_id
+                    WHERE s.binary_id = ? AND t.binary_id = ? AND e.type IN ({placeholders})
+                ''', (binary_hash, binary_hash, *edge_types))
+                rows = cursor.fetchall()
+                edges = []
+                for row in rows:
+                    edges.append(GraphEdge(
+                        id=row[0],
+                        binary_hash=binary_hash,
+                        source_id=row[1],
+                        target_id=row[2],
+                        edge_type=row[3],
+                        weight=row[4] if row[4] is not None else 1.0,
+                        metadata=row[5],
+                        created_at=row[6],
+                    ))
+                return edges
+            finally:
+                conn.close()
+
+    def communities_exist(self, binary_hash: str) -> bool:
+        """Check if communities have been detected for a binary."""
+        if not binary_hash:
+            return False
+        with self._db_lock:
+            conn = self.analysis_db.get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    'SELECT COUNT(*) FROM graph_communities WHERE binary_id = ?',
+                    (binary_hash,)
+                )
+                count = cursor.fetchone()[0]
+                return count > 0
+            finally:
+                conn.close()
+
+    def delete_communities(self, binary_hash: str) -> int:
+        """Delete all communities for a binary (for re-detection). Returns count deleted."""
+        if not binary_hash:
+            return 0
+        with self._db_lock:
+            conn = self.analysis_db.get_connection()
+            try:
+                cursor = conn.cursor()
+                # Get count before delete
+                cursor.execute(
+                    'SELECT COUNT(*) FROM graph_communities WHERE binary_id = ?',
+                    (binary_hash,)
+                )
+                count = cursor.fetchone()[0]
+                # Delete communities (CASCADE will delete community_members)
+                cursor.execute(
+                    'DELETE FROM graph_communities WHERE binary_id = ?',
+                    (binary_hash,)
+                )
+                conn.commit()
+                return count
+            finally:
+                conn.close()
+
+    def save_community(self, binary_hash: str, community: Dict[str, Any]) -> str:
+        """Save a community to the database. Returns community_id."""
+        if not binary_hash:
+            raise ValueError("binary_hash is required for community save")
+
+        community_id = community.get('id') or str(uuid.uuid4())
+        now_ms = self._now_ms()
+
+        with self._db_lock:
+            conn = self.analysis_db.get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO graph_communities (
+                        id, level, binary_id, parent_community_id, name, summary,
+                        member_count, is_stale, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        name = excluded.name,
+                        summary = excluded.summary,
+                        member_count = excluded.member_count,
+                        is_stale = excluded.is_stale,
+                        updated_at = excluded.updated_at
+                ''', (
+                    community_id,
+                    community.get('level', 0),
+                    binary_hash,
+                    community.get('parent_community_id'),
+                    community.get('name', 'Unknown Module'),
+                    community.get('summary', ''),
+                    community.get('member_count', 0),
+                    1 if community.get('is_stale', False) else 0,
+                    now_ms,
+                    now_ms,
+                ))
+                conn.commit()
+                return community_id
+            finally:
+                conn.close()
+
+    def add_community_member(self, community_id: str, node_id: str, score: float = 1.0) -> None:
+        """Add a node as a member of a community."""
+        if not community_id or not node_id:
+            return
+        with self._db_lock:
+            conn = self.analysis_db.get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO community_members (community_id, node_id, membership_score)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(community_id, node_id) DO UPDATE SET
+                        membership_score = excluded.membership_score
+                ''', (community_id, node_id, score))
+                conn.commit()
+            finally:
+                conn.close()
+
+    def get_communities(self, binary_hash: str) -> List[Dict[str, Any]]:
+        """Get all communities for a binary."""
+        if not binary_hash:
+            return []
+        with self._db_lock:
+            conn = self.analysis_db.get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT id, level, binary_id, parent_community_id, name, summary,
+                           member_count, is_stale, created_at, updated_at
+                    FROM graph_communities
+                    WHERE binary_id = ?
+                    ORDER BY member_count DESC
+                ''', (binary_hash,))
+                rows = cursor.fetchall()
+                communities = []
+                for row in rows:
+                    communities.append({
+                        'id': row[0],
+                        'level': row[1],
+                        'binary_id': row[2],
+                        'parent_community_id': row[3],
+                        'name': row[4],
+                        'summary': row[5],
+                        'member_count': row[6],
+                        'is_stale': bool(row[7]),
+                        'created_at': row[8],
+                        'updated_at': row[9],
+                    })
+                return communities
+            finally:
+                conn.close()
+
+    def get_community_members(self, community_id: str) -> List[GraphNode]:
+        """Get all member nodes of a community."""
+        if not community_id:
+            return []
+        with self._db_lock:
+            conn = self.analysis_db.get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT n.id, n.binary_id, n.type, n.address, n.name, n.raw_content,
+                           n.llm_summary, n.confidence, n.embedding, n.security_flags,
+                           n.network_apis, n.file_io_apis, n.ip_addresses, n.urls,
+                           n.file_paths, n.domains, n.registry_keys, n.risk_level,
+                           n.activity_profile, n.analysis_depth, n.created_at, n.updated_at,
+                           n.is_stale, n.user_edited
+                    FROM community_members cm
+                    JOIN graph_nodes n ON n.id = cm.node_id
+                    WHERE cm.community_id = ?
+                    ORDER BY n.name
+                ''', (community_id,))
+                rows = cursor.fetchall()
+                members = []
+                for row in rows:
+                    members.append(GraphNode(
+                        id=row[0],
+                        binary_hash=row[1],
+                        node_type=row[2],
+                        address=row[3],
+                        name=row[4],
+                        raw_code=row[5],
+                        llm_summary=row[6],
+                        confidence=row[7] if row[7] is not None else 0.0,
+                        embedding=row[8],
+                        security_flags=self._deserialize_list(row[9]),
+                        network_apis=self._deserialize_list(row[10]),
+                        file_io_apis=self._deserialize_list(row[11]),
+                        ip_addresses=self._deserialize_list(row[12]),
+                        urls=self._deserialize_list(row[13]),
+                        file_paths=self._deserialize_list(row[14]),
+                        domains=self._deserialize_list(row[15]),
+                        registry_keys=self._deserialize_list(row[16]),
+                        risk_level=row[17],
+                        activity_profile=row[18],
+                        analysis_depth=row[19] if row[19] is not None else 0,
+                        created_at=row[20],
+                        updated_at=row[21],
+                        is_stale=bool(row[22]),
+                        user_edited=bool(row[23]),
+                    ))
+                return members
+            finally:
+                conn.close()
+
+    def get_community_for_node(self, node_id: str) -> Optional[Dict[str, Any]]:
+        """Get the community that contains a specific node."""
+        if not node_id:
+            return None
+        with self._db_lock:
+            conn = self.analysis_db.get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT c.id, c.level, c.binary_id, c.parent_community_id, c.name,
+                           c.summary, c.member_count, c.is_stale, c.created_at, c.updated_at
+                    FROM community_members cm
+                    JOIN graph_communities c ON c.id = cm.community_id
+                    WHERE cm.node_id = ?
+                    LIMIT 1
+                ''', (node_id,))
+                row = cursor.fetchone()
+                if not row:
+                    return None
+                return {
+                    'id': row[0],
+                    'level': row[1],
+                    'binary_id': row[2],
+                    'parent_community_id': row[3],
+                    'name': row[4],
+                    'summary': row[5],
+                    'member_count': row[6],
+                    'is_stale': bool(row[7]),
+                    'created_at': row[8],
+                    'updated_at': row[9],
+                }
+            finally:
+                conn.close()
