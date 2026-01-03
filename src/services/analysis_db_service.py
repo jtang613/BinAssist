@@ -435,9 +435,9 @@ class AnalysisDBService:
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_chat_metadata_lookup ON BNChatMetadata(binary_hash, chat_id)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_system_prompt_active ON SystemPrompts(is_active)')
 
-                # GraphRAG tables (nodes, edges, communities, and optional FTS)
-                self._ensure_graphrag_schema(cursor)
-                
+                # Note: GraphRAG tables (nodes, edges, communities, FTS) are now created
+                # by database migrations in db_migrations.py (migrations 004-006)
+
                 conn.commit()
                 log.log_info("AnalysisDB schema created successfully")
                 

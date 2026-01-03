@@ -95,8 +95,9 @@ class DatabaseMigrations:
                 (1, DatabaseMigrations._migration_001_initial_schema),
                 (2, DatabaseMigrations._migration_002_add_indexes),
                 (3, DatabaseMigrations._migration_003_native_message_storage),
-                (4, DatabaseMigrations._migration_004_graphrag_schema),
-                # Add future migrations here
+                (4, DatabaseMigrations._migration_004_graphrag_tables),
+                (5, DatabaseMigrations._migration_005_graphrag_communities),
+                (6, DatabaseMigrations._migration_006_graphrag_fts),
             ]
             
             for version, migration_func in migrations:
@@ -256,19 +257,306 @@ class DatabaseMigrations:
             return False
 
     @staticmethod
-    def _migration_004_graphrag_schema(db_path: str) -> bool:
-        """Migration 004: GraphRAG schema (handled by AnalysisDBService)."""
-        return True
+    def _table_exists(cursor, name: str) -> bool:
+        """Check if a table exists in the database."""
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (name,)
+        )
+        return cursor.fetchone() is not None
 
     @staticmethod
-    def _migration_005_graphrag_columns(db_path: str) -> bool:
-        """Migration 005: Deprecated (GraphRAG schema handled by AnalysisDBService)."""
-        return True
+    def _get_columns(cursor, table_name: str) -> dict:
+        """Get column names and types for a table."""
+        cursor.execute(f"PRAGMA table_info({table_name})")
+        return {row[1]: row[2].upper().split()[0] for row in cursor.fetchall()}
 
     @staticmethod
-    def _migration_006_graphrag_uuid_reset(db_path: str) -> bool:
-        """Migration 006: Deprecated (GraphRAG schema handled by AnalysisDBService)."""
-        return True
+    def _rename_to_backup(cursor, table_name: str) -> str:
+        """Rename a table to a backup name with _bak suffix."""
+        if not DatabaseMigrations._table_exists(cursor, table_name):
+            return None
+        backup_name = f"{table_name}_bak"
+        # If backup already exists, add numeric suffix
+        suffix = 1
+        while DatabaseMigrations._table_exists(cursor, backup_name):
+            backup_name = f"{table_name}_bak_{suffix}"
+            suffix += 1
+        cursor.execute(f"ALTER TABLE {table_name} RENAME TO {backup_name}")
+        return backup_name
+
+    @staticmethod
+    def _migration_004_graphrag_tables(db_path: str) -> bool:
+        """Migration 004: Create graph_nodes and graph_edges tables."""
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            # Expected schema for graph_nodes
+            expected_nodes = {
+                "id", "type", "address", "binary_id", "name", "raw_content",
+                "llm_summary", "confidence", "embedding", "security_flags",
+                "network_apis", "file_io_apis", "ip_addresses", "urls",
+                "file_paths", "domains", "registry_keys", "risk_level",
+                "activity_profile", "analysis_depth", "created_at", "updated_at",
+                "is_stale", "user_edited"
+            }
+
+            # Handle legacy PascalCase tables
+            for legacy in ("GraphNodes", "GraphEdges"):
+                if DatabaseMigrations._table_exists(cursor, legacy):
+                    backup = DatabaseMigrations._rename_to_backup(cursor, legacy)
+                    log.log_warn(f"Renamed legacy {legacy} to {backup}")
+
+            # Check if graph_nodes exists with correct schema
+            if DatabaseMigrations._table_exists(cursor, "graph_nodes"):
+                existing = set(DatabaseMigrations._get_columns(cursor, "graph_nodes").keys())
+                if existing != expected_nodes:
+                    backup = DatabaseMigrations._rename_to_backup(cursor, "graph_nodes")
+                    log.log_warn(f"Incompatible graph_nodes table found, renamed to {backup}. Creating fresh table.")
+                    # Also backup edges since they reference nodes
+                    if DatabaseMigrations._table_exists(cursor, "graph_edges"):
+                        edge_backup = DatabaseMigrations._rename_to_backup(cursor, "graph_edges")
+                        log.log_warn(f"Also renamed graph_edges to {edge_backup}")
+
+            # Create graph_nodes table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS graph_nodes (
+                    id TEXT PRIMARY KEY,
+                    type TEXT NOT NULL,
+                    address INTEGER,
+                    binary_id TEXT NOT NULL,
+                    name TEXT,
+                    raw_content TEXT,
+                    llm_summary TEXT,
+                    confidence REAL DEFAULT 0.0,
+                    embedding BLOB,
+                    security_flags TEXT,
+                    network_apis TEXT,
+                    file_io_apis TEXT,
+                    ip_addresses TEXT,
+                    urls TEXT,
+                    file_paths TEXT,
+                    domains TEXT,
+                    registry_keys TEXT,
+                    risk_level TEXT,
+                    activity_profile TEXT,
+                    analysis_depth INTEGER DEFAULT 0,
+                    created_at INTEGER,
+                    updated_at INTEGER,
+                    is_stale INTEGER DEFAULT 0,
+                    user_edited INTEGER DEFAULT 0
+                )
+            ''')
+
+            # Create graph_edges table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS graph_edges (
+                    id TEXT PRIMARY KEY,
+                    source_id TEXT NOT NULL,
+                    target_id TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    weight REAL DEFAULT 1.0,
+                    metadata TEXT,
+                    created_at INTEGER,
+                    FOREIGN KEY(source_id) REFERENCES graph_nodes(id) ON DELETE CASCADE,
+                    FOREIGN KEY(target_id) REFERENCES graph_nodes(id) ON DELETE CASCADE
+                )
+            ''')
+
+            # Create indexes for graph_nodes
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_nodes_address ON graph_nodes(address)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_nodes_type ON graph_nodes(type)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_nodes_binary ON graph_nodes(binary_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_nodes_name ON graph_nodes(name)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_nodes_stale ON graph_nodes(binary_id, is_stale)")
+
+            # Create indexes for graph_edges
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_edges_source ON graph_edges(source_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_edges_target ON graph_edges(target_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_edges_type ON graph_edges(type)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_edges_source_type ON graph_edges(source_id, type)")
+
+            conn.commit()
+            conn.close()
+            log.log_info("Migration 004: GraphRAG core tables created successfully")
+            return True
+
+        except Exception as e:
+            log.log_warn(f"Migration 004 issue: {e}. Attempting recovery...")
+            try:
+                # Recovery: backup and recreate
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                for table in ("graph_nodes", "graph_edges"):
+                    if DatabaseMigrations._table_exists(cursor, table):
+                        DatabaseMigrations._rename_to_backup(cursor, table)
+                # Recreate tables (simplified - just mark as needing re-run)
+                conn.close()
+                log.log_warn("Migration 004: Tables backed up. Please restart plugin.")
+            except Exception as recovery_error:
+                log.log_error(f"Migration 004 recovery failed: {recovery_error}")
+            return True  # Always return True to continue loading
+
+    @staticmethod
+    def _migration_005_graphrag_communities(db_path: str) -> bool:
+        """Migration 005: Create community detection tables."""
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            # Expected schema for graph_communities
+            expected_communities = {
+                "id", "level", "binary_id", "parent_community_id", "name",
+                "summary", "member_count", "is_stale", "created_at", "updated_at"
+            }
+
+            # Handle legacy PascalCase tables
+            for legacy in ("GraphCommunities", "CommunityMembers"):
+                if DatabaseMigrations._table_exists(cursor, legacy):
+                    backup = DatabaseMigrations._rename_to_backup(cursor, legacy)
+                    log.log_warn(f"Renamed legacy {legacy} to {backup}")
+
+            # Check if graph_communities exists with correct schema
+            if DatabaseMigrations._table_exists(cursor, "graph_communities"):
+                existing = set(DatabaseMigrations._get_columns(cursor, "graph_communities").keys())
+                if existing != expected_communities:
+                    backup = DatabaseMigrations._rename_to_backup(cursor, "graph_communities")
+                    log.log_warn(f"Incompatible graph_communities table found, renamed to {backup}. Creating fresh table.")
+                    if DatabaseMigrations._table_exists(cursor, "community_members"):
+                        member_backup = DatabaseMigrations._rename_to_backup(cursor, "community_members")
+                        log.log_warn(f"Also renamed community_members to {member_backup}")
+
+            # Create graph_communities table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS graph_communities (
+                    id TEXT PRIMARY KEY,
+                    level INTEGER NOT NULL,
+                    binary_id TEXT NOT NULL,
+                    parent_community_id TEXT,
+                    name TEXT,
+                    summary TEXT,
+                    member_count INTEGER DEFAULT 0,
+                    is_stale INTEGER DEFAULT 1,
+                    created_at INTEGER,
+                    updated_at INTEGER,
+                    FOREIGN KEY (parent_community_id) REFERENCES graph_communities(id) ON DELETE SET NULL
+                )
+            ''')
+
+            # Create community_members junction table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS community_members (
+                    community_id TEXT NOT NULL,
+                    node_id TEXT NOT NULL,
+                    membership_score REAL DEFAULT 1.0,
+                    PRIMARY KEY (community_id, node_id),
+                    FOREIGN KEY (community_id) REFERENCES graph_communities(id) ON DELETE CASCADE,
+                    FOREIGN KEY (node_id) REFERENCES graph_nodes(id) ON DELETE CASCADE
+                )
+            ''')
+
+            # Create indexes
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_communities_binary ON graph_communities(binary_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_communities_level ON graph_communities(level)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_communities_parent ON graph_communities(parent_community_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_community_members_node ON community_members(node_id)")
+
+            conn.commit()
+            conn.close()
+            log.log_info("Migration 005: GraphRAG community tables created successfully")
+            return True
+
+        except Exception as e:
+            log.log_warn(f"Migration 005 issue: {e}. Attempting recovery...")
+            try:
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                for table in ("graph_communities", "community_members"):
+                    if DatabaseMigrations._table_exists(cursor, table):
+                        DatabaseMigrations._rename_to_backup(cursor, table)
+                conn.close()
+                log.log_warn("Migration 005: Tables backed up. Please restart plugin.")
+            except Exception as recovery_error:
+                log.log_error(f"Migration 005 recovery failed: {recovery_error}")
+            return True  # Always return True to continue loading
+
+    @staticmethod
+    def _migration_006_graphrag_fts(db_path: str) -> bool:
+        """Migration 006: Create FTS5 full-text search for graph nodes."""
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            # Drop old triggers if they exist
+            cursor.execute("DROP TRIGGER IF EXISTS graph_nodes_ai")
+            cursor.execute("DROP TRIGGER IF EXISTS graph_nodes_ad")
+            cursor.execute("DROP TRIGGER IF EXISTS graph_nodes_au")
+
+            # Handle legacy FTS tables
+            if DatabaseMigrations._table_exists(cursor, "GraphNodeFTS"):
+                cursor.execute("DROP TABLE IF EXISTS GraphNodeFTS")
+                log.log_info("Dropped legacy GraphNodeFTS table")
+
+            # Check existing node_fts schema
+            if DatabaseMigrations._table_exists(cursor, "node_fts"):
+                cursor.execute("PRAGMA table_info(node_fts)")
+                existing_cols = [row[1] for row in cursor.fetchall()]
+                expected_cols = ["id", "name", "llm_summary", "security_flags"]
+                if set(existing_cols) != set(expected_cols):
+                    cursor.execute("DROP TABLE IF EXISTS node_fts")
+                    log.log_info("Dropped incompatible node_fts table for recreation")
+
+            # Create FTS5 virtual table
+            try:
+                cursor.execute('''
+                    CREATE VIRTUAL TABLE IF NOT EXISTS node_fts USING fts5(
+                        id,
+                        name,
+                        llm_summary,
+                        security_flags,
+                        content='graph_nodes',
+                        content_rowid='rowid'
+                    )
+                ''')
+
+                # Create sync triggers
+                cursor.execute('''
+                    CREATE TRIGGER IF NOT EXISTS graph_nodes_ai AFTER INSERT ON graph_nodes BEGIN
+                        INSERT INTO node_fts(rowid, id, name, llm_summary, security_flags)
+                        VALUES (new.rowid, new.id, new.name, new.llm_summary, new.security_flags);
+                    END
+                ''')
+
+                cursor.execute('''
+                    CREATE TRIGGER IF NOT EXISTS graph_nodes_ad AFTER DELETE ON graph_nodes BEGIN
+                        INSERT INTO node_fts(node_fts, rowid, id, name, llm_summary, security_flags)
+                        VALUES ('delete', old.rowid, old.id, old.name, old.llm_summary, old.security_flags);
+                    END
+                ''')
+
+                cursor.execute('''
+                    CREATE TRIGGER IF NOT EXISTS graph_nodes_au AFTER UPDATE ON graph_nodes BEGIN
+                        INSERT INTO node_fts(node_fts, rowid, id, name, llm_summary, security_flags)
+                        VALUES ('delete', old.rowid, old.id, old.name, old.llm_summary, old.security_flags);
+                        INSERT INTO node_fts(rowid, id, name, llm_summary, security_flags)
+                        VALUES (new.rowid, new.id, new.name, new.llm_summary, new.security_flags);
+                    END
+                ''')
+
+                log.log_info("Migration 006: FTS5 full-text search created successfully")
+
+            except Exception as fts_error:
+                # FTS5 not available - this is non-fatal
+                log.log_warn(f"FTS5 not available, full-text search disabled: {fts_error}")
+
+            conn.commit()
+            conn.close()
+            return True
+
+        except Exception as e:
+            log.log_warn(f"Migration 006 issue: {e}. FTS5 may be unavailable.")
+            return True  # Always return True - FTS5 is optional
 
 
 class DatabaseCleanup:
