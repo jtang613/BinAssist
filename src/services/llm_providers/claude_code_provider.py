@@ -155,25 +155,57 @@ class ClaudeCodeProvider(BaseLLMProvider):
                 log.log_debug(f"Failed to clean up MCP config: {e}")
 
     def _find_claude_cli(self) -> Optional[str]:
-        """Find the claude CLI executable"""
+        """Find the claude CLI executable (cross-platform)"""
+        import platform
+
         # First try the configured path
         if self.claude_path and shutil.which(self.claude_path):
             return self.claude_path
 
-        # Try common locations
-        common_paths = [
-            'claude',
-            '/usr/local/bin/claude',
-            '/usr/bin/claude',
-            '~/.local/bin/claude',
-            '~/.npm-global/bin/claude',
-        ]
+        # shutil.which() handles platform-specific executable extensions (.exe, .cmd on Windows)
+        # Try the simple name first - this works on all platforms if claude is in PATH
+        if shutil.which('claude'):
+            return shutil.which('claude')
 
-        import os
+        # Platform-specific common locations
+        system = platform.system()
+
+        if system == 'Windows':
+            # Windows npm global paths
+            appdata = os.environ.get('APPDATA', '')
+            localappdata = os.environ.get('LOCALAPPDATA', '')
+            common_paths = [
+                os.path.join(appdata, 'npm', 'claude.cmd'),
+                os.path.join(appdata, 'npm', 'claude'),
+                os.path.join(localappdata, 'npm', 'claude.cmd'),
+                os.path.join(localappdata, 'npm', 'claude'),
+                # Scoop install location
+                os.path.join(os.environ.get('USERPROFILE', ''), 'scoop', 'shims', 'claude.cmd'),
+            ]
+        elif system == 'Darwin':
+            # macOS paths
+            common_paths = [
+                '/usr/local/bin/claude',
+                '/opt/homebrew/bin/claude',  # Apple Silicon Homebrew
+                os.path.expanduser('~/.npm-global/bin/claude'),
+                os.path.expanduser('~/Library/npm/bin/claude'),
+            ]
+        else:
+            # Linux paths
+            common_paths = [
+                '/usr/local/bin/claude',
+                '/usr/bin/claude',
+                os.path.expanduser('~/.local/bin/claude'),
+                os.path.expanduser('~/.npm-global/bin/claude'),
+                '/snap/bin/claude',  # Snap install
+            ]
+
         for path in common_paths:
-            expanded = os.path.expanduser(path)
-            if shutil.which(expanded):
-                return expanded
+            if path and os.path.isfile(path):
+                return path
+            # Also try shutil.which in case of symlinks or PATH issues
+            if path and shutil.which(path):
+                return shutil.which(path)
 
         return None
 
