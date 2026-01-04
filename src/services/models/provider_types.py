@@ -19,6 +19,7 @@ class ProviderType(Enum):
     OPENWEBUI = "openwebui"
     LMSTUDIO = "lmstudio"
     LITELLM = "litellm"
+    CLAUDE_CODE = "claude_code"
     
     @classmethod
     def get_display_names(cls) -> dict[str, str]:
@@ -29,7 +30,8 @@ class ProviderType(Enum):
             cls.OLLAMA: "Ollama (Local)",
             cls.OPENWEBUI: "Open WebUI",
             cls.LMSTUDIO: "LM Studio",
-            cls.LITELLM: "LiteLLM (Proxy)"
+            cls.LITELLM: "LiteLLM (Proxy)",
+            cls.CLAUDE_CODE: "Claude Code (CLI)"
         }
     
     @classmethod
@@ -41,7 +43,8 @@ class ProviderType(Enum):
             cls.OLLAMA: "http://localhost:11434",
             cls.OPENWEBUI: "http://localhost:3000",
             cls.LMSTUDIO: "http://localhost:1234/v1",
-            cls.LITELLM: "http://localhost:4000"
+            cls.LITELLM: "http://localhost:4000",
+            cls.CLAUDE_CODE: ""  # CLI-based, no URL needed
         }
     
     @classmethod
@@ -70,6 +73,10 @@ class ProviderType(Enum):
             cls.LITELLM: [
                 # LiteLLM proxies to various providers - models are dynamic
                 # Examples: bedrock/anthropic.claude-*, bedrock/amazon.nova-*, etc.
+            ],
+            cls.CLAUDE_CODE: [
+                # Claude Code CLI model shortcuts
+                "sonnet", "opus", "haiku"
             ]
         }
     
@@ -88,12 +95,13 @@ class ProviderType(Enum):
     def supports_tool_calls(cls, provider_type: 'ProviderType') -> bool:
         """Check if provider type supports function/tool calling"""
         return provider_type in {
-            cls.OPENAI,     # Full tool calling support
-            cls.ANTHROPIC,  # Tool calling support
-            cls.OLLAMA,     # Limited tool calling support
-            cls.OPENWEBUI,  # Depends on connected providers
-            cls.LMSTUDIO,   # Limited support
-            cls.LITELLM     # Proxies tool calls to various providers
+            cls.OPENAI,      # Full tool calling support
+            cls.ANTHROPIC,   # Tool calling support
+            cls.OLLAMA,      # Limited tool calling support
+            cls.OPENWEBUI,   # Depends on connected providers
+            cls.LMSTUDIO,    # Limited support
+            cls.LITELLM,     # Proxies tool calls to various providers
+            cls.CLAUDE_CODE  # Via CLI --allowedTools flag
         }
     
     @classmethod
@@ -106,6 +114,7 @@ class ProviderType(Enum):
             cls.OPENWEBUI,  # Full streaming support
             cls.LMSTUDIO,   # Full streaming support
             cls.LITELLM     # Full streaming support via proxy
+            # Note: CLAUDE_CODE does NOT support true streaming (CLI returns complete response)
         }
     
     @classmethod

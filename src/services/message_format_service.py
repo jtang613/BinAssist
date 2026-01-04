@@ -287,6 +287,13 @@ class LiteLLMMessageAdapter(OpenAIMessageAdapter):
         return ProviderType.LITELLM
 
 
+class ClaudeCodeMessageAdapter(OpenAIMessageAdapter):
+    """Message format adapter for Claude Code CLI - uses OpenAI-like format"""
+
+    def get_provider_type(self) -> ProviderType:
+        return ProviderType.CLAUDE_CODE
+
+
 class OllamaMessageAdapter(MessageFormatAdapter):
     """Message format adapter for Ollama API"""
     
@@ -382,7 +389,8 @@ class MessageFormatService:
             ProviderType.OPENWEBUI: openai_adapter,
             ProviderType.LMSTUDIO: openai_adapter,
             ProviderType.OLLAMA: OllamaMessageAdapter(),
-            ProviderType.LITELLM: LiteLLMMessageAdapter()
+            ProviderType.LITELLM: LiteLLMMessageAdapter(),
+            ProviderType.CLAUDE_CODE: ClaudeCodeMessageAdapter()
         }
     
     def get_adapter(self, provider_type: ProviderType) -> MessageFormatAdapter:

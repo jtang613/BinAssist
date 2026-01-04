@@ -2596,7 +2596,6 @@ Tool Usage Guidelines:
     def _update_last_assistant_message(self, content: str, final_update: bool = False):
         """Update the last assistant message in the current chat"""
         if self.current_chat_id not in self.chats:
-            log.log_debug("_update_last_assistant_message: No current chat")
             return
         
         messages = self.chats[self.current_chat_id]["messages"]
@@ -2605,7 +2604,6 @@ Tool Usage Guidelines:
             messages[-1]["content"] = content
             messages[-1]["timestamp"] = QDateTime.currentDateTime().toString("yyyy-MM-dd hh:mm:ss")
             self.chats[self.current_chat_id]["updated"] = messages[-1]["timestamp"]
-            log.log_debug(f"_update_last_assistant_message: Updated assistant message from {old_length} to {len(content)} chars")
             
             # Save to native format on final update
             if final_update:
