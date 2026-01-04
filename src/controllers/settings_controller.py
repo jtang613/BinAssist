@@ -318,6 +318,16 @@ class ProviderDialog(QDialog):
         self.disable_tls_check = QCheckBox("Disable TLS Verification")
         layout.addWidget(self.disable_tls_check)
 
+        # Claude Code CLI note (only visible for Claude Code providers)
+        self.claude_code_note_label = QLabel(
+            "Note: Requires `claude` CLI installed and authenticated.\n"
+            "Install with: npm install -g @anthropic-ai/claude-code"
+        )
+        self.claude_code_note_label.setStyleSheet("color: #666; font-style: italic; margin-top: 10px;")
+        self.claude_code_note_label.setWordWrap(True)
+        layout.addWidget(self.claude_code_note_label)
+        self.claude_code_note_label.setVisible(False)
+
         # LiteLLM metadata (read-only fields, only visible for LiteLLM providers)
         self.litellm_metadata_label = QLabel("LiteLLM Metadata:")
         self.litellm_metadata_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
@@ -408,6 +418,10 @@ class ProviderDialog(QDialog):
                 # Update metadata if switching to LiteLLM
                 if is_litellm:
                     self.update_litellm_metadata()
+
+                # Show/hide Claude Code note based on provider type
+                is_claude_code = provider_type == ProviderType.CLAUDE_CODE
+                self.claude_code_note_label.setVisible(is_claude_code)
 
             except ValueError:
                 pass  # Invalid provider type, ignore
@@ -681,12 +695,16 @@ class SettingsController(QObject):
         if dialog.exec() == QDialog.Accepted:
             try:
                 data = dialog.get_provider_data()
-                
-                # Validate required fields
-                if not all([data['name'], data['model'], data['url']]):
-                    self.show_error("Validation Error", "Name, Model, and URL are required fields.")
+
+                # Validate required fields (URL not required for CLI-based providers)
+                is_cli_provider = data.get('provider_type') == 'claude_code'
+                if not data['name'] or not data['model']:
+                    self.show_error("Validation Error", "Name and Model are required fields.")
                     return
-                
+                if not is_cli_provider and not data['url']:
+                    self.show_error("Validation Error", "URL is required for this provider type.")
+                    return
+
                 # Add to service
                 provider_id = self.service.add_llm_provider(
                     data['name'], data['model'], data['url'],
@@ -724,12 +742,16 @@ class SettingsController(QObject):
             
             if dialog.exec() == QDialog.Accepted:
                 data = dialog.get_provider_data()
-                
-                # Validate required fields
-                if not all([data['name'], data['model'], data['url']]):
-                    self.show_error("Validation Error", "Name, Model, and URL are required fields.")
+
+                # Validate required fields (URL not required for CLI-based providers)
+                is_cli_provider = data.get('provider_type') == 'claude_code'
+                if not data['name'] or not data['model']:
+                    self.show_error("Validation Error", "Name and Model are required fields.")
                     return
-                
+                if not is_cli_provider and not data['url']:
+                    self.show_error("Validation Error", "URL is required for this provider type.")
+                    return
+
                 # Update in service
                 self.service.update_llm_provider(provider['id'], **data)
                 
@@ -784,8 +806,11 @@ class SettingsController(QObject):
             provider = providers[row]
             
             # Validate that provider has required fields
-            if not provider.get('api_key') and provider.get('provider_type') != 'ollama':
-                self.show_error("Test Failed", 
+            # Some providers don't require API keys (Ollama runs locally, Claude Code uses CLI auth)
+            provider_type = provider.get('provider_type', '')
+            requires_key = provider_type not in ('ollama', 'claude_code')
+            if not provider.get('api_key') and requires_key:
+                self.show_error("Test Failed",
                     f"Provider '{provider['name']}' has no API key configured. "
                     "Please edit the provider and add an API key before testing.")
                 return

@@ -137,6 +137,16 @@ class LLMProviderFactory:
         except ImportError:
             pass  # LiteLLM provider not available
 
+        # Claude Code CLI provider
+        try:
+            from .claude_code_provider import ClaudeCodeProviderFactory
+            self.register_factory(
+                ProviderType.CLAUDE_CODE,
+                ClaudeCodeProviderFactory()
+            )
+        except ImportError:
+            pass  # Claude Code provider not available
+
 
 class AnthropicProviderFactory(ProviderFactory):
     """Factory for creating Anthropic providers"""
