@@ -27,9 +27,10 @@ class PushScope(Enum):
 class SymbolType(Enum):
     """Type of symbol."""
     FUNCTION = "function"
-    DATA = "data"
-    LABEL = "label"
+    VARIABLE = "variable"
     TYPE = "type"
+    STRUCT = "struct"
+    ENUM = "enum"
     COMMENT = "comment"
 
 
@@ -80,9 +81,10 @@ class Symbol:
     symbol_type: str
     name: Optional[str] = None
     data_type: Optional[str] = None
+    content: Optional[str] = None  # For comments
     confidence: float = 0.0
     provenance: str = "unknown"
-    source: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None  # For enum members, struct fields, etc.
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'Symbol':
@@ -92,9 +94,10 @@ class Symbol:
             symbol_type=data.get('symbol_type', 'function'),
             name=data.get('name'),
             data_type=data.get('data_type'),
+            content=data.get('content'),
             confidence=data.get('confidence', 0.0),
             provenance=data.get('provenance', 'unknown'),
-            source=data.get('source')
+            metadata=data.get('metadata')
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -109,8 +112,10 @@ class Symbol:
             result['name'] = self.name
         if self.data_type:
             result['data_type'] = self.data_type
-        if self.source:
-            result['source'] = self.source
+        if self.content:
+            result['content'] = self.content
+        if self.metadata:
+            result['metadata'] = self.metadata
         return result
 
 

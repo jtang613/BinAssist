@@ -465,6 +465,52 @@ class SymGraphService:
         except httpx.RequestError as e:
             raise SymGraphNetworkError(f"Network error: {str(e)}")
 
+    # === Fingerprint Operations ===
+
+    async def add_fingerprint(self, sha256: str, fp_type: str, fp_value: str) -> bool:
+        """
+        Add a fingerprint to a binary (authenticated).
+
+        Args:
+            sha256: SHA256 hash of the binary
+            fp_type: Fingerprint type (e.g., "pdb_guid", "build_id")
+            fp_value: Fingerprint value
+
+        Returns:
+            True if successful, False otherwise
+        """
+        self._check_httpx()
+        self._check_auth()
+
+        url = f"{self.base_url}/api/v1/binaries/{sha256}/fingerprints"
+        log.log_debug(f"Adding fingerprint {fp_type}={fp_value} to {sha256[:16]}...")
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    url,
+                    headers=self._get_headers(authenticated=True),
+                    json={'type': fp_type, 'value': fp_value}
+                )
+
+                if response.status_code in (200, 201):
+                    log.log_info(f"Added fingerprint: {fp_type}={fp_value}")
+                    return True
+                elif response.status_code == 401:
+                    raise SymGraphAuthError("Invalid API key")
+                elif response.status_code == 409:
+                    # Fingerprint already exists - not an error
+                    log.log_debug(f"Fingerprint already exists: {fp_type}={fp_value}")
+                    return True
+                else:
+                    log.log_warn(f"Failed to add fingerprint: {response.status_code}")
+                    return False
+
+        except httpx.TimeoutException:
+            raise SymGraphNetworkError(f"Timeout connecting to {self.base_url}")
+        except httpx.RequestError as e:
+            raise SymGraphNetworkError(f"Network error: {str(e)}")
+
     # === Helper Methods for Pull Preview ===
 
     def build_conflict_entries(

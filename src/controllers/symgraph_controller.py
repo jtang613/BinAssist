@@ -96,11 +96,13 @@ class PushWorker(QThread):
     push_complete = Signal(object)  # PushResult
     push_error = Signal(str)
 
-    def __init__(self, sha256: str, symbols: List[Dict], graph_data: Optional[Dict] = None):
+    def __init__(self, sha256: str, symbols: List[Dict], graph_data: Optional[Dict] = None,
+                 fingerprints: Optional[List[Dict[str, str]]] = None):
         super().__init__()
         self.sha256 = sha256
         self.symbols = symbols
         self.graph_data = graph_data
+        self.fingerprints = fingerprints or []  # List of {'type': str, 'value': str}
 
     def run(self):
         try:
@@ -129,6 +131,19 @@ class PushWorker(QThread):
                     if not result.success:
                         total_result.success = False
                         total_result.error = result.error
+
+                # Add fingerprints (for BuildID/PDB GUID matching)
+                if self.fingerprints and total_result.success:
+                    for fp in self.fingerprints:
+                        try:
+                            loop.run_until_complete(
+                                symgraph_service.add_fingerprint(
+                                    self.sha256, fp['type'], fp['value']
+                                )
+                            )
+                        except Exception as e:
+                            log.log_warn(f"Failed to add fingerprint {fp['type']}: {e}")
+                            # Non-fatal, continue
 
                 self.push_complete.emit(total_result)
             finally:
@@ -475,8 +490,11 @@ class SymGraphController(QObject):
             self.view.set_buttons_enabled(True)
             return
 
+        # Collect fingerprints for matching (BuildID for ELF, PDB GUID for PE)
+        fingerprints = self._collect_fingerprints()
+
         # Start push worker
-        self.push_worker = PushWorker(sha256, symbols_data, graph_data)
+        self.push_worker = PushWorker(sha256, symbols_data, graph_data, fingerprints)
         self.push_worker.push_complete.connect(self._on_push_complete)
         self.push_worker.push_error.connect(self._on_push_error)
         self.push_worker.finished.connect(lambda: self.view.set_buttons_enabled(True))
@@ -642,8 +660,118 @@ class SymGraphController(QObject):
 
     # === Helper methods for data collection ===
 
+    def _collect_fingerprints(self) -> List[Dict[str, str]]:
+        """
+        Collect fingerprints from the binary for debug symbol matching.
+
+        Returns:
+            List of fingerprint dicts with 'type' and 'value' keys.
+            - For ELF: BuildID (build_id)
+            - For PE: PDB GUID (pdb_guid)
+        """
+        fingerprints = []
+
+        if not self.bv:
+            return fingerprints
+
+        try:
+            # Check binary format
+            view_type = self.bv.view_type
+
+            if view_type == 'ELF':
+                # Extract BuildID from ELF binary
+                build_id = self._extract_elf_build_id()
+                if build_id:
+                    fingerprints.append({'type': 'build_id', 'value': build_id})
+                    log.log_info(f"Extracted ELF BuildID: {build_id}")
+
+            elif view_type == 'PE':
+                # Extract PDB GUID from PE binary
+                pdb_info = self._extract_pe_pdb_info()
+                if pdb_info:
+                    fingerprints.append({'type': 'pdb_guid', 'value': pdb_info})
+                    log.log_info(f"Extracted PDB GUID: {pdb_info}")
+
+        except Exception as e:
+            log.log_warn(f"Error collecting fingerprints: {e}")
+
+        return fingerprints
+
+    def _extract_elf_build_id(self) -> Optional[str]:
+        """Extract GNU BuildID from ELF binary."""
+        if not self.bv:
+            return None
+
+        try:
+            # Try to find .note.gnu.build-id section
+            for section in self.bv.sections.values():
+                if section.name == '.note.gnu.build-id':
+                    # Read the note section
+                    data = self.bv.read(section.start, section.length)
+                    if len(data) >= 16:
+                        # GNU note format: namesz (4), descsz (4), type (4), name, desc
+                        # name = "GNU\0", type = NT_GNU_BUILD_ID (3)
+                        namesz = int.from_bytes(data[0:4], 'little')
+                        descsz = int.from_bytes(data[4:8], 'little')
+                        note_type = int.from_bytes(data[8:12], 'little')
+
+                        if note_type == 3:  # NT_GNU_BUILD_ID
+                            # Name is padded to 4-byte boundary
+                            name_end = 12 + ((namesz + 3) & ~3)
+                            if len(data) >= name_end + descsz:
+                                build_id_bytes = data[name_end:name_end + descsz]
+                                return build_id_bytes.hex()
+
+            # Fallback: try raw file for build-id
+            if hasattr(self.bv, 'file') and hasattr(self.bv.file, 'raw'):
+                raw = self.bv.file.raw
+                # Search for GNU build-id note in raw data
+                # This is a simplified search - production code should parse ELF properly
+                marker = b'GNU\x00'
+                for section in self.bv.sections.values():
+                    if 'note' in section.name.lower() or 'build' in section.name.lower():
+                        data = self.bv.read(section.start, min(section.length, 256))
+                        if marker in data:
+                            idx = data.index(marker)
+                            if idx >= 12:
+                                # Read descsz from before the marker
+                                descsz = int.from_bytes(data[idx-8:idx-4], 'little')
+                                if descsz > 0 and descsz <= 64:
+                                    name_end = idx + 4  # Skip "GNU\0"
+                                    # Align to 4 bytes
+                                    name_end = (name_end + 3) & ~3
+                                    if len(data) >= name_end + descsz:
+                                        return data[name_end:name_end + descsz].hex()
+
+        except Exception as e:
+            log.log_debug(f"Error extracting ELF BuildID: {e}")
+
+        return None
+
+    def _extract_pe_pdb_info(self) -> Optional[str]:
+        """Extract PDB GUID from PE binary."""
+        if not self.bv:
+            return None
+
+        try:
+            # Binary Ninja stores debug info in metadata
+            # Try to get PDB path/GUID from the binary view
+            if hasattr(self.bv, 'get_metadata'):
+                metadata = self.bv.get_metadata('pdb')
+                if metadata:
+                    return str(metadata)
+
+            # Alternative: check for CodeView debug directory
+            # This would require parsing PE debug directory - complex
+            # For now, we'll rely on metadata if available
+
+        except Exception as e:
+            log.log_debug(f"Error extracting PE PDB info: {e}")
+
+        return None
+
     def _collect_local_symbols(self, scope: str) -> List[Dict[str, Any]]:
-        """Collect symbols from Binary Ninja based on scope."""
+        """Collect all symbol types from Binary Ninja based on scope."""
         symbols = []
 
         if not self.bv:
@@ -655,10 +783,24 @@ class SymGraphController(QObject):
                 current_func = self._get_current_function()
                 if current_func:
                     symbols.append(self._function_to_symbol_dict(current_func))
+                    # Also collect comments within this function
+                    symbols.extend(self._collect_function_comments(current_func))
+                    # Collect local variables for this function
+                    symbols.extend(self._collect_function_variables(current_func))
             else:
-                # Full binary - all functions
+                # Full binary - all symbol types
+                # 1. Functions
                 for func in self.bv.functions:
                     symbols.append(self._function_to_symbol_dict(func))
+
+                # 2. Data variables (global variables)
+                symbols.extend(self._collect_data_variables())
+
+                # 3. Types and enums
+                symbols.extend(self._collect_types_and_enums())
+
+                # 4. Comments (address-level comments)
+                symbols.extend(self._collect_comments())
 
         except Exception as e:
             log.log_error(f"Error collecting symbols: {e}")
@@ -667,13 +809,257 @@ class SymGraphController(QObject):
 
     def _function_to_symbol_dict(self, func) -> Dict[str, Any]:
         """Convert a Binary Ninja function to a symbol dictionary."""
+        # Get function type/signature if available
+        data_type = None
+        try:
+            if func.type:
+                data_type = str(func.type)
+        except Exception:
+            pass
+
         return {
             'address': f"0x{func.start:x}",
             'symbol_type': 'function',
             'name': func.name,
+            'data_type': data_type,
             'confidence': 0.9 if not func.name.startswith('sub_') else 0.5,
-            'provenance': 'user' if not func.name.startswith('sub_') else 'auto'
+            'provenance': 'user' if not func.name.startswith('sub_') else 'decompiler'
         }
+
+    def _collect_data_variables(self) -> List[Dict[str, Any]]:
+        """Collect global data variables from Binary Ninja."""
+        symbols = []
+        try:
+            for addr, var in self.bv.data_vars.items():
+                # Get symbol name if available
+                sym = self.bv.get_symbol_at(addr)
+                name = sym.name if sym else None
+
+                # Skip auto-generated names
+                if name and (name.startswith('data_') or name.startswith('byte_')):
+                    confidence = 0.3
+                    provenance = 'decompiler'
+                else:
+                    confidence = 0.85 if name else 0.3
+                    provenance = 'user' if name else 'decompiler'
+
+                symbols.append({
+                    'address': f"0x{addr:x}",
+                    'symbol_type': 'variable',
+                    'name': name,
+                    'data_type': str(var.type) if var.type else None,
+                    'confidence': confidence,
+                    'provenance': provenance
+                })
+        except Exception as e:
+            log.log_error(f"Error collecting data variables: {e}")
+        return symbols
+
+    def _collect_function_variables(self, func) -> List[Dict[str, Any]]:
+        """Collect local variables from a function."""
+        symbols = []
+        try:
+            # Function parameters
+            for param in func.parameter_vars:
+                if param.name and not param.name.startswith('arg'):
+                    symbols.append({
+                        'address': f"0x{func.start:x}",
+                        'symbol_type': 'variable',
+                        'name': param.name,
+                        'data_type': str(param.type) if param.type else None,
+                        'confidence': 0.8,
+                        'provenance': 'user',
+                        'metadata': {'scope': 'parameter', 'function': func.name}
+                    })
+
+            # Local variables (stack and register)
+            for var in func.vars:
+                if var.name and not var.name.startswith('var_'):
+                    symbols.append({
+                        'address': f"0x{func.start:x}",
+                        'symbol_type': 'variable',
+                        'name': var.name,
+                        'data_type': str(var.type) if var.type else None,
+                        'confidence': 0.75,
+                        'provenance': 'user',
+                        'metadata': {'scope': 'local', 'function': func.name}
+                    })
+        except Exception as e:
+            log.log_error(f"Error collecting function variables: {e}")
+        return symbols
+
+    def _collect_types_and_enums(self) -> List[Dict[str, Any]]:
+        """Collect user-defined types and enums from Binary Ninja."""
+        symbols = []
+        enum_count = 0
+        struct_count = 0
+        try:
+            import binaryninja
+
+            # Iterate through all types in the binary
+            for name, type_obj in self.bv.types.items():
+                type_str = str(type_obj)
+                symbol_type = 'type'
+                metadata = None
+                should_append = True
+
+                try:
+                    # Use integer comparison for type_class (more reliable)
+                    # EnumerationTypeClass = 5, StructureTypeClass = 4
+                    type_class_int = int(type_obj.type_class)
+
+                    # Check type class for enum (EnumerationTypeClass = 5)
+                    # For EnumerationType, .members is directly on type_obj
+                    if type_class_int == 5:
+                        symbol_type = 'enum'
+                        enum_count += 1
+                        # Access members directly on the type object
+                        members_list = getattr(type_obj, 'members', None)
+                        if members_list is not None:
+                            members = {}
+                            content_lines = [f"enum {name} {{"]
+                            for member in members_list:
+                                # EnumerationMember has .name and .value properties
+                                member_name = getattr(member, 'name', None)
+                                member_value = getattr(member, 'value', None)
+                                if member_name is not None and member_value is not None:
+                                    members[member_name] = member_value
+                                    content_lines.append(f"    {member_name} = 0x{member_value:x},")
+                            content_lines.append("}")
+                            if members:
+                                metadata = {'members': members}
+                                # Store human-readable content
+                                type_str = "\n".join(content_lines)
+                            else:
+                                # Empty enum - still push but with empty members
+                                metadata = {'members': {}}
+                        else:
+                            log.log_warn(f"Skipping enum '{name}': could not access members")
+                            should_append = False
+
+                    # Check type class for struct (StructureTypeClass = 4)
+                    # For StructureType, .members is directly on type_obj
+                    elif type_class_int == 4:
+                        symbol_type = 'struct'
+                        struct_count += 1
+                        # Access members directly on the type object
+                        members_list = getattr(type_obj, 'members', None)
+                        if members_list is not None:
+                            fields = []
+                            content_lines = [f"struct {name} {{"]
+                            for member in members_list:
+                                # StructureMember has .name, .type, .offset properties
+                                field_name = getattr(member, 'name', None)
+                                field_type_obj = getattr(member, 'type', None)
+                                field_type = str(field_type_obj) if field_type_obj else 'unknown'
+                                field_offset = getattr(member, 'offset', 0)
+                                fields.append({
+                                    'name': field_name,
+                                    'type': field_type,
+                                    'offset': field_offset
+                                })
+                                content_lines.append(f"    /* 0x{field_offset:02x} */ {field_type} {field_name};")
+                            content_lines.append("}")
+                            metadata = {'fields': fields}
+                            # Store human-readable content
+                            type_str = "\n".join(content_lines)
+                        else:
+                            log.log_warn(f"Skipping struct '{name}': could not access members")
+                            should_append = False
+
+                    # For other types (typedefs, pointers, etc.), push as 'type' without metadata
+                    # This is fine - they don't have members
+
+                except Exception as e:
+                    log.log_warn(f"Could not get type details for {name}: {e}")
+                    should_append = False
+
+                if should_append:
+                    symbol_data = {
+                        'address': '0x0',  # Types don't have addresses
+                        'symbol_type': symbol_type,
+                        'name': str(name),
+                        'data_type': type_str,
+                        'confidence': 0.9,
+                        'provenance': 'user',
+                        'metadata': metadata
+                    }
+                    # For structs and enums, also populate the content field
+                    # with the human-readable definition (same as data_type)
+                    if symbol_type in ('struct', 'enum'):
+                        symbol_data['content'] = type_str
+                    symbols.append(symbol_data)
+        except Exception as e:
+            log.log_error(f"Error collecting types and enums: {e}")
+
+        log.log_info(f"Collected {len(symbols)} types ({enum_count} enums, {struct_count} structs)")
+        return symbols
+
+    def _collect_comments(self) -> List[Dict[str, Any]]:
+        """Collect address-level comments from Binary Ninja."""
+        symbols = []
+        try:
+            # Collect function comments
+            for func in self.bv.functions:
+                # Function-level comment
+                if func.comment:
+                    symbols.append({
+                        'address': f"0x{func.start:x}",
+                        'symbol_type': 'comment',
+                        'name': None,
+                        'content': func.comment,
+                        'confidence': 1.0,
+                        'provenance': 'user',
+                        'metadata': {'type': 'function'}
+                    })
+
+                # Address comments within the function
+                for addr, comment in func.comments.items():
+                    if comment:
+                        symbols.append({
+                            'address': f"0x{addr:x}",
+                            'symbol_type': 'comment',
+                            'name': None,
+                            'content': comment,
+                            'confidence': 1.0,
+                            'provenance': 'user',
+                            'metadata': {'type': 'address', 'function': func.name}
+                        })
+        except Exception as e:
+            log.log_error(f"Error collecting comments: {e}")
+        return symbols
+
+    def _collect_function_comments(self, func) -> List[Dict[str, Any]]:
+        """Collect comments within a specific function."""
+        symbols = []
+        try:
+            # Function-level comment
+            if func.comment:
+                symbols.append({
+                    'address': f"0x{func.start:x}",
+                    'symbol_type': 'comment',
+                    'name': None,
+                    'content': func.comment,
+                    'confidence': 1.0,
+                    'provenance': 'user',
+                    'metadata': {'type': 'function'}
+                })
+
+            # Address comments within the function
+            for addr, comment in func.comments.items():
+                if comment:
+                    symbols.append({
+                        'address': f"0x{addr:x}",
+                        'symbol_type': 'comment',
+                        'name': None,
+                        'content': comment,
+                        'confidence': 1.0,
+                        'provenance': 'user',
+                        'metadata': {'type': 'address', 'function': func.name}
+                    })
+        except Exception as e:
+            log.log_error(f"Error collecting function comments: {e}")
+        return symbols
 
     def _collect_local_graph(self, scope: str) -> Optional[Dict[str, Any]]:
         """Collect graph data from Binary Ninja based on scope."""

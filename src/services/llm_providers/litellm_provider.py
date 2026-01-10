@@ -124,16 +124,20 @@ class LiteLLMProvider(OpenAIProvider):
 
         Examples:
         - bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0 -> anthropic
+        - bedrock-anthropic.claude-3-5-sonnet-20241022-v2:0 -> anthropic
+        - bedrock-claude-sonnet-4-5 -> anthropic
         - bedrock/amazon.nova-pro-v1:0 -> amazon
         - bedrock/meta.llama3-70b-instruct-v1:0 -> meta
         - bedrock/gpt-oss-120b -> openai
         - claude-3-5-sonnet -> anthropic (non-Bedrock)
         - gpt-4o -> openai (non-Bedrock)
+
+        Note: LiteLLM may use 'bedrock/' or 'bedrock-' prefix depending on configuration.
         """
         model_lower = self.model.lower()
 
-        # Bedrock models: bedrock/<provider>.<model-name>
-        if model_lower.startswith('bedrock/'):
+        # Bedrock models: bedrock/<provider>.<model-name> or bedrock-<model-name>
+        if self._is_bedrock_model():
             if 'anthropic' in model_lower or 'claude' in model_lower:
                 return 'anthropic'
             elif 'amazon' in model_lower or 'nova' in model_lower:
@@ -160,8 +164,13 @@ class LiteLLMProvider(OpenAIProvider):
         return 'unknown'
 
     def _is_bedrock_model(self) -> bool:
-        """Check if this is a Bedrock model"""
-        return self.model.startswith('bedrock/')
+        """
+        Check if this is a Bedrock model.
+
+        Supports both 'bedrock/' and 'bedrock-' prefixes for LiteLLM compatibility.
+        """
+        model_lower = self.model.lower()
+        return model_lower.startswith('bedrock/') or model_lower.startswith('bedrock-')
 
     def _prepare_completion_kwargs(self, request: ChatRequest) -> Dict[str, Any]:
         """

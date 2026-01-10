@@ -505,7 +505,6 @@ class AnalysisDBService:
                 hash_input = f"entry:{entry_point}:length:{file_length}"
                 binary_hash = hashlib.sha256(hash_input.encode()).hexdigest()
 
-            log.log_info(f"Generated binary hash: {binary_hash[:16]}...")
             return binary_hash
 
         except Exception as e:

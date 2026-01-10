@@ -353,7 +353,6 @@ class ActionsController:
         try:
             if self.context_service:
                 self.context_service.set_current_offset(offset)
-                log.log_debug(f"ActionsController offset updated to {hex(offset)}")
         except Exception as e:
             log.log_error(f"Error updating offset: {e}")
     

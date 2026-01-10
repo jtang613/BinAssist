@@ -440,7 +440,7 @@ class ProviderDialog(QDialog):
 
         # Detect model family (same logic as in settings_service.py)
         model_family = self._detect_model_family(model_name)
-        is_bedrock = model_name.startswith('bedrock/')
+        is_bedrock = model_name.lower().startswith('bedrock/') or model_name.lower().startswith('bedrock-')
 
         self.model_family_label.setText(f"Model Family: {model_family.title()}")
         self.is_bedrock_label.setText(f"Bedrock Model: {'Yes' if is_bedrock else 'No'}")
