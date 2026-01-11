@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 from PySide6.QtCore import Qt, Signal, QPointF
 from PySide6.QtGui import (
     QFont, QFontDatabase, QTextCursor, QBrush, QColor, QPen,
-    QPainterPath, QPainter, QPolygonF
+    QPainterPath, QPainter, QPolygonF, QMouseEvent
 )
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTabWidget,
@@ -22,6 +22,22 @@ from PySide6.QtWidgets import (
     QFrame, QRadioButton, QButtonGroup, QAbstractItemView, QInputDialog
 )
 
+from .semantic_graph.manual_analysis_panel import ManualAnalysisPanel
+
+
+class ClickableGraphicsView(QGraphicsView):
+    """QGraphicsView that emits a signal on double-click with the clicked node data."""
+    node_double_clicked = Signal(object)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent):
+        item = self.itemAt(event.pos())
+        if item:
+            node_data = item.data(0)
+            if node_data:
+                self.node_double_clicked.emit(node_data)
+                return
+        super().mouseDoubleClickEvent(event)
+
 
 class SemanticGraphTabView(QWidget):
     go_requested = Signal(str)
@@ -29,6 +45,8 @@ class SemanticGraphTabView(QWidget):
     reindex_requested = Signal()
     semantic_analysis_requested = Signal()
     security_analysis_requested = Signal()
+    network_flow_requested = Signal()
+    community_detection_requested = Signal()
     refresh_names_requested = Signal()
     navigate_requested = Signal(int)
     index_function_requested = Signal(int)
@@ -65,22 +83,26 @@ class SemanticGraphTabView(QWidget):
         self.list_view = SemanticGraphListView()
         self.graph_view = SemanticGraphGraphView()
         self.search_view = SemanticGraphSearchView()
+        self.manual_analysis_view = ManualAnalysisPanel()
         self.subtabs.addTab(self.list_view, "List View")
         self.subtabs.addTab(self.graph_view, "Visual Graph")
         self.subtabs.addTab(self.search_view, "Search")
+        self.subtabs.addTab(self.manual_analysis_view, "Manual Analysis")
         layout.addWidget(self.subtabs)
 
         bottom = QHBoxLayout()
         self.reset_button = QPushButton("Reset Graph")
-        self.reindex_button = QPushButton("ReIndex Binary")
-        self.semantic_button = QPushButton("Semantic Analysis")
-        self.security_button = QPushButton("Security Analysis")
-        self.refresh_names_button = QPushButton("Refresh Names")
+        self.reset_button.setToolTip("Delete all indexed data for this binary.")
         bottom.addWidget(self.reset_button)
+
+        self.reindex_button = QPushButton("ReIndex Binary")
+        self.reindex_button.setToolTip("Full Pipeline: Extract structure, then run Security, Network Flow, and Community Detection analyses.")
         bottom.addWidget(self.reindex_button)
+
+        self.semantic_button = QPushButton("Semantic Analysis")
+        self.semantic_button.setToolTip("Use LLM to generate summaries for unsummarized functions.")
         bottom.addWidget(self.semantic_button)
-        bottom.addWidget(self.security_button)
-        bottom.addWidget(self.refresh_names_button)
+
         bottom.addStretch()
         layout.addLayout(bottom)
 
@@ -96,8 +118,14 @@ class SemanticGraphTabView(QWidget):
         self.reset_button.clicked.connect(self.reset_requested.emit)
         self.reindex_button.clicked.connect(self.reindex_requested.emit)
         self.semantic_button.clicked.connect(self.semantic_analysis_requested.emit)
-        self.security_button.clicked.connect(self.security_analysis_requested.emit)
-        self.refresh_names_button.clicked.connect(self.refresh_names_requested.emit)
+
+        # Manual Analysis Panel signals
+        self.manual_analysis_view.reindex_requested.connect(self.reindex_requested.emit)
+        self.manual_analysis_view.semantic_analysis_requested.connect(self.semantic_analysis_requested.emit)
+        self.manual_analysis_view.security_analysis_requested.connect(self.security_analysis_requested.emit)
+        self.manual_analysis_view.network_flow_requested.connect(self.network_flow_requested.emit)
+        self.manual_analysis_view.community_detection_requested.connect(self.community_detection_requested.emit)
+        self.manual_analysis_view.refresh_names_requested.connect(self.refresh_names_requested.emit)
 
         self.list_view.navigate_requested.connect(self.navigate_requested.emit)
         self.list_view.index_function_requested.connect(self._emit_index_current)
@@ -230,8 +258,8 @@ class SemanticGraphListView(QWidget):
 
         self.edge_filter = QComboBox()
         self.edge_filter.addItems(
-            ["All Types", "CALLS", "REFERENCES", "CALLS_VULNERABLE", "SIMILAR_PURPOSE",
-             "TAINT_FLOWS_TO", "VULNERABLE_VIA", "NETWORK_SEND", "NETWORK_RECV"]
+            ["All Types", "calls", "references", "calls_vulnerable", "similar_purpose",
+             "taint_flows_to", "vulnerable_via", "network_send", "network_recv"]
         )
         self.edge_filter.currentIndexChanged.connect(self._refresh_edges_table)
 
@@ -496,27 +524,19 @@ class SemanticGraphGraphView(QWidget):
 
         self.scene = QGraphicsScene()
         self.scene.selectionChanged.connect(self._on_selection_changed)
-        self.view = QGraphicsView(self.scene)
+        self.view = ClickableGraphicsView(self.scene)
         self.view.setRenderHint(QPainter.Antialiasing, True)
         self.view.setBackgroundBrush(QBrush(self._colors["background"]))
+        self.view.node_double_clicked.connect(self._on_node_double_clicked)
         content_layout.addWidget(self.view)
 
-        info = QHBoxLayout()
-        self.selected_label = QLabel("Selected: None")
-        self.summary_label = QLabel("")
-        self.summary_label.setStyleSheet("color: gray;")
-        info.addWidget(self.selected_label)
-        info.addWidget(self.summary_label)
-        info.addStretch()
-        self.go_to_button = QPushButton("Go To")
-        self.go_to_button.setEnabled(False)
-        self.go_to_button.clicked.connect(self._go_to_selected)
-        info.addWidget(self.go_to_button)
-        self.details_button = QPushButton("Details")
-        self.details_button.setEnabled(False)
-        self.details_button.clicked.connect(self._go_to_selected)
-        info.addWidget(self.details_button)
-        content_layout.addLayout(info)
+        # Summary area - renders markdown inline
+        self.summary_text = QTextEdit()
+        self.summary_text.setReadOnly(True)
+        self.summary_text.setMaximumHeight(80)
+        self.summary_text.setPlaceholderText("Select a node to view its summary. Double-click to navigate.")
+        self.summary_text.setStyleSheet("QTextEdit { background-color: #1e1e1e; color: #d4d4d4; border: 1px solid #3c3c3c; }")
+        content_layout.addWidget(self.summary_text)
 
         self.content_widget.setLayout(content_layout)
         self.stack.addWidget(self.placeholder_widget)
@@ -543,9 +563,7 @@ class SemanticGraphGraphView(QWidget):
 
     def show_not_indexed(self):
         self.scene.clear()
-        self.selected_label.setText("Selected: None")
-        self.summary_label.setText("")
-        self.go_to_button.setEnabled(False)
+        self.summary_text.clear()
         self.stack.setCurrentWidget(self.placeholder_widget)
 
     def show_content(self):
@@ -967,42 +985,45 @@ class SemanticGraphGraphView(QWidget):
     def _on_refresh(self):
         edge_types = []
         if self.calls_cb.isChecked():
-            edge_types.append("CALLS")
+            edge_types.append("calls")
         if self.refs_cb.isChecked():
-            edge_types.append("REFERENCES")
+            edge_types.append("references")
         if self.vuln_cb.isChecked():
-            edge_types.append("CALLS_VULNERABLE")
+            edge_types.append("calls_vulnerable")
         if self.network_cb.isChecked():
-            edge_types.append("NETWORK_SEND")
-            edge_types.append("NETWORK_RECV")
+            edge_types.append("network_send")
+            edge_types.append("network_recv")
         self.refresh_requested.emit(int(self.n_hops.value()), edge_types)
 
     def _go_to_selected(self):
         if self._selected_node:
             self.navigate_requested.emit(self._selected_node["address"])
 
+    def _on_node_double_clicked(self, node_data):
+        """Handle double-click on a node to navigate to its address."""
+        if node_data and "address" in node_data:
+            self.navigate_requested.emit(node_data["address"])
+
     def _on_selection_changed(self):
         items = self.scene.selectedItems()
         if not items:
             self._selected_node = None
-            self.selected_label.setText("Selected: None")
-            self.summary_label.setText("")
-            self.go_to_button.setEnabled(False)
-            self.details_button.setEnabled(False)
+            self.summary_text.clear()
             return
         node = items[0].data(0)
         if not node:
             return
         self._selected_node = node
-        self.selected_label.setText(f"Selected: {node['label']}")
+        label = node.get("label", "Unknown")
+        address = node.get("address", 0)
         summary = node.get("summary", "")
+
+        # Build markdown content with function name header
+        md_content = f"**{label}** (0x{address:x})"
         if summary:
-            summary = summary.replace("\n", " ").replace("\r", " ").strip()
-        if summary and len(summary) > 100:
-            summary = summary[:97] + "..."
-        self.summary_label.setText(summary)
-        self.go_to_button.setEnabled(True)
-        self.details_button.setEnabled(True)
+            md_content += f"\n\n{summary}"
+
+        self.summary_text.setMarkdown(md_content)
 
     def _node_style(self, node: Dict[str, Any], is_center: bool):
         if is_center:
@@ -1012,13 +1033,13 @@ class SemanticGraphGraphView(QWidget):
         return self._colors["node"], self._colors["node_text"]
 
     def _edge_style(self, edge_type: str):
-        if edge_type == "CALLS":
+        if edge_type == "calls":
             return self._colors["edge_calls"], 2, False
-        if edge_type == "REFERENCES":
+        if edge_type == "references":
             return self._colors["edge_refs"], 1, True
-        if edge_type == "CALLS_VULNERABLE":
+        if edge_type == "calls_vulnerable":
             return self._colors["edge_vuln"], 2, False
-        if edge_type in ("NETWORK_SEND", "NETWORK_RECV"):
+        if edge_type in ("network_send", "network_recv"):
             return self._colors["edge_network"], 2, False
         return self._colors["edge_calls"], 1, False
 

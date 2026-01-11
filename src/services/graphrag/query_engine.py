@@ -22,7 +22,7 @@ class GraphRAGQueryEngine:
                 "message": "Function not found in graph.",
             }
 
-        callers = [self._node_name(n) for n in self.graph_store.get_callers(self.binary_hash, node.id, "CALLS")]
+        callers = [self._node_name(n) for n in self.graph_store.get_callers(self.binary_hash, node.id, "calls")]
         callees = [self._node_name(n) for n in self._get_callees(node.id)]
         has_semantic = bool(node.llm_summary)
         has_structure = bool(node.raw_code or callers or callees)
@@ -65,7 +65,7 @@ class GraphRAGQueryEngine:
         results = []
         added: Set[int] = {source.id}
 
-        callers = self.graph_store.get_callers(self.binary_hash, source.id, "CALLS")
+        callers = self.graph_store.get_callers(self.binary_hash, source.id, "calls")
         for caller in callers:
             for sibling in self._get_callees(caller.id):
                 if sibling.id in added:
@@ -80,7 +80,7 @@ class GraphRAGQueryEngine:
         if len(results) < limit:
             callees = self._get_callees(source.id)
             for callee in callees:
-                for sibling in self.graph_store.get_callers(self.binary_hash, callee.id, "CALLS"):
+                for sibling in self.graph_store.get_callers(self.binary_hash, callee.id, "calls"):
                     if sibling.id in added:
                         continue
                     added.add(sibling.id)
@@ -153,7 +153,7 @@ class GraphRAGQueryEngine:
             }
 
         vulnerable_callers = []
-        for caller in self.graph_store.get_callers(self.binary_hash, node.id, "CALLS"):
+        for caller in self.graph_store.get_callers(self.binary_hash, node.id, "calls"):
             if caller.security_flags:
                 vulnerable_callers.append(self._node_name(caller))
 
@@ -282,7 +282,7 @@ class GraphRAGQueryEngine:
             current, current_depth = frontier.pop(0)
             if current_depth >= max_depth:
                 continue
-            neighbors = (self.graph_store.get_callers(self.binary_hash, current, "CALLS")
+            neighbors = (self.graph_store.get_callers(self.binary_hash, current, "calls")
                          if callers else self._get_callees(current))
             for neighbor in neighbors:
                 if neighbor.id in visited:
@@ -302,7 +302,7 @@ class GraphRAGQueryEngine:
         edges = self.graph_store.get_edges_for_node(self.binary_hash, node_id)
         results = []
         for edge in edges:
-            if edge.source_id == node_id and edge.edge_type == "CALLS":
+            if edge.source_id == node_id and edge.edge_type == "calls":
                 node = self.graph_store.get_node_by_id(edge.target_id)
                 if node:
                     results.append(node)

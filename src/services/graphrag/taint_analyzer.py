@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Set
 
 from .graph_store import GraphStore
-from .models import GraphEdge, GraphNode
+from .models import GraphEdge, GraphNode, EdgeType
 
 try:
     import binaryninja
@@ -139,7 +139,7 @@ class TaintAnalyzer:
         return [
             edge.target_id
             for edge in edges
-            if edge.source_id == node_id and edge.edge_type == "CALLS"
+            if edge.source_id == node_id and edge.edge_type == EdgeType.CALLS.value
         ]
 
     def _create_taint_edges(self, path: List[int]) -> None:
@@ -148,7 +148,7 @@ class TaintAnalyzer:
                 binary_hash=self.binary_hash,
                 source_id=path[idx],
                 target_id=path[idx + 1],
-                edge_type="TAINT_FLOWS_TO",
+                edge_type=EdgeType.TAINT_FLOWS_TO,
                 weight=1.0,
             ))
 
@@ -157,7 +157,7 @@ class TaintAnalyzer:
             binary_hash=self.binary_hash,
             source_id=source_id,
             target_id=sink_id,
-            edge_type="VULNERABLE_VIA",
+            edge_type=EdgeType.VULNERABLE_VIA,
             weight=1.0,
         ))
 
