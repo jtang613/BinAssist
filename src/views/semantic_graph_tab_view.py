@@ -230,7 +230,8 @@ class SemanticGraphListView(QWidget):
 
         self.edge_filter = QComboBox()
         self.edge_filter.addItems(
-            ["All Types", "CALLS", "REFERENCES", "DATA_DEPENDS", "CALLS_VULNERABLE", "SIMILAR_PURPOSE"]
+            ["All Types", "CALLS", "REFERENCES", "CALLS_VULNERABLE", "SIMILAR_PURPOSE",
+             "TAINT_FLOWS_TO", "VULNERABLE_VIA", "NETWORK_SEND", "NETWORK_RECV"]
         )
         self.edge_filter.currentIndexChanged.connect(self._refresh_edges_table)
 
@@ -438,8 +439,8 @@ class SemanticGraphGraphView(QWidget):
             "vuln_text": QColor("#ffd6d6"),
             "edge_calls": QColor("#58a6ff"),
             "edge_refs": QColor("#7a7f87"),
-            "edge_data": QColor("#4caf50"),
             "edge_vuln": QColor("#ff5c5c"),
+            "edge_network": QColor("#06b6d4"),  # cyan-500
         }
         self._build_ui()
 
@@ -465,10 +466,11 @@ class SemanticGraphGraphView(QWidget):
         self.calls_cb.setChecked(True)
         self.refs_cb = QCheckBox("REFS")
         self.refs_cb.setChecked(True)
-        self.data_cb = QCheckBox("DATA_DEP")
         self.vuln_cb = QCheckBox("VULN")
         self.vuln_cb.setChecked(True)
-        for cb in (self.calls_cb, self.refs_cb, self.data_cb, self.vuln_cb):
+        self.network_cb = QCheckBox("NETWORK")
+        self.network_cb.setChecked(True)
+        for cb in (self.calls_cb, self.refs_cb, self.vuln_cb, self.network_cb):
             cb.stateChanged.connect(self._on_refresh)
             controls.addWidget(cb)
         controls.addStretch()
@@ -968,10 +970,11 @@ class SemanticGraphGraphView(QWidget):
             edge_types.append("CALLS")
         if self.refs_cb.isChecked():
             edge_types.append("REFERENCES")
-        if self.data_cb.isChecked():
-            edge_types.append("DATA_DEPENDS")
         if self.vuln_cb.isChecked():
             edge_types.append("CALLS_VULNERABLE")
+        if self.network_cb.isChecked():
+            edge_types.append("NETWORK_SEND")
+            edge_types.append("NETWORK_RECV")
         self.refresh_requested.emit(int(self.n_hops.value()), edge_types)
 
     def _go_to_selected(self):
@@ -1013,10 +1016,10 @@ class SemanticGraphGraphView(QWidget):
             return self._colors["edge_calls"], 2, False
         if edge_type == "REFERENCES":
             return self._colors["edge_refs"], 1, True
-        if edge_type == "DATA_DEPENDS":
-            return self._colors["edge_data"], 1, True
         if edge_type == "CALLS_VULNERABLE":
             return self._colors["edge_vuln"], 2, False
+        if edge_type in ("NETWORK_SEND", "NETWORK_RECV"):
+            return self._colors["edge_network"], 2, False
         return self._colors["edge_calls"], 1, False
 
     def _zoom_in(self):
