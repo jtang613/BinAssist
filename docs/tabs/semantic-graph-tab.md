@@ -25,9 +25,6 @@ The Semantic Graph tab contains four sub-tabs:
 
 Displays all indexed functions in a searchable table.
 
-![List View](../screenshots/semantic-graph-list-view.png)
-<!-- SCREENSHOT: List View showing function table with columns for Address, Name, Summary, and security flags -->
-
 | Column | Description |
 |--------|-------------|
 | **Address** | Function start address |
@@ -44,7 +41,7 @@ Click a row to:
 
 Interactive visualization of function relationships.
 
-![Visual Graph](../screenshots/semantic-graph-visual.png)
+![Visual Graph](../screenshots/semantic-graph-visual-explore.png)
 <!-- SCREENSHOT: Visual Graph view showing nodes representing functions connected by edges representing call relationships -->
 
 - **Nodes**: Functions, sized by importance
@@ -59,9 +56,6 @@ Navigation:
 ### Search
 
 Full-text search across function names and summaries.
-
-![Search View](../screenshots/semantic-graph-search.png)
-<!-- SCREENSHOT: Search sub-tab showing search input, results list with matching functions and relevant summary excerpts -->
 
 Enter keywords to find functions by:
 - Function name
