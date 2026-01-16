@@ -40,7 +40,7 @@ def migrate_add_provider_type(db_path: str):
             # Add the provider_type column
             cursor.execute('''
                 ALTER TABLE llm_providers 
-                ADD COLUMN provider_type TEXT DEFAULT 'openai'
+                ADD COLUMN provider_type TEXT DEFAULT 'openai_platform'
             ''')
             
             # Update existing providers with detected types
@@ -76,9 +76,9 @@ def _detect_provider_type(name: str, url: str) -> ProviderType:
     url_lower = url.lower() if url else ''
     
     if 'openai.com' in url_lower or 'openai' in name_lower:
-        return ProviderType.OPENAI
+        return ProviderType.OPENAI_PLATFORM
     elif 'anthropic.com' in url_lower or 'claude' in name_lower or 'anthropic' in name_lower:
-        return ProviderType.ANTHROPIC  
+        return ProviderType.ANTHROPIC_PLATFORM  
     elif ':11434' in url_lower or 'ollama' in name_lower or 'ollama' in url_lower:
         return ProviderType.OLLAMA
     elif 'openwebui' in name_lower or 'open-webui' in name_lower:
@@ -87,7 +87,7 @@ def _detect_provider_type(name: str, url: str) -> ProviderType:
         return ProviderType.LMSTUDIO
     else:
         # Default to OpenAI for unknown providers
-        return ProviderType.OPENAI
+        return ProviderType.OPENAI_PLATFORM
 
 
 if __name__ == "__main__":

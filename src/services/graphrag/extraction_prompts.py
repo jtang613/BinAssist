@@ -66,45 +66,70 @@ def function_summary_prompt(function_name: str, decompiled_code: str,
                             callers: List[str], callees: List[str]) -> str:
     complexity = analyze_complexity(decompiled_code)
 
-    prompt = ["Analyze this decompiled function and provide a summary.\n"]
-    prompt.append(f"## Function: {function_name}\n")
+    prompt = ["Analyze this decompiled function and provide a structured summary.\n\n"]
+    prompt.append(f"## Function: {function_name}\n\n")
     prompt.append(f"**Complexity:** {complexity}\n")
 
     if callers:
         prompt.append(f"**Called by:** {', '.join(callers)}\n")
     if callees:
         prompt.append(f"**Calls:** {', '.join(callees)}\n")
+    prompt.append("\n")
 
     truncate_limit = 4000 if complexity.level == "very_complex" else 3000 if complexity.level == "complex" else 2000
-    prompt.append(f"\n```c\n{_truncate_code(decompiled_code, truncate_limit)}\n```\n")
-    prompt.append(f"**Summary Length Guidance:** {complexity.summary_guidance}\n\n")
-    prompt.append("Provide a summary in the following format:\n\n")
+    prompt.append(f"```c\n{_truncate_code(decompiled_code, truncate_limit)}\n```\n\n")
 
-    if complexity.level in ("very_complex", "complex"):
-        prompt.append("**Purpose:** [A thorough description of what this function does, "
-                      "its role in the larger system, and its key responsibilities.]\n\n")
-        prompt.append("**Behavior:** [Detailed explanation of the function's logic including:\n"
-                      "- Main code paths and control flow\n"
-                      "- Key data transformations and algorithms\n"
-                      "- Important state changes and side effects\n"
-                      "- Error handling patterns]\n\n")
+    # Output format instructions
+    prompt.append("## Output Format (REQUIRED - follow this structure exactly):\n\n")
+    prompt.append("**Summary:** [1-3 sentences describing what this function does]\n\n")
+
+    # Complexity-based section guidance
+    if complexity.level == "simple":
+        prompt.append("For this simple function, provide ONLY the Summary and Category sections.\n\n")
     else:
-        prompt.append("**Purpose:** [1-3 sentences describing what this function does]\n\n")
-        prompt.append("**Behavior:** [Key operations, data transformations, control flow]\n\n")
+        prompt.append("[Include the following sections ONLY if applicable to this function:]\n\n")
 
-    prompt.append("**Security Notes:** [Any potential security concerns: buffer handling, "
-                  "input validation, crypto usage, privilege operations. Write 'None identified' if none.]\n\n")
-    prompt.append("**Category:** [One of: initialization, data_processing, io_operations, "
-                  "network, crypto, authentication, error_handling, utility, unknown]\n")
+        if complexity.level in ("very_complex", "complex"):
+            prompt.append("**Details:** [Detailed explanation of the function's logic including:\n")
+            prompt.append("- Main code paths and control flow\n")
+            prompt.append("- Key data transformations and algorithms\n")
+            prompt.append("- Important state changes and side effects\n")
+            prompt.append("- Error handling patterns\n")
+            prompt.append("Use multiple paragraphs as needed for complex functions.]\n\n")
+        else:
+            prompt.append("**Details:** [Brief description of control flow and key operations. ")
+            prompt.append("Skip this section for trivial utility functions.]\n\n")
+
+        prompt.append("**File IO:** [ONLY if this function performs file operations: ")
+        prompt.append("list operations like fopen, fread, fwrite, fclose, CreateFile, ReadFile, etc. ")
+        prompt.append("Otherwise OMIT this section entirely.]\n\n")
+
+        prompt.append("**Network IO:** [ONLY if this function performs network operations: ")
+        prompt.append("list operations like socket, connect, send, recv, WSAStartup, getaddrinfo, etc. ")
+        prompt.append("Otherwise OMIT this section entirely.]\n\n")
+
+        prompt.append("**Security:** [ONLY if security-relevant observations exist: ")
+        prompt.append("buffer handling concerns, input validation issues, crypto usage, ")
+        prompt.append("privilege operations, error handling gaps. Otherwise OMIT this section.]\n\n")
+
+    prompt.append("**Category:** [REQUIRED - One of: initialization, data_processing, io_operations, ")
+    prompt.append("network, crypto, authentication, error_handling, utility, unknown]\n")
+
     return "".join(prompt)
 
 
 def batch_function_summary_prompt(nodes: List[dict]) -> str:
+    """Generate a batch prompt for summarizing multiple functions.
+    Uses simplified format - Summary and Category only."""
     prompt = ["Summarize each of these functions. Scale summary length based on complexity:\n"
               "- Simple functions: 1-2 sentences\n"
-              "- Moderate functions: 3-5 sentences\n"
+              "- Moderate functions: 2-4 sentences\n"
               "- Complex functions: 1-2 paragraphs\n"
               "- Very complex functions: 2-3 paragraphs\n\n"
+              "For each function, provide:\n"
+              "**Summary:** [Description]\n"
+              "**Category:** [One of: initialization, data_processing, io_operations, "
+              "network, crypto, authentication, error_handling, utility, unknown]\n\n"
               "Format your response as a numbered list matching the input.\n\n"]
 
     for idx, node in enumerate(nodes, 1):
@@ -116,6 +141,38 @@ def batch_function_summary_prompt(nodes: List[dict]) -> str:
                       f"{_truncate_code(code, truncate_limit)}\n```\n\n")
 
     prompt.append("Summaries:\n")
+    return "".join(prompt)
+
+
+def function_brief_summary_prompt(function_name: str, decompiled_code: str) -> str:
+    """Generate a complexity-scaled summary prompt for brief processing.
+    Uses simplified format - Summary and Category only."""
+    complexity = analyze_complexity(decompiled_code)
+
+    prompt = [f"Summarize this decompiled function.\n\n"]
+    prompt.append(f"Function: {function_name}\n")
+    prompt.append(f"Complexity: {complexity}\n\n")
+
+    truncate_limit = 4000 if complexity.level == "very_complex" else \
+                     3000 if complexity.level == "complex" else \
+                     2000 if complexity.level == "moderate" else 1500
+    prompt.append(f"```c\n{_truncate_code(decompiled_code, truncate_limit)}\n```\n\n")
+
+    prompt.append("## Output Format (REQUIRED):\n\n")
+    prompt.append("**Summary:** [")
+    if complexity.level == "simple":
+        prompt.append("1-2 sentences")
+    elif complexity.level == "moderate":
+        prompt.append("2-4 sentences")
+    else:
+        prompt.append("1-2 paragraphs covering key functionality")
+    prompt.append(" describing what this function does]\n\n")
+
+    prompt.append("**Category:** [One of: initialization, data_processing, io_operations, ")
+    prompt.append("network, crypto, authentication, error_handling, utility, unknown]\n\n")
+
+    prompt.append("Do NOT include other sections (Details, File IO, Network IO, Security) in this brief format.")
+
     return "".join(prompt)
 
 
@@ -132,3 +189,81 @@ def _truncate_code(code: str, max_length: int) -> str:
     if cutoff < max_length // 2:
         cutoff = max_length
     return code[:cutoff] + "\n// ... (truncated)"
+
+
+# ========================================
+# Response Parsing Helpers
+# ========================================
+
+def extract_summary(response: str) -> str:
+    """Extract the Summary section from a function summary response."""
+    return _extract_section(response, "Summary:")
+
+
+def extract_details(response: str) -> str:
+    """Extract the Details section from a function summary response."""
+    return _extract_section(response, "Details:")
+
+
+def extract_file_io(response: str) -> str:
+    """Extract the File IO section from a function summary response."""
+    return _extract_section(response, "File IO:")
+
+
+def extract_network_io(response: str) -> str:
+    """Extract the Network IO section from a function summary response."""
+    return _extract_section(response, "Network IO:")
+
+
+def extract_security(response: str) -> str:
+    """Extract the Security section from a function summary response."""
+    return _extract_section(response, "Security:")
+
+
+def extract_category(response: str) -> str:
+    """Extract the Category section from a function summary response."""
+    return _extract_section(response, "Category:")
+
+
+def _extract_section(response: str, header: str) -> str:
+    """Extract a section from the response by header."""
+    if not response:
+        return ""
+
+    # Try with ** markdown formatting first
+    start = response.find(f"**{header}")
+    if start != -1:
+        # Find closing **
+        close = response.find("**", start + 2)
+        if close != -1:
+            start = close + 2
+    else:
+        # Fall back to plain header
+        start = response.find(header)
+        if start != -1:
+            start += len(header)
+
+    if start == -1:
+        return ""
+
+    # Find the end of this section (next section header or end of text)
+    end = len(response)
+
+    # Look for next section (with ** prefix)
+    next_section = response.find("\n**", start)
+    if next_section != -1 and next_section < end:
+        end = next_section
+
+    # Also check for double newline as section separator
+    double_newline = response.find("\n\n", start)
+    if double_newline != -1 and double_newline < end:
+        after_newline = response[double_newline + 2:].strip()
+        if after_newline.startswith("**") or re.match(r"^[A-Z][a-z]+:", after_newline):
+            end = double_newline
+
+    result = response[start:end].strip()
+    # Remove leading colon if present
+    if result.startswith(":"):
+        result = result[1:].strip()
+
+    return result

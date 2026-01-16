@@ -10,7 +10,7 @@ from collections import Counter, defaultdict
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from .graph_store import GraphStore
-from .models import GraphNode
+from .models import GraphNode, EdgeType
 
 try:
     import binaryninja
@@ -160,7 +160,7 @@ class CommunityDetector:
         # Get CALLS and CALLS_VULNERABLE edges
         edges = self.graph_store.get_edges_by_types(
             self.binary_hash,
-            ["CALLS", "CALLS_VULNERABLE"]
+            [EdgeType.CALLS.value, EdgeType.CALLS_VULNERABLE.value]
         )
 
         # Build undirected adjacency list
@@ -291,7 +291,9 @@ class CommunityDetector:
                 'is_stale': False,
             })
 
-            # Add members
+            # Add members to community
+            # Note: Community membership is tracked in the community_members table,
+            # not as graph edges, since communities are not regular graph nodes
             for node_id in member_ids:
                 self.graph_store.add_community_member(community_id, node_id, 1.0)
 

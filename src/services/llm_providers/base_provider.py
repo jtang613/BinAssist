@@ -60,7 +60,7 @@ class BaseLLMProvider(ABC):
         self.api_key = config.get('api_key', '')
         self.max_tokens = config.get('max_tokens', 4096)
         self.disable_tls = config.get('disable_tls', False)
-        self.provider_type = config.get('provider_type', 'openai')
+        self.provider_type = config.get('provider_type', 'openai_platform')
 
         # Rate limit retry configuration
         self.rate_limit_max_retries = config.get('rate_limit_max_retries', 50)

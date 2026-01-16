@@ -5,7 +5,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-from .models import GraphNode, GraphEdge
+from .models import GraphNode, GraphEdge, EdgeType
 from ..analysis_db_service import AnalysisDBService
 
 try:
@@ -239,6 +239,9 @@ class GraphStore:
         if not edge.id:
             edge.id = str(uuid.uuid4())
 
+        # Convert EdgeType enum to string for storage
+        edge_type_str = edge.get_edge_type_str()
+
         now_ms = self._now_ms()
         with self._db_lock:
             conn = self.analysis_db.get_connection()
@@ -248,7 +251,7 @@ class GraphStore:
                     SELECT 1 FROM graph_edges
                     WHERE source_id = ? AND target_id = ? AND type = ?
                     LIMIT 1
-                ''', (edge.source_id, edge.target_id, edge.edge_type))
+                ''', (edge.source_id, edge.target_id, edge_type_str))
                 if cursor.fetchone():
                     return edge
                 cursor.execute('''
@@ -259,7 +262,7 @@ class GraphStore:
                     edge.id,
                     edge.source_id,
                     edge.target_id,
-                    edge.edge_type,
+                    edge_type_str,
                     edge.weight,
                     edge.metadata,
                     now_ms
@@ -269,7 +272,49 @@ class GraphStore:
             finally:
                 conn.close()
 
-    def get_callers(self, binary_hash: str, node_id: str, edge_type: str = "CALLS") -> List[GraphNode]:
+    def has_edge(self, source_id: str, target_id: str, edge_type: str) -> bool:
+        """Check if an edge exists between two nodes."""
+        if not source_id or not target_id or not edge_type:
+            return False
+
+        # Handle EdgeType enum
+        if isinstance(edge_type, EdgeType):
+            edge_type = edge_type.value
+
+        with self._db_lock:
+            conn = self.analysis_db.get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT 1 FROM graph_edges
+                    WHERE source_id = ? AND target_id = ? AND type = ?
+                    LIMIT 1
+                ''', (source_id, target_id, edge_type))
+                return cursor.fetchone() is not None
+            finally:
+                conn.close()
+
+    def create_edge(
+        self,
+        source_id: str,
+        target_id: str,
+        edge_type: EdgeType,
+        binary_hash: str,
+        weight: float = 1.0,
+        metadata: Optional[str] = None
+    ) -> GraphEdge:
+        """Convenience method to create and store an edge."""
+        edge = GraphEdge(
+            binary_hash=binary_hash,
+            source_id=source_id,
+            target_id=target_id,
+            edge_type=edge_type,
+            weight=weight,
+            metadata=metadata
+        )
+        return self.add_edge(edge)
+
+    def get_callers(self, binary_hash: str, node_id: str, edge_type: str = "calls") -> List[GraphNode]:
         if not binary_hash or not node_id:
             return []
         with self._db_lock:

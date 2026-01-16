@@ -2,6 +2,13 @@
 
 """
 Provider Types Enum - Central definition of supported LLM provider types
+
+Naming Convention:
+- VENDOR_AUTHMETHOD where AUTHMETHOD is:
+  - PLATFORM: Direct API key access to vendor's platform
+  - OAUTH: OAuth-based subscription access (Pro/Plus/Max plans)
+  - CLI: Command-line interface wrapper
+- Local/Proxy providers keep simple names (OLLAMA, LITELLM, etc.)
 """
 
 from enum import Enum
@@ -11,120 +18,157 @@ class ProviderType(Enum):
     """
     Enumeration of supported LLM provider types.
     Used throughout the plugin for type safety and consistency.
+    
+    Sorted alphabetically for consistency.
     """
 
-    OPENAI = "openai"
-    ANTHROPIC = "anthropic"
-    OLLAMA = "ollama"
-    OPENWEBUI = "openwebui"
-    LMSTUDIO = "lmstudio"
-    LITELLM = "litellm"
-    CLAUDE_CODE = "claude_code"
+    # Anthropic providers (alphabetically)
+    ANTHROPIC_CLI = "anthropic_cli"           # Claude Code CLI wrapper
+    ANTHROPIC_OAUTH = "anthropic_oauth"       # OAuth (Claude Pro/Max subscription)
+    ANTHROPIC_PLATFORM = "anthropic_platform" # Platform API (direct API key)
+    
+    # Local/Proxy providers (alphabetically)
+    LITELLM = "litellm"                       # LiteLLM proxy
+    LMSTUDIO = "lmstudio"                     # LM Studio (local)
+    OLLAMA = "ollama"                         # Ollama (local)
+    OPENWEBUI = "openwebui"                   # Open WebUI (local/proxy)
+    
+    # OpenAI providers (alphabetically)
+    OPENAI_OAUTH = "openai_oauth"             # OAuth (ChatGPT Pro/Plus subscription)
+    OPENAI_PLATFORM = "openai_platform"       # Platform API (direct API key)
     
     @classmethod
-    def get_display_names(cls) -> dict[str, str]:
+    def get_display_names(cls) -> dict['ProviderType', str]:
         """Get human-readable display names for each provider type"""
         return {
-            cls.OPENAI: "OpenAI",
-            cls.ANTHROPIC: "Anthropic (Claude)",
-            cls.OLLAMA: "Ollama (Local)",
-            cls.OPENWEBUI: "Open WebUI",
+            # Anthropic
+            cls.ANTHROPIC_CLI: "Anthropic CLI (Claude Code)",
+            cls.ANTHROPIC_OAUTH: "Anthropic OAuth (Claude Pro/Max)",
+            cls.ANTHROPIC_PLATFORM: "Anthropic Platform API",
+            # Local/Proxy
+            cls.LITELLM: "LiteLLM Proxy",
             cls.LMSTUDIO: "LM Studio",
-            cls.LITELLM: "LiteLLM (Proxy)",
-            cls.CLAUDE_CODE: "Claude Code (CLI)"
+            cls.OLLAMA: "Ollama",
+            cls.OPENWEBUI: "Open WebUI",
+            # OpenAI
+            cls.OPENAI_OAUTH: "OpenAI OAuth (ChatGPT Pro/Plus)",
+            cls.OPENAI_PLATFORM: "OpenAI Platform API",
         }
     
     @classmethod
-    def get_default_urls(cls) -> dict[str, str]:
+    def get_default_urls(cls) -> dict['ProviderType', str]:
         """Get default API URLs for each provider type"""
         return {
-            cls.OPENAI: "https://api.openai.com/v1",
-            cls.ANTHROPIC: "https://api.anthropic.com",
+            # Anthropic
+            cls.ANTHROPIC_CLI: "",  # CLI-based, no URL needed
+            cls.ANTHROPIC_OAUTH: "https://api.anthropic.com",
+            cls.ANTHROPIC_PLATFORM: "https://api.anthropic.com",
+            # Local/Proxy
+            cls.LITELLM: "http://localhost:4000",
+            cls.LMSTUDIO: "http://localhost:1234/v1",
             cls.OLLAMA: "http://localhost:11434",
             cls.OPENWEBUI: "http://localhost:3000",
-            cls.LMSTUDIO: "http://localhost:1234/v1",
-            cls.LITELLM: "http://localhost:4000",
-            cls.CLAUDE_CODE: ""  # CLI-based, no URL needed
+            # OpenAI
+            cls.OPENAI_OAUTH: "https://chatgpt.com/backend-api/codex/responses",
+            cls.OPENAI_PLATFORM: "https://api.openai.com/v1",
         }
     
     @classmethod
-    def get_default_models(cls) -> dict[str, list[str]]:
+    def get_default_models(cls) -> dict['ProviderType', list[str]]:
         """Get default/popular models for each provider type"""
         return {
-            cls.OPENAI: [
-                "gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"
+            # Anthropic
+            cls.ANTHROPIC_CLI: [
+                "sonnet", "opus", "haiku"  # CLI model shortcuts
             ],
-            cls.ANTHROPIC: [
+            cls.ANTHROPIC_OAUTH: [
+                "claude-sonnet-4-20250514",
+                "claude-haiku-4-5-20251001",
+                "claude-opus-4-5-20251101"
+            ],
+            cls.ANTHROPIC_PLATFORM: [
                 "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022",
                 "claude-3-opus-20240229", "claude-3-sonnet-20240229"
+            ],
+            # Local/Proxy
+            cls.LITELLM: [
+                # LiteLLM proxies to various providers - models are dynamic
+            ],
+            cls.LMSTUDIO: [
+                "microsoft/DialoGPT-medium", "microsoft/DialoGPT-large"
             ],
             cls.OLLAMA: [
                 "llama3.1:8b", "llama3.1:70b", "codellama:7b", "mistral:7b",
                 "phi3:mini", "qwen2:7b"
             ],
             cls.OPENWEBUI: [
-                # OpenWebUI uses models from connected providers
                 "gpt-4o", "claude-3-5-sonnet", "llama3.1:8b"
             ],
-            cls.LMSTUDIO: [
-                # LM Studio uses locally downloaded models
-                "microsoft/DialoGPT-medium", "microsoft/DialoGPT-large"
+            # OpenAI
+            cls.OPENAI_OAUTH: [
+                "gpt-5.2-codex", "gpt-5.1-codex-max",
+                "gpt-5.1-codex-mini", "gpt-5.2"
             ],
-            cls.LITELLM: [
-                # LiteLLM proxies to various providers - models are dynamic
-                # Examples: bedrock/anthropic.claude-*, bedrock/amazon.nova-*, etc.
+            cls.OPENAI_PLATFORM: [
+                "gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"
             ],
-            cls.CLAUDE_CODE: [
-                # Claude Code CLI model shortcuts
-                "sonnet", "opus", "haiku"
-            ]
         }
     
     @classmethod
     def supports_embeddings(cls, provider_type: 'ProviderType') -> bool:
         """Check if provider type supports embedding generation"""
         return provider_type in {
-            cls.OPENAI,     # text-embedding-3-small, text-embedding-3-large
-            cls.OLLAMA,     # Various embedding models available
-            cls.OPENWEBUI,  # Depends on connected providers
-            cls.LMSTUDIO,   # Depends on loaded models
-            cls.LITELLM     # Can proxy embeddings to various providers
+            cls.LITELLM,          # Can proxy embeddings
+            cls.LMSTUDIO,         # Depends on loaded models
+            cls.OLLAMA,           # Various embedding models
+            cls.OPENWEBUI,        # Depends on connected providers
+            cls.OPENAI_PLATFORM,  # text-embedding-3-small/large
         }
     
     @classmethod
     def supports_tool_calls(cls, provider_type: 'ProviderType') -> bool:
         """Check if provider type supports function/tool calling"""
         return provider_type in {
-            cls.OPENAI,      # Full tool calling support
-            cls.ANTHROPIC,   # Tool calling support
-            cls.OLLAMA,      # Limited tool calling support
-            cls.OPENWEBUI,   # Depends on connected providers
-            cls.LMSTUDIO,    # Limited support
-            cls.LITELLM,     # Proxies tool calls to various providers
-            cls.CLAUDE_CODE  # Via CLI --allowedTools flag
+            cls.ANTHROPIC_CLI,       # Via CLI --allowedTools flag
+            cls.ANTHROPIC_OAUTH,     # Full tool calling support
+            cls.ANTHROPIC_PLATFORM,  # Full tool calling support
+            cls.LITELLM,             # Proxies tool calls
+            cls.LMSTUDIO,            # Limited support
+            cls.OLLAMA,              # Limited support
+            cls.OPENWEBUI,           # Depends on connected providers
+            cls.OPENAI_OAUTH,        # Full tool calling via Responses API
+            cls.OPENAI_PLATFORM,     # Full tool calling support
         }
     
     @classmethod
     def supports_streaming(cls, provider_type: 'ProviderType') -> bool:
         """Check if provider type supports streaming responses"""
         return provider_type in {
-            cls.OPENAI,     # Full streaming support
-            cls.ANTHROPIC,  # Full streaming support
-            cls.OLLAMA,     # Full streaming support
-            cls.OPENWEBUI,  # Full streaming support
-            cls.LMSTUDIO,   # Full streaming support
-            cls.LITELLM     # Full streaming support via proxy
-            # Note: CLAUDE_CODE does NOT support true streaming (CLI returns complete response)
+            # Note: ANTHROPIC_CLI does NOT support true streaming
+            cls.ANTHROPIC_OAUTH,
+            cls.ANTHROPIC_PLATFORM,
+            cls.LITELLM,
+            cls.LMSTUDIO,
+            cls.OLLAMA,
+            cls.OPENWEBUI,
+            cls.OPENAI_OAUTH,
+            cls.OPENAI_PLATFORM,
         }
     
     @classmethod
     def requires_api_key(cls, provider_type: 'ProviderType') -> bool:
-        """Check if provider type requires an API key"""
+        """Check if provider type requires an API key (vs OAuth or local)"""
         return provider_type in {
-            cls.OPENAI,     # Requires API key
-            cls.ANTHROPIC   # Requires API key
-            # Local providers (Ollama, LMStudio) typically don't require keys
-            # OpenWebUI may or may not depending on configuration
+            cls.ANTHROPIC_PLATFORM,
+            cls.OPENAI_PLATFORM,
+        }
+    
+    @classmethod
+    def uses_oauth(cls, provider_type: 'ProviderType') -> bool:
+        """Check if provider type uses OAuth authentication"""
+        return provider_type in {
+            cls.ANTHROPIC_OAUTH,
+            cls.OPENAI_OAUTH,
         }
     
     @property

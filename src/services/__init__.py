@@ -28,18 +28,6 @@ from .llm_providers.base_provider import (
 )
 from .llm_providers.provider_factory import get_provider_factory
 
-# SymGraph.ai integration
-from .symgraph_service import (
-    SymGraphService, symgraph_service,
-    SymGraphServiceError, SymGraphAuthError,
-    SymGraphNetworkError, SymGraphAPIError
-)
-from .models.symgraph_models import (
-    BinaryStats, Symbol, GraphNode, GraphEdge,
-    ConflictEntry, ConflictAction, PushScope,
-    SymbolExport, GraphExport, QueryResult,
-    PushResult, PullPreviewResult
-)
 
 __all__ = [
     # Legacy exports (for backward compatibility)
@@ -72,24 +60,4 @@ __all__ = [
     'RateLimitError',
     'NetworkError',
     'get_provider_factory',
-
-    # SymGraph.ai
-    'SymGraphService',
-    'symgraph_service',
-    'SymGraphServiceError',
-    'SymGraphAuthError',
-    'SymGraphNetworkError',
-    'SymGraphAPIError',
-    'BinaryStats',
-    'Symbol',
-    'GraphNode',
-    'GraphEdge',
-    'ConflictEntry',
-    'ConflictAction',
-    'PushScope',
-    'SymbolExport',
-    'GraphExport',
-    'QueryResult',
-    'PushResult',
-    'PullPreviewResult',
 ]

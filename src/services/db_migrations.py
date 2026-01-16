@@ -218,8 +218,8 @@ class DatabaseMigrations:
                     "content": content
                 }
                 
-                # Determine provider type (default to 'anthropic' for existing messages)
-                provider_type = "anthropic"  # Default for existing data
+                # Determine provider type (default to 'anthropic_platform' for existing messages)
+                provider_type = "anthropic_platform"  # Default for existing data
                 
                 # Determine message type
                 message_type = "standard"

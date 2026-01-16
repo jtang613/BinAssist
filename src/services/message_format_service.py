@@ -179,7 +179,7 @@ class AnthropicMessageAdapter(MessageFormatAdapter):
         return role, content_text, message_type
     
     def get_provider_type(self) -> ProviderType:
-        return ProviderType.ANTHROPIC
+        return ProviderType.ANTHROPIC_PLATFORM
 
 
 class OpenAIMessageAdapter(MessageFormatAdapter):
@@ -277,7 +277,7 @@ class OpenAIMessageAdapter(MessageFormatAdapter):
         return role, content_text, message_type
     
     def get_provider_type(self) -> ProviderType:
-        return ProviderType.OPENAI
+        return ProviderType.OPENAI_PLATFORM
 
 
 class LiteLLMMessageAdapter(OpenAIMessageAdapter):
@@ -287,11 +287,11 @@ class LiteLLMMessageAdapter(OpenAIMessageAdapter):
         return ProviderType.LITELLM
 
 
-class ClaudeCodeMessageAdapter(OpenAIMessageAdapter):
-    """Message format adapter for Claude Code CLI - uses OpenAI-like format"""
+class AnthropicCLIMessageAdapter(OpenAIMessageAdapter):
+    """Message format adapter for Anthropic CLI (Claude Code) - uses OpenAI-like format"""
 
     def get_provider_type(self) -> ProviderType:
-        return ProviderType.CLAUDE_CODE
+        return ProviderType.ANTHROPIC_CLI
 
 
 class OllamaMessageAdapter(MessageFormatAdapter):
@@ -383,14 +383,20 @@ class MessageFormatService:
     def __init__(self):
         """Initialize message format service with provider adapters"""
         openai_adapter = OpenAIMessageAdapter()
+        anthropic_adapter = AnthropicMessageAdapter()
         self._adapters: Dict[ProviderType, MessageFormatAdapter] = {
-            ProviderType.ANTHROPIC: AnthropicMessageAdapter(),
-            ProviderType.OPENAI: openai_adapter,
-            ProviderType.OPENWEBUI: openai_adapter,
+            # Anthropic providers (alphabetically)
+            ProviderType.ANTHROPIC_CLI: AnthropicCLIMessageAdapter(),
+            ProviderType.ANTHROPIC_OAUTH: anthropic_adapter,  # Same API format as Anthropic Platform
+            ProviderType.ANTHROPIC_PLATFORM: anthropic_adapter,
+            # Local/Proxy providers (alphabetically)
+            ProviderType.LITELLM: LiteLLMMessageAdapter(),
             ProviderType.LMSTUDIO: openai_adapter,
             ProviderType.OLLAMA: OllamaMessageAdapter(),
-            ProviderType.LITELLM: LiteLLMMessageAdapter(),
-            ProviderType.CLAUDE_CODE: ClaudeCodeMessageAdapter()
+            ProviderType.OPENWEBUI: openai_adapter,
+            # OpenAI providers (alphabetically)
+            ProviderType.OPENAI_OAUTH: openai_adapter,  # Responses API uses OpenAI-like format
+            ProviderType.OPENAI_PLATFORM: openai_adapter,
         }
     
     def get_adapter(self, provider_type: ProviderType) -> MessageFormatAdapter:

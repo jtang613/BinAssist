@@ -24,10 +24,6 @@ class SettingsTabView(QWidget):
     system_prompt_changed = Signal(str)
     database_path_changed = Signal(str, str)  # path_type, path_value
 
-    # SymGraph.ai signals
-    symgraph_api_url_changed = Signal(str)
-    symgraph_api_key_changed = Signal(str)
-    
     def __init__(self):
         super().__init__()
         self.setup_ui()
@@ -43,7 +39,6 @@ class SettingsTabView(QWidget):
         # Create all sections
         self.create_llm_provider_section(scroll_layout)
         self.create_mcp_provider_section(scroll_layout)
-        self.create_symgraph_section(scroll_layout)
         self.create_system_prompt_section(scroll_layout)
         self.create_database_paths_section(scroll_layout)
         
@@ -104,6 +99,12 @@ class SettingsTabView(QWidget):
         llm_buttons_layout.addWidget(self.llm_edit_button)
         llm_buttons_layout.addWidget(self.llm_delete_button)
         llm_buttons_layout.addWidget(self.llm_test_button)
+
+        # Status label for test results
+        self.llm_test_status = QLabel()
+        self.llm_test_status.setFixedWidth(20)
+        llm_buttons_layout.addWidget(self.llm_test_status)
+
         llm_buttons_layout.addStretch()
         
         layout.addLayout(llm_buttons_layout)
@@ -181,6 +182,12 @@ class SettingsTabView(QWidget):
         mcp_buttons_layout.addWidget(self.mcp_edit_button)
         mcp_buttons_layout.addWidget(self.mcp_delete_button)
         mcp_buttons_layout.addWidget(self.mcp_test_button)
+
+        # Status label for test results
+        self.mcp_test_status = QLabel()
+        self.mcp_test_status.setFixedWidth(20)
+        mcp_buttons_layout.addWidget(self.mcp_test_status)
+
         mcp_buttons_layout.addStretch()
         
         layout.addLayout(mcp_buttons_layout)
@@ -188,71 +195,55 @@ class SettingsTabView(QWidget):
         group_box.setLayout(layout)
         parent_layout.addWidget(group_box)
 
-    def create_symgraph_section(self, parent_layout):
-        """Create the SymGraph.ai settings section"""
-        group_box = QGroupBox("SymGraph.ai")
-        layout = QVBoxLayout()
+    def _set_test_status(self, label: QLabel, status: str, tooltip: str = ""):
+        """Set a test status indicator label
 
-        # API URL
-        url_layout = QHBoxLayout()
-        url_layout.addWidget(QLabel("API URL:"))
-        self.symgraph_url_field = QLineEdit()
-        self.symgraph_url_field.setPlaceholderText("https://api.symgraph.ai")
-        self.symgraph_url_field.setToolTip("SymGraph.ai API URL (for self-hosted instances)")
-        self.symgraph_url_field.editingFinished.connect(
-            lambda: self.symgraph_api_url_changed.emit(self.symgraph_url_field.text())
-        )
-        url_layout.addWidget(self.symgraph_url_field, 1)
-        layout.addLayout(url_layout)
+        Args:
+            label: The QLabel to update
+            status: One of 'success', 'failure', 'testing', or 'clear'
+            tooltip: Optional tooltip text
+        """
+        if status == 'success':
+            label.setText("✅")
+            label.setStyleSheet("color: green;")
+        elif status == 'failure':
+            label.setText("❌")
+            label.setStyleSheet("color: red;")
+        elif status == 'testing':
+            label.setText("...")
+            label.setStyleSheet("color: gray;")
+        else:  # clear
+            label.setText("")
+            label.setStyleSheet("")
 
-        # API Key
-        key_layout = QHBoxLayout()
-        key_layout.addWidget(QLabel("API Key:"))
-        self.symgraph_key_field = QLineEdit()
-        self.symgraph_key_field.setPlaceholderText("sg_xxxxx")
-        self.symgraph_key_field.setEchoMode(QLineEdit.Password)
-        self.symgraph_key_field.setToolTip("Your SymGraph.ai API key (required for push/pull operations)")
-        self.symgraph_key_field.editingFinished.connect(
-            lambda: self.symgraph_api_key_changed.emit(self.symgraph_key_field.text())
-        )
-        key_layout.addWidget(self.symgraph_key_field, 1)
-
-        # Show/hide key button
-        self.symgraph_key_toggle = QPushButton("Show")
-        self.symgraph_key_toggle.setMaximumWidth(60)
-        self.symgraph_key_toggle.clicked.connect(self._toggle_symgraph_key_visibility)
-        key_layout.addWidget(self.symgraph_key_toggle)
-
-        layout.addLayout(key_layout)
-
-        # Info label
-        info_label = QLabel(
-            "SymGraph.ai provides cloud-based symbol and graph data sharing. "
-            "Query operations are free; push/pull require an API key."
-        )
-        info_label.setWordWrap(True)
-        info_label.setStyleSheet("color: gray; font-size: 11px;")
-        layout.addWidget(info_label)
-
-        group_box.setLayout(layout)
-        parent_layout.addWidget(group_box)
-
-    def _toggle_symgraph_key_visibility(self):
-        """Toggle visibility of the SymGraph API key field"""
-        if self.symgraph_key_field.echoMode() == QLineEdit.Password:
-            self.symgraph_key_field.setEchoMode(QLineEdit.Normal)
-            self.symgraph_key_toggle.setText("Hide")
+        if tooltip:
+            label.setToolTip(tooltip)
         else:
-            self.symgraph_key_field.setEchoMode(QLineEdit.Password)
-            self.symgraph_key_toggle.setText("Show")
+            label.setToolTip("")
 
-    def set_symgraph_api_url(self, url: str):
-        """Set the SymGraph.ai API URL field"""
-        self.symgraph_url_field.setText(url)
+    def set_llm_test_status(self, status: str, tooltip: str = ""):
+        """Set the LLM Provider test status indicator"""
+        self._set_test_status(self.llm_test_status, status, tooltip)
 
-    def set_symgraph_api_key(self, key: str):
-        """Set the SymGraph.ai API key field"""
-        self.symgraph_key_field.setText(key)
+    def set_llm_test_enabled(self, enabled: bool):
+        """Enable or disable the LLM test button"""
+        self.llm_test_button.setEnabled(enabled)
+        if not enabled:
+            self.llm_test_button.setText("Testing...")
+        else:
+            self.llm_test_button.setText("Test")
+
+    def set_mcp_test_status(self, status: str, tooltip: str = ""):
+        """Set the MCP Server test status indicator"""
+        self._set_test_status(self.mcp_test_status, status, tooltip)
+
+    def set_mcp_test_enabled(self, enabled: bool):
+        """Enable or disable the MCP test button"""
+        self.mcp_test_button.setEnabled(enabled)
+        if not enabled:
+            self.mcp_test_button.setText("Testing...")
+        else:
+            self.mcp_test_button.setText("Test")
 
     def create_system_prompt_section(self, parent_layout):
         group_box = QGroupBox("System Prompt")

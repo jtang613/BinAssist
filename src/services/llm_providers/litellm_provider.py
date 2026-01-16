@@ -14,7 +14,7 @@ try:
 except ImportError:
     raise ImportError("openai package not available. Install with: pip install openai")
 
-from .openai_provider import OpenAIProvider
+from .openai_platform_api_provider import OpenAIPlatformApiProvider
 from .base_provider import APIProviderError, AuthenticationError, RateLimitError, NetworkError
 from ..models.llm_models import (
     ChatMessage, ChatRequest, ChatResponse, ToolCall, Usage, MessageRole
@@ -40,7 +40,7 @@ except ImportError:
     log = MockLog()
 
 
-class LiteLLMProvider(OpenAIProvider):
+class LiteLLMProvider(OpenAIPlatformApiProvider):
     """
     LiteLLM provider for proxy access to AWS Bedrock and other models.
 
@@ -49,7 +49,7 @@ class LiteLLMProvider(OpenAIProvider):
     2. Different thinking block message format for Bedrock Anthropic models
     3. Model-family-specific parameter handling
 
-    Extends OpenAIProvider since LiteLLM uses OpenAI-compatible API.
+    Extends OpenAIPlatformApiProvider since LiteLLM uses OpenAI-compatible API.
     """
 
     def __init__(self, config: Dict[str, Any]):

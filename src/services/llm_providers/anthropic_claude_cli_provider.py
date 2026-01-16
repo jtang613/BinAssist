@@ -42,7 +42,7 @@ except ImportError:
     log = MockLog()
 
 
-class ClaudeCodeProvider(BaseLLMProvider):
+class AnthropicClaudeCliProvider(BaseLLMProvider):
     """
     Claude Code CLI provider implementation.
 
@@ -353,7 +353,7 @@ class ClaudeCodeProvider(BaseLLMProvider):
                     for tc in tool_calls
                 ] if tool_calls else [],
                 "model": self.model,
-                "provider": "claude_code"
+                "provider": "anthropic_cli"
             }
             native_message_callback(native_message, self.get_provider_type())
 
@@ -416,7 +416,7 @@ class ClaudeCodeProvider(BaseLLMProvider):
                     for tc in tool_calls
                 ] if tool_calls else [],
                 "model": self.model,
-                "provider": "claude_code",
+                "provider": "anthropic_cli",
                 "streaming": True
             }
             native_message_callback(native_message, self.get_provider_type())
@@ -504,7 +504,7 @@ class ClaudeCodeProvider(BaseLLMProvider):
 
     def get_provider_type(self) -> ProviderType:
         """Get the provider type"""
-        return ProviderType.CLAUDE_CODE
+        return ProviderType.ANTHROPIC_CLI
 
     def validate_config(self):
         """Validate provider configuration - relaxed for CLI-based provider"""
@@ -555,13 +555,13 @@ class ClaudeCodeProvider(BaseLLMProvider):
 from .provider_factory import ProviderFactory
 from ..models.provider_types import ProviderType
 
-class ClaudeCodeProviderFactory(ProviderFactory):
-    """Factory for creating Claude Code provider instances"""
+class AnthropicClaudeCliProviderFactory(ProviderFactory):
+    """Factory for creating Anthropic Claude CLI provider instances"""
 
-    def create_provider(self, config: Dict[str, Any]) -> ClaudeCodeProvider:
-        """Create Claude Code provider instance"""
-        return ClaudeCodeProvider(config)
+    def create_provider(self, config: Dict[str, Any]) -> AnthropicClaudeCliProvider:
+        """Create Anthropic Claude CLI provider instance"""
+        return AnthropicClaudeCliProvider(config)
 
     def supports_provider_type(self, provider_type: ProviderType) -> bool:
         """Check if this factory supports the provider type"""
-        return provider_type == ProviderType.CLAUDE_CODE
+        return provider_type == ProviderType.ANTHROPIC_CLI

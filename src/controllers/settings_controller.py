@@ -24,7 +24,7 @@ from ..services.mcp_client_service import MCPClientService
 from ..services.models.mcp_models import MCPServerConfig, MCPTestResult
 from ..services import (
     get_service_registry, LLMService, ChatMessage, MessageRole,
-    LLMProviderError, APIProviderError, AuthenticationError, 
+    LLMProviderError, APIProviderError, AuthenticationError,
     RateLimitError, NetworkError
 )
 from ..views.settings_tab_view import SettingsTabView
@@ -264,6 +264,7 @@ class ProviderDialog(QDialog):
     def __init__(self, parent=None, provider_data=None):
         super().__init__(parent)
         self.provider_data = provider_data
+        self._pending_pkce_verifier = None  # For OAuth PKCE flow
         self.setup_ui()
         
         if provider_data:
@@ -272,7 +273,7 @@ class ProviderDialog(QDialog):
     def setup_ui(self):
         self.setWindowTitle("LLM Provider" if not self.provider_data else f"Edit {self.provider_data.get('name', 'Provider')}")
         self.setModal(True)
-        self.resize(400, 350)
+        self.resize(450, 400)
         
         layout = QVBoxLayout()
         
@@ -308,11 +309,34 @@ class ProviderDialog(QDialog):
         self.max_tokens_spin.setValue(4096)
         layout.addWidget(self.max_tokens_spin)
         
-        # API Key
-        layout.addWidget(QLabel("API Key:"))
+        # API Key / OAuth Token (dynamic label)
+        self.api_key_label = QLabel("API Key:")
+        layout.addWidget(self.api_key_label)
+        
+        # API Key field with optional Authenticate button
+        key_layout = QHBoxLayout()
         self.key_edit = QLineEdit()
         self.key_edit.setEchoMode(QLineEdit.Password)
-        layout.addWidget(self.key_edit)
+        key_layout.addWidget(self.key_edit)
+        
+        # Authenticate button (only visible for OAuth providers)
+        self.authenticate_button = QPushButton("Authenticate")
+        self.authenticate_button.setToolTip("Open browser to authenticate with Claude Pro/Max")
+        self.authenticate_button.clicked.connect(self.on_authenticate_clicked)
+        self.authenticate_button.setVisible(False)
+        key_layout.addWidget(self.authenticate_button)
+        
+        layout.addLayout(key_layout)
+        
+        # OAuth note (only visible for OAuth providers)
+        self.oauth_note_label = QLabel(
+            "Click 'Authenticate' to sign in with your Claude Pro/Max subscription.\n"
+            "The OAuth token will be stored as JSON in the field above."
+        )
+        self.oauth_note_label.setStyleSheet("color: #666; font-style: italic;")
+        self.oauth_note_label.setWordWrap(True)
+        layout.addWidget(self.oauth_note_label)
+        self.oauth_note_label.setVisible(False)
         
         # Disable TLS
         self.disable_tls_check = QCheckBox("Disable TLS Verification")
@@ -367,7 +391,7 @@ class ProviderDialog(QDialog):
             self.name_edit.setText(self.provider_data.get('name', ''))
             
             # Set provider type
-            provider_type_value = self.provider_data.get('provider_type', 'openai')
+            provider_type_value = self.provider_data.get('provider_type', 'openai_platform')
             index = self.provider_type_combo.findData(provider_type_value)
             if index >= 0:
                 self.provider_type_combo.setCurrentIndex(index)
@@ -420,8 +444,37 @@ class ProviderDialog(QDialog):
                     self.update_litellm_metadata()
 
                 # Show/hide Claude Code note based on provider type
-                is_claude_code = provider_type == ProviderType.CLAUDE_CODE
+                is_claude_code = provider_type == ProviderType.ANTHROPIC_CLI
                 self.claude_code_note_label.setVisible(is_claude_code)
+
+                # Show/hide OAuth elements based on provider type
+                is_anthropic_oauth = provider_type == ProviderType.ANTHROPIC_OAUTH
+                is_codex_oauth = provider_type == ProviderType.OPENAI_OAUTH
+                is_oauth = is_anthropic_oauth or is_codex_oauth
+                self.authenticate_button.setVisible(is_oauth)
+                self.oauth_note_label.setVisible(is_oauth)
+                
+                # Update API key label, echo mode, and note text for OAuth
+                if is_anthropic_oauth:
+                    self.api_key_label.setText("OAuth Token (JSON):")
+                    self.key_edit.setEchoMode(QLineEdit.Normal)  # Show JSON for OAuth
+                    self.key_edit.setPlaceholderText('Click "Authenticate" to sign in')
+                    self.oauth_note_label.setText(
+                        "Click 'Authenticate' to sign in with your Claude Pro/Max subscription.\n"
+                        "The OAuth token will be stored as JSON in the field above."
+                    )
+                elif is_codex_oauth:
+                    self.api_key_label.setText("OAuth Token (JSON):")
+                    self.key_edit.setEchoMode(QLineEdit.Normal)  # Show JSON for OAuth
+                    self.key_edit.setPlaceholderText('Click "Authenticate" to sign in with ChatGPT')
+                    self.oauth_note_label.setText(
+                        "Click 'Authenticate' to sign in with your ChatGPT Pro/Plus subscription.\n"
+                        "After authorization, copy the code from the browser URL bar."
+                    )
+                else:
+                    self.api_key_label.setText("API Key:")
+                    self.key_edit.setEchoMode(QLineEdit.Password)  # Hide API keys
+                    self.key_edit.setPlaceholderText('')
 
             except ValueError:
                 pass  # Invalid provider type, ignore
@@ -473,6 +526,467 @@ class ProviderDialog(QDialog):
             return 'meta'
 
         return 'unknown'
+
+    def on_authenticate_clicked(self):
+        """Handle OAuth authentication button click"""
+        from PySide6.QtWidgets import QMessageBox, QInputDialog
+        import asyncio
+        
+        # Determine which OAuth provider is selected
+        current_data = self.provider_type_combo.currentData()
+        try:
+            provider_type = ProviderType(current_data)
+        except ValueError:
+            QMessageBox.critical(self, "Error", "Invalid provider type selected.")
+            return
+        
+        is_codex = provider_type == ProviderType.OPENAI_OAUTH
+        is_anthropic = provider_type == ProviderType.ANTHROPIC_OAUTH
+        
+        if is_codex:
+            self._authenticate_codex()
+        elif is_anthropic:
+            self._authenticate_anthropic()
+        else:
+            QMessageBox.warning(self, "Not Supported", 
+                "OAuth authentication is not supported for this provider type.")
+    
+    def _authenticate_anthropic(self):
+        """Handle Anthropic (Claude) OAuth authentication with automatic callback"""
+        from PySide6.QtWidgets import QMessageBox, QProgressDialog
+        from PySide6.QtCore import Qt
+        
+        try:
+            from ..services.llm_providers.oauth_worker import AnthropicOAuthWorker
+            
+            log.log_info("Starting Anthropic OAuth authentication with automatic callback")
+            
+            # Track authentication state to prevent race condition with cancel handler
+            self._oauth_auth_completed = False
+            
+            # Show progress dialog
+            self._oauth_progress = QProgressDialog(
+                "Waiting for authentication...\n\n"
+                "Please complete sign-in in your browser.\n"
+                "This dialog will close automatically when done.",
+                "Use Manual Entry",
+                0, 0,  # Indeterminate progress
+                self
+            )
+            self._oauth_progress.setWindowTitle("Claude Authentication")
+            self._oauth_progress.setWindowModality(Qt.WindowModal)
+            self._oauth_progress.setMinimumDuration(0)
+            self._oauth_progress.setMinimumWidth(400)
+            
+            # Create and configure worker
+            self._oauth_worker = AnthropicOAuthWorker(timeout=300)
+            self._oauth_worker.authentication_complete.connect(self._on_anthropic_auth_complete)
+            self._oauth_worker.authentication_failed.connect(self._on_anthropic_auth_failed)
+            self._oauth_worker.status_update.connect(
+                lambda msg: self._oauth_progress.setLabelText(msg) if self._oauth_progress else None
+            )
+            
+            # Handle cancel button - request cancellation, let worker signal handle the rest
+            def on_cancel():
+                # Check if auth already completed successfully
+                if getattr(self, '_oauth_auth_completed', False):
+                    return  # Auth succeeded, don't show manual dialog
+                
+                # Request cancellation - the worker will emit authentication_failed("cancelled")
+                # which will trigger _on_anthropic_auth_failed to show manual dialog
+                if hasattr(self, '_oauth_worker') and self._oauth_worker:
+                    self._oauth_worker.cancel()
+            
+            self._oauth_progress.canceled.connect(on_cancel)
+            
+            # Clean up worker when done
+            self._oauth_worker.finished.connect(self._oauth_worker.deleteLater)
+            
+            # Start the worker and show dialog
+            self._oauth_worker.start()
+            self._oauth_progress.show()
+            
+        except ImportError as e:
+            log.log_error(f"OAuth import error: {e}")
+            self._authenticate_anthropic_manual()
+        except Exception as e:
+            log.log_error(f"OAuth authentication error: {e}")
+            self._authenticate_anthropic_manual()
+    
+    def _on_anthropic_auth_complete(self, result: dict):
+        """Handle successful Anthropic OAuth authentication"""
+        from PySide6.QtWidgets import QMessageBox
+        
+        # Mark authentication as completed to prevent cancel handler from firing
+        self._oauth_auth_completed = True
+        
+        # Close progress dialog (this may trigger canceled signal, but we've set the flag)
+        if hasattr(self, '_oauth_progress') and self._oauth_progress:
+            self._oauth_progress.close()
+            self._oauth_progress = None
+        
+        # Store credentials
+        credentials_json = result.get('credentials_json', '')
+        self.key_edit.setText(credentials_json)
+        
+        log.log_info("OAuth authentication successful - token stored in API key field")
+        QMessageBox.information(self, "Authentication Successful", 
+            "Successfully authenticated with Claude Pro/Max!\n\n"
+            "The OAuth token has been stored. Click OK to save the provider.")
+    
+    def _on_anthropic_auth_failed(self, error: str):
+        """Handle failed Anthropic OAuth authentication"""
+        from PySide6.QtWidgets import QMessageBox
+        
+        # Mark as completed (even though failed) to prevent cancel handler race
+        self._oauth_auth_completed = True
+        
+        # Close progress dialog
+        if hasattr(self, '_oauth_progress') and self._oauth_progress:
+            self._oauth_progress.close()
+            self._oauth_progress = None
+        
+        # Handle different error types - Anthropic likely rejects localhost, so always offer manual
+        if error == "cancelled":
+            # User cancelled - show manual entry dialog
+            log.log_info("User cancelled automatic OAuth, showing manual entry")
+            self._authenticate_anthropic_manual()
+            return
+        elif error == "timeout":
+            reply = QMessageBox.question(
+                self,
+                "Authentication Timeout",
+                "The authentication request timed out.\n\n"
+                "Would you like to try manual code entry instead?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            if reply == QMessageBox.Yes:
+                self._authenticate_anthropic_manual()
+        else:
+            # For any error (including redirect rejection), fall back to manual
+            log.log_info(f"Anthropic OAuth failed ({error}), falling back to manual entry")
+            self._authenticate_anthropic_manual()
+    
+    def _authenticate_anthropic_manual(self):
+        """Manual fallback for Anthropic OAuth authentication using hosted callback"""
+        from PySide6.QtWidgets import QMessageBox, QInputDialog
+        import asyncio
+        
+        try:
+            from ..services.llm_providers.oauth_utils import (
+                generate_pkce,
+                generate_state,
+                open_auth_browser,
+                exchange_code_for_tokens,
+                create_credentials_json
+            )
+            
+            # Generate PKCE codes and state
+            verifier, challenge = generate_pkce()
+            state = generate_state()
+            self._pending_pkce_verifier = verifier
+            self._pending_oauth_state = state
+            
+            # Open browser for authorization (uses Anthropic's hosted callback)
+            auth_url = open_auth_browser(challenge, state)
+            log.log_info(f"Opened browser for Anthropic OAuth authorization (manual mode)")
+            
+            # Show dialog to get authorization code from user
+            # Note: For manual flow, the user will get code#state format from the hosted callback
+            code, ok = QInputDialog.getText(
+                self,
+                "OAuth Authentication (Manual)",
+                "A browser window has been opened for Claude Pro/Max authentication.\n\n"
+                "1. Sign in to your Anthropic account in the browser\n"
+                "2. Authorize BinAssist to access your account\n"
+                "3. Copy the authorization code shown in the browser\n"
+                "   (Format: code#state or just the code)\n"
+                "4. Paste it below:\n\n"
+                "Authorization Code:"
+            )
+            
+            if not ok or not code.strip():
+                log.log_info("OAuth authentication cancelled by user")
+                QMessageBox.information(self, "Authentication Cancelled", 
+                    "Authentication was cancelled.")
+                return
+            
+            # Parse code - may be in format "code#state" from hosted callback
+            code_input = code.strip()
+            if "#" in code_input:
+                auth_code, returned_state = code_input.split("#", 1)
+            else:
+                auth_code = code_input
+                returned_state = state  # Use original state if not in input
+            
+            # Exchange code for tokens
+            log.log_info("Exchanging authorization code for tokens...")
+            
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                tokens = loop.run_until_complete(
+                    exchange_code_for_tokens(auth_code, verifier, returned_state)
+                )
+            finally:
+                loop.close()
+            
+            if tokens.get("error"):
+                error_msg = tokens.get('error_description', tokens['error'])
+                log.log_error(f"OAuth token exchange failed: {error_msg}")
+                QMessageBox.critical(self, "Authentication Failed", 
+                    f"Token exchange failed: {error_msg}")
+                return
+            
+            # Create JSON credentials and store
+            credentials_json = create_credentials_json(tokens)
+            self.key_edit.setText(credentials_json)
+            
+            log.log_info("OAuth authentication successful - token stored in API key field")
+            QMessageBox.information(self, "Authentication Successful", 
+                "Successfully authenticated with Claude Pro/Max!\n\n"
+                "The OAuth token has been stored. Click OK to save the provider.")
+            
+        except ImportError as e:
+            log.log_error(f"OAuth import error: {e}")
+            QMessageBox.critical(self, "Missing Dependencies", 
+                f"OAuth authentication requires additional packages.\n\n"
+                f"Please install: pip install aiohttp\n\n"
+                f"Error: {e}")
+        except Exception as e:
+            log.log_error(f"OAuth authentication error: {e}")
+            QMessageBox.critical(self, "Authentication Error", 
+                f"An error occurred during authentication:\n\n{e}")
+    
+    def _authenticate_codex(self):
+        """Handle OpenAI Codex (ChatGPT) OAuth authentication with automatic callback"""
+        from PySide6.QtWidgets import QMessageBox, QProgressDialog
+        from PySide6.QtCore import Qt
+        
+        try:
+            from ..services.llm_providers.oauth_worker import OpenAIOAuthWorker
+            
+            log.log_info("Starting OpenAI OAuth authentication with automatic callback")
+            
+            # Track authentication state to prevent race condition with cancel handler
+            self._oauth_auth_completed = False
+            
+            # Show progress dialog
+            self._oauth_progress = QProgressDialog(
+                "Waiting for authentication...\n\n"
+                "Please complete sign-in in your browser.\n"
+                "This dialog will close automatically when done.",
+                "Use Manual Entry",
+                0, 0,  # Indeterminate progress
+                self
+            )
+            self._oauth_progress.setWindowTitle("OpenAI Authentication")
+            self._oauth_progress.setWindowModality(Qt.WindowModal)
+            self._oauth_progress.setMinimumDuration(0)
+            self._oauth_progress.setMinimumWidth(400)
+            
+            # Create and configure worker
+            self._oauth_worker = OpenAIOAuthWorker(timeout=300)
+            self._oauth_worker.authentication_complete.connect(self._on_codex_auth_complete)
+            self._oauth_worker.authentication_failed.connect(self._on_codex_auth_failed)
+            self._oauth_worker.status_update.connect(
+                lambda msg: self._oauth_progress.setLabelText(msg) if self._oauth_progress else None
+            )
+            
+            # Handle cancel button - request cancellation, let worker signal handle the rest
+            def on_cancel():
+                # Check if auth already completed successfully
+                if getattr(self, '_oauth_auth_completed', False):
+                    return  # Auth succeeded, don't show manual dialog
+                
+                # Request cancellation - the worker will emit authentication_failed("cancelled")
+                # which will trigger _on_codex_auth_failed to show manual dialog
+                if hasattr(self, '_oauth_worker') and self._oauth_worker:
+                    self._oauth_worker.cancel()
+            
+            self._oauth_progress.canceled.connect(on_cancel)
+            
+            # Clean up worker when done
+            self._oauth_worker.finished.connect(self._oauth_worker.deleteLater)
+            
+            # Start the worker and show dialog
+            self._oauth_worker.start()
+            self._oauth_progress.show()
+            
+        except ImportError as e:
+            log.log_error(f"OAuth import error: {e}")
+            self._authenticate_codex_manual()
+        except Exception as e:
+            log.log_error(f"OAuth authentication error: {e}")
+            self._authenticate_codex_manual()
+    
+    def _on_codex_auth_complete(self, result: dict):
+        """Handle successful OpenAI OAuth authentication"""
+        from PySide6.QtWidgets import QMessageBox
+        
+        # Mark authentication as completed to prevent cancel handler from firing
+        self._oauth_auth_completed = True
+        
+        # Close progress dialog (this may trigger canceled signal, but we've set the flag)
+        if hasattr(self, '_oauth_progress') and self._oauth_progress:
+            self._oauth_progress.close()
+            self._oauth_progress = None
+        
+        # Store credentials
+        credentials_json = result.get('credentials_json', '')
+        self.key_edit.setText(credentials_json)
+        
+        log.log_info("OAuth authentication successful - token stored in API key field")
+        QMessageBox.information(self, "Authentication Successful", 
+            "Successfully authenticated with ChatGPT Pro/Plus!\n\n"
+            "The OAuth token has been stored. Click OK to save the provider.")
+    
+    def _on_codex_auth_failed(self, error: str):
+        """Handle failed OpenAI OAuth authentication"""
+        from PySide6.QtWidgets import QMessageBox
+        
+        # Mark as completed (even though failed) to prevent cancel handler race
+        self._oauth_auth_completed = True
+        
+        # Close progress dialog
+        if hasattr(self, '_oauth_progress') and self._oauth_progress:
+            self._oauth_progress.close()
+            self._oauth_progress = None
+        
+        # Handle different error types
+        if error == "cancelled":
+            # User cancelled - show manual entry dialog
+            log.log_info("User cancelled automatic OAuth, showing manual entry")
+            self._authenticate_codex_manual()
+            return
+        elif error == "timeout":
+            reply = QMessageBox.question(
+                self,
+                "Authentication Timeout",
+                "The authentication request timed out.\n\n"
+                "Would you like to try manual code entry instead?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            if reply == QMessageBox.Yes:
+                self._authenticate_codex_manual()
+        elif error.startswith("server_error:"):
+            log.log_info("Falling back to manual entry due to server error")
+            self._authenticate_codex_manual()
+        else:
+            # For other errors, offer manual fallback
+            reply = QMessageBox.question(
+                self,
+                "Authentication Error",
+                f"An error occurred during authentication:\n\n{error}\n\n"
+                "Would you like to try manual code entry instead?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            if reply == QMessageBox.Yes:
+                self._authenticate_codex_manual()
+    
+    def _authenticate_codex_manual(self):
+        """Manual fallback for OpenAI Codex OAuth authentication"""
+        from PySide6.QtWidgets import QMessageBox, QInputDialog
+        import asyncio
+        
+        try:
+            from ..services.llm_providers.oauth_codex_utils import (
+                generate_pkce,
+                generate_state,
+                open_auth_browser,
+                exchange_code_for_tokens,
+                create_credentials_json,
+                extract_account_id
+            )
+            
+            # Generate PKCE codes and state
+            verifier, challenge = generate_pkce()
+            state = generate_state()
+            self._pending_pkce_verifier = verifier
+            
+            # Open browser for authorization
+            auth_url = open_auth_browser(challenge, state)
+            log.log_info(f"Opened browser for OpenAI Codex OAuth authorization (manual mode)")
+            
+            # Show dialog to get authorization code from user
+            code, ok = QInputDialog.getText(
+                self,
+                "OAuth Authentication (Manual)",
+                "A browser window has been opened for ChatGPT Pro/Plus authentication.\n\n"
+                "1. Sign in to your OpenAI/ChatGPT account in the browser\n"
+                "2. Authorize BinAssist to access your account\n"
+                "3. After authorization, the browser will show an error page\n"
+                "   (This is expected - the redirect URL won't load)\n"
+                "4. Look at the browser's URL bar - it will look like:\n"
+                "   http://localhost:1455/auth/callback?code=XXXX&state=YYYY\n"
+                "5. Copy the ENTIRE URL or just the 'code' value\n"
+                "6. Paste it below:\n\n"
+                "Authorization Code or Full URL:"
+            )
+            
+            if not ok or not code.strip():
+                log.log_info("OAuth authentication cancelled by user")
+                QMessageBox.information(self, "Authentication Cancelled", 
+                    "Authentication was cancelled.")
+                return
+            
+            # Extract code if user pasted full URL
+            code = code.strip()
+            if code.startswith("http"):
+                from urllib.parse import urlparse, parse_qs
+                try:
+                    parsed = urlparse(code)
+                    params = parse_qs(parsed.query)
+                    if "code" in params:
+                        code = params["code"][0]
+                        log.log_info("Extracted authorization code from URL")
+                except Exception as e:
+                    log.log_warn(f"Failed to parse URL, using input as-is: {e}")
+            
+            # Exchange code for tokens
+            log.log_info("Exchanging authorization code for tokens...")
+            
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                tokens = loop.run_until_complete(
+                    exchange_code_for_tokens(code, verifier)
+                )
+            finally:
+                loop.close()
+            
+            if tokens.get("error"):
+                error_msg = tokens.get('error_description', tokens['error'])
+                log.log_error(f"OAuth token exchange failed: {error_msg}")
+                QMessageBox.critical(self, "Authentication Failed", 
+                    f"Token exchange failed: {error_msg}")
+                return
+            
+            # Extract account ID
+            account_id = extract_account_id(tokens)
+            
+            # Create JSON credentials and store
+            credentials_json = create_credentials_json(tokens, account_id)
+            self.key_edit.setText(credentials_json)
+            
+            log.log_info("OAuth authentication successful - token stored in API key field")
+            QMessageBox.information(self, "Authentication Successful", 
+                "Successfully authenticated with ChatGPT Pro/Plus!\n\n"
+                "The OAuth token has been stored. Click OK to save the provider.")
+            
+        except ImportError as e:
+            log.log_error(f"OAuth import error: {e}")
+            QMessageBox.critical(self, "Missing Dependencies", 
+                f"OAuth authentication requires additional packages.\n\n"
+                f"Please install: pip install aiohttp\n\n"
+                f"Error: {e}")
+        except Exception as e:
+            log.log_error(f"OAuth authentication error: {e}")
+            QMessageBox.critical(self, "Authentication Error", 
+                f"An error occurred during authentication:\n\n{e}")
 
 
 class MCPProviderDialog(QDialog):
@@ -607,9 +1121,6 @@ class SettingsController(QObject):
         self.view.system_prompt_changed.connect(self.update_system_prompt)
         self.view.database_path_changed.connect(self.update_database_path)
 
-        # SymGraph.ai signals
-        self.view.symgraph_api_url_changed.connect(self.update_symgraph_api_url)
-        self.view.symgraph_api_key_changed.connect(self.update_symgraph_api_key)
     
     def load_initial_data(self):
         """Load initial data from service into view"""
@@ -628,7 +1139,7 @@ class SettingsController(QObject):
                 self.view.add_llm_provider(
                     provider['name'],
                     provider['model'],
-                    provider.get('provider_type', 'openai'),
+                    provider.get('provider_type', 'openai_platform'),
                     provider['url'],
                     provider['max_tokens'],
                     provider['api_key'],
@@ -677,9 +1188,6 @@ class SettingsController(QObject):
             self.view.rlhf_db_path.setText(self.service.get_setting('rlhf_db_path', ''))
             self.view.rag_index_path.setText(self.service.get_setting('rag_index_path', ''))
 
-            # Load SymGraph.ai settings
-            self.view.set_symgraph_api_url(self.service.get_symgraph_api_url())
-            self.view.set_symgraph_api_key(self.service.get_symgraph_api_key())
 
         except Exception as e:
             self.show_error("Failed to load settings", str(e))
@@ -697,7 +1205,7 @@ class SettingsController(QObject):
                 data = dialog.get_provider_data()
 
                 # Validate required fields (URL not required for CLI-based providers)
-                is_cli_provider = data.get('provider_type') == 'claude_code'
+                is_cli_provider = data.get('provider_type') == 'anthropic_cli'
                 if not data['name'] or not data['model']:
                     self.show_error("Validation Error", "Name and Model are required fields.")
                     return
@@ -744,7 +1252,7 @@ class SettingsController(QObject):
                 data = dialog.get_provider_data()
 
                 # Validate required fields (URL not required for CLI-based providers)
-                is_cli_provider = data.get('provider_type') == 'claude_code'
+                is_cli_provider = data.get('provider_type') == 'anthropic_cli'
                 if not data['name'] or not data['model']:
                     self.show_error("Validation Error", "Name and Model are required fields.")
                     return
@@ -802,46 +1310,47 @@ class SettingsController(QObject):
             providers = self.service.get_llm_providers()
             if row >= len(providers):
                 return
-            
+
             provider = providers[row]
-            
+
             # Validate that provider has required fields
             # Some providers don't require API keys (Ollama runs locally, Claude Code uses CLI auth)
             provider_type = provider.get('provider_type', '')
-            requires_key = provider_type not in ('ollama', 'claude_code')
+            requires_key = provider_type not in ('ollama', 'anthropic_cli', 'anthropic_oauth', 'openai_oauth')
             if not provider.get('api_key') and requires_key:
-                self.show_error("Test Failed",
+                self.view.set_llm_test_status('failure',
                     f"Provider '{provider['name']}' has no API key configured. "
                     "Please edit the provider and add an API key before testing.")
                 return
-            
-            # Disable the test button to prevent multiple concurrent tests
-            self.view.llm_test_button.setEnabled(False)
-            self.view.llm_test_button.setText("Testing...")
-            
+
+            # Note: OAuth providers (anthropic_oauth, openai_oauth) authenticate via the
+            # Provider Edit dialog's Authenticate button. No special handling needed here.
+
+            # Disable the test button and show testing state
+            self.view.set_llm_test_enabled(False)
+            self.view.set_llm_test_status('testing', f"Testing {provider['name']}...")
+
             # Create and start the test worker
             self.test_worker = ProviderTestWorker(provider)
             self.test_worker.test_completed.connect(self.on_provider_test_completed)
             self.test_worker.finished.connect(self.test_worker.deleteLater)
             self.test_worker.start()
-            
+
         except Exception as e:
-            self.show_error("Test Failed", str(e))
-            # Re-enable button on error
-            self.view.llm_test_button.setEnabled(True)
-            self.view.llm_test_button.setText("Test")
-    
+            self.view.set_llm_test_enabled(True)
+            self.view.set_llm_test_status('failure', f"Test failed: {str(e)}")
+
     def on_provider_test_completed(self, success, message):
         """Handle provider test completion"""
         # Re-enable the test button
-        self.view.llm_test_button.setEnabled(True)
-        self.view.llm_test_button.setText("Test")
-        
-        # Show result to user
+        self.view.set_llm_test_enabled(True)
+
+        # Update status indicator
         if success:
-            self.show_info("Provider Test Result", message)
+            self.view.set_llm_test_status('success', message)
         else:
-            self.show_error("Provider Test Failed", message)
+            self.view.set_llm_test_status('failure', message)
+    
     
     def set_active_llm_provider(self, provider_name):
         """Handle setting active LLM provider"""
@@ -996,43 +1505,40 @@ class SettingsController(QObject):
             providers = self.service.get_mcp_providers()
             if row >= len(providers):
                 return
-            
+
             provider = providers[row]
-            
+
             # Validate that provider has required fields
             if not provider.get('url'):
-                self.show_error("Test Failed", 
+                self.view.set_mcp_test_status('failure',
                     f"Provider '{provider['name']}' has no URL configured. "
                     "Please edit the provider and add a URL before testing.")
                 return
-            
-            # Disable the test button to prevent multiple concurrent tests
-            self.view.mcp_test_button.setEnabled(False)
-            self.view.mcp_test_button.setText("Testing...")
-            
+
+            # Disable the test button and show testing state
+            self.view.set_mcp_test_enabled(False)
+            self.view.set_mcp_test_status('testing', f"Testing {provider['name']}...")
+
             # Create and start the MCP test worker
             self.mcp_test_worker = MCPTestWorker(provider)
             self.mcp_test_worker.test_completed.connect(self.on_mcp_test_completed)
             self.mcp_test_worker.finished.connect(self.mcp_test_worker.deleteLater)
             self.mcp_test_worker.start()
-            
+
         except Exception as e:
-            self.show_error("Test Failed", str(e))
-            # Re-enable button on error
-            self.view.mcp_test_button.setEnabled(True)
-            self.view.mcp_test_button.setText("Test")
-    
+            self.view.set_mcp_test_enabled(True)
+            self.view.set_mcp_test_status('failure', f"Test failed: {str(e)}")
+
     def on_mcp_test_completed(self, success, message, test_data):
         """Handle MCP test completion"""
         # Re-enable the test button
-        self.view.mcp_test_button.setEnabled(True)
-        self.view.mcp_test_button.setText("Test")
-        
-        # Show result to user
+        self.view.set_mcp_test_enabled(True)
+
+        # Update status indicator
         if success:
-            self.show_info("MCP Server Test Result", message)
+            self.view.set_mcp_test_status('success', message)
         else:
-            self.show_error("MCP Server Test Failed", message)
+            self.view.set_mcp_test_status('failure', message)
     
     # Settings methods
     
@@ -1051,23 +1557,6 @@ class SettingsController(QObject):
         except Exception as e:
             self.show_error("Failed to Update Database Path", str(e))
 
-    # SymGraph.ai methods
-
-    def update_symgraph_api_url(self, url):
-        """Handle SymGraph.ai API URL updates"""
-        try:
-            self.service.set_symgraph_api_url(url)
-            log.log_debug(f"Updated SymGraph.ai API URL: {url}")
-        except Exception as e:
-            self.show_error("Failed to Update SymGraph.ai API URL", str(e))
-
-    def update_symgraph_api_key(self, key):
-        """Handle SymGraph.ai API key updates"""
-        try:
-            self.service.set_symgraph_api_key(key)
-            log.log_debug("Updated SymGraph.ai API key")
-        except Exception as e:
-            self.show_error("Failed to Update SymGraph.ai API Key", str(e))
 
     # Utility methods
     

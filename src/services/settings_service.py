@@ -108,7 +108,7 @@ class SettingsService:
                         max_tokens INTEGER DEFAULT 4096,
                         api_key TEXT,
                         disable_tls BOOLEAN DEFAULT 0,
-                        provider_type TEXT DEFAULT 'openai',
+                        provider_type TEXT DEFAULT 'openai_platform',
                         is_active BOOLEAN DEFAULT 0,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -147,11 +147,15 @@ class SettingsService:
             from .migrations import (
                 migrate_add_provider_type,
                 migrate_add_reasoning_effort,
-                migrate_add_litellm_configs
+                migrate_add_litellm_configs,
+                migrate_provider_type_names
             )
+            from .migrations.add_oauth_credentials import migrate_add_oauth_credentials
             migrate_add_provider_type(self._db_path)
             migrate_add_reasoning_effort(self._db_path)
             migrate_add_litellm_configs(self._db_path)
+            migrate_add_oauth_credentials(self._db_path)
+            migrate_provider_type_names(self._db_path)  # Update old provider_type names to new convention
         except Exception as e:
             # Migration failures shouldn't prevent plugin loading
             try:
@@ -193,17 +197,6 @@ class SettingsService:
                 'category': 'ui'
             },
 
-            # SymGraph.ai settings
-            'symgraph_api_url': {
-                'value': 'https://api.symgraph.ai',
-                'type': 'string',
-                'category': 'symgraph'
-            },
-            'symgraph_api_key': {
-                'value': '',
-                'type': 'string',
-                'category': 'symgraph'
-            }
         }
         
         with self._db_lock:
@@ -353,7 +346,7 @@ class SettingsService:
         return model.startswith('bedrock/')
 
     def add_llm_provider(self, name: str, model: str, url: str, max_tokens: int = 4096,
-                        api_key: str = '', disable_tls: bool = False, provider_type: str = 'openai',
+                        api_key: str = '', disable_tls: bool = False, provider_type: str = 'openai_platform',
                         reasoning_effort: str = 'none') -> int:
         """Add a new LLM provider"""
         # Detect LiteLLM model family and Bedrock status
@@ -695,6 +688,112 @@ class SettingsService:
             finally:
                 conn.close()
     
+    # OAuth Credentials Operations
+
+    def store_oauth_credentials(self, provider_name: str, access_token: str,
+                                refresh_token: str, expires_at: float) -> bool:
+        """
+        Store OAuth credentials for a provider.
+        
+        Args:
+            provider_name: Unique identifier for the provider (e.g., 'anthropic_oauth')
+            access_token: OAuth access token
+            refresh_token: OAuth refresh token
+            expires_at: Unix timestamp when access token expires
+            
+        Returns:
+            True if credentials stored successfully
+        """
+        with self._db_lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT OR REPLACE INTO oauth_credentials
+                    (provider_name, access_token, refresh_token, expires_at, updated_at)
+                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ''', (provider_name, access_token, refresh_token, expires_at))
+                conn.commit()
+                log.log_info(f"Stored OAuth credentials for provider: {provider_name}")
+                return True
+            except Exception as e:
+                conn.rollback()
+                raise RuntimeError(f"Failed to store OAuth credentials: {e}")
+            finally:
+                conn.close()
+
+    def get_oauth_credentials(self, provider_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Get OAuth credentials for a provider.
+        
+        Args:
+            provider_name: Unique identifier for the provider
+            
+        Returns:
+            Dictionary with access_token, refresh_token, expires_at, or None if not found
+        """
+        with self._db_lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT access_token, refresh_token, expires_at
+                    FROM oauth_credentials WHERE provider_name = ?
+                ''', (provider_name,))
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        'access_token': row[0],
+                        'refresh_token': row[1],
+                        'expires_at': row[2]
+                    }
+                return None
+            except Exception as e:
+                log.log_error(f"Failed to get OAuth credentials: {e}")
+                return None
+            finally:
+                conn.close()
+
+    def clear_oauth_credentials(self, provider_name: str) -> bool:
+        """
+        Clear OAuth credentials for a provider.
+        
+        Args:
+            provider_name: Unique identifier for the provider
+            
+        Returns:
+            True if credentials were deleted, False if not found
+        """
+        with self._db_lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute('DELETE FROM oauth_credentials WHERE provider_name = ?',
+                              (provider_name,))
+                deleted = cursor.rowcount > 0
+                conn.commit()
+                if deleted:
+                    log.log_info(f"Cleared OAuth credentials for provider: {provider_name}")
+                return deleted
+            except Exception as e:
+                conn.rollback()
+                raise RuntimeError(f"Failed to clear OAuth credentials: {e}")
+            finally:
+                conn.close()
+
+    def has_oauth_credentials(self, provider_name: str) -> bool:
+        """
+        Check if OAuth credentials exist for a provider.
+        
+        Args:
+            provider_name: Unique identifier for the provider
+            
+        Returns:
+            True if credentials exist
+        """
+        credentials = self.get_oauth_credentials(provider_name)
+        return credentials is not None and credentials.get('access_token')
+
     # Utility methods
     
     def _serialize_value(self, value: Any) -> tuple[str, str]:
@@ -768,29 +867,6 @@ class SettingsService:
             log.log_error(f"Failed to save system prompt: {e}")
             return False
     
-    # SymGraph.ai Settings
-
-    def get_symgraph_api_url(self) -> str:
-        """Get the SymGraph.ai API URL"""
-        return self.get_setting('symgraph_api_url', 'https://api.symgraph.ai')
-
-    def set_symgraph_api_url(self, url: str) -> bool:
-        """Set the SymGraph.ai API URL"""
-        return self.set_setting('symgraph_api_url', url, 'symgraph')
-
-    def get_symgraph_api_key(self) -> str:
-        """Get the SymGraph.ai API key"""
-        return self.get_setting('symgraph_api_key', '')
-
-    def set_symgraph_api_key(self, key: str) -> bool:
-        """Set the SymGraph.ai API key"""
-        return self.set_setting('symgraph_api_key', key, 'symgraph')
-
-    def has_symgraph_api_key(self) -> bool:
-        """Check if a SymGraph.ai API key is configured"""
-        key = self.get_symgraph_api_key()
-        return bool(key and key.strip())
-
     def close(self):
         """Close database connections (for cleanup)"""
         # SQLite connections are closed after each operation

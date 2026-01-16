@@ -51,9 +51,9 @@ except ImportError:
     log = MockLog()
 
 
-class AnthropicProvider(BaseLLMProvider):
+class AnthropicPlatformApiProvider(BaseLLMProvider):
     """
-    Anthropic API provider for Claude models.
+    Anthropic Platform API provider for Claude models.
     
     Supports chat completions, streaming, and function calling.
     Uses TF-IDF for embeddings as Anthropic doesn't provide native embeddings.
@@ -679,7 +679,7 @@ class AnthropicProvider(BaseLLMProvider):
     
     def get_provider_type(self) -> ProviderType:
         """Get the provider type for this provider"""
-        return ProviderType.ANTHROPIC
+        return ProviderType.ANTHROPIC_PLATFORM
 
     async def count_tokens(self, request: ChatRequest) -> int:
         """
@@ -948,13 +948,13 @@ class AnthropicProvider(BaseLLMProvider):
 from .provider_factory import ProviderFactory
 from ..models.provider_types import ProviderType
 
-class AnthropicProviderFactory(ProviderFactory):
-    """Factory for creating Anthropic provider instances"""
+class AnthropicPlatformApiProviderFactory(ProviderFactory):
+    """Factory for creating Anthropic Platform API provider instances"""
     
-    def create_provider(self, config: Dict[str, Any]) -> AnthropicProvider:
-        """Create Anthropic provider instance"""
-        return AnthropicProvider(config)
+    def create_provider(self, config: Dict[str, Any]) -> AnthropicPlatformApiProvider:
+        """Create Anthropic Platform API provider instance"""
+        return AnthropicPlatformApiProvider(config)
     
     def supports_provider_type(self, provider_type: ProviderType) -> bool:
         """Check if this factory supports the provider type"""
-        return provider_type == ProviderType.ANTHROPIC
+        return provider_type == ProviderType.ANTHROPIC_PLATFORM

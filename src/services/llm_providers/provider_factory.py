@@ -64,7 +64,7 @@ class LLMProviderFactory:
             LLMProviderError: If provider type not supported or creation fails
         """
         # Extract and validate provider type
-        provider_type_str = config.get('provider_type', 'openai')
+        provider_type_str = config.get('provider_type', 'openai_platform')
         
         try:
             if isinstance(provider_type_str, str):
@@ -97,27 +97,46 @@ class LLMProviderFactory:
         """Register default provider factories"""
         # Import and register available provider factories
         
-        # Anthropic provider
+        # Anthropic Claude CLI provider
         try:
-            from .anthropic_provider import AnthropicProviderFactory
+            from .anthropic_claude_cli_provider import AnthropicClaudeCliProviderFactory
             self.register_factory(
-                ProviderType.ANTHROPIC,
-                AnthropicProviderFactory()
+                ProviderType.ANTHROPIC_CLI,
+                AnthropicClaudeCliProviderFactory()
             )
         except ImportError:
-            pass  # Anthropic provider not available
-        
-        # OpenAI provider (handles OpenAI, LM Studio, and OpenWebUI)
+            pass  # Anthropic Claude CLI provider not available
+
+        # Anthropic OAuth provider (Claude Pro/Max subscription)
         try:
-            from .openai_provider import OpenAIProviderFactory
-            openai_factory = OpenAIProviderFactory()
-            self.register_factory(ProviderType.OPENAI, openai_factory)
-            self.register_factory(ProviderType.LMSTUDIO, openai_factory)
-            self.register_factory(ProviderType.OPENWEBUI, openai_factory)
+            from .anthropic_oauth_provider import AnthropicOAuthProviderFactory
+            self.register_factory(
+                ProviderType.ANTHROPIC_OAUTH,
+                AnthropicOAuthProviderFactory()
+            )
         except ImportError:
-            pass  # OpenAI provider not available
+            pass  # Anthropic OAuth provider not available
         
-        # Ollama provider
+        # Anthropic Platform API provider
+        try:
+            from .anthropic_platform_api_provider import AnthropicPlatformApiProviderFactory
+            self.register_factory(
+                ProviderType.ANTHROPIC_PLATFORM,
+                AnthropicPlatformApiProviderFactory()
+            )
+        except ImportError:
+            pass  # Anthropic Platform API provider not available
+
+        # LiteLLM proxy provider
+        try:
+            self.register_factory(
+                ProviderType.LITELLM,
+                LiteLLMProviderFactory()
+            )
+        except ImportError:
+            pass  # LiteLLM provider not available
+        
+        # Ollama provider (local)
         try:
             from .ollama_provider import OllamaProviderFactory
             self.register_factory(
@@ -127,38 +146,38 @@ class LLMProviderFactory:
         except ImportError:
             pass  # Ollama provider not available
 
-        # LiteLLM provider
+        # OpenAI OAuth provider (ChatGPT Pro/Plus subscription)
         try:
-            # LiteLLMProviderFactory is defined in this file
+            from .openai_oauth_provider import OpenAIOAuthProviderFactory
             self.register_factory(
-                ProviderType.LITELLM,
-                LiteLLMProviderFactory()
+                ProviderType.OPENAI_OAUTH,
+                OpenAIOAuthProviderFactory()
             )
         except ImportError:
-            pass  # LiteLLM provider not available
-
-        # Claude Code CLI provider
+            pass  # OpenAI OAuth provider not available
+        
+        # OpenAI Platform API provider (handles OpenAI, LM Studio, and OpenWebUI)
         try:
-            from .claude_code_provider import ClaudeCodeProviderFactory
-            self.register_factory(
-                ProviderType.CLAUDE_CODE,
-                ClaudeCodeProviderFactory()
-            )
+            from .openai_platform_api_provider import OpenAIPlatformApiProviderFactory
+            openai_factory = OpenAIPlatformApiProviderFactory()
+            self.register_factory(ProviderType.OPENAI_PLATFORM, openai_factory)
+            self.register_factory(ProviderType.LMSTUDIO, openai_factory)
+            self.register_factory(ProviderType.OPENWEBUI, openai_factory)
         except ImportError:
-            pass  # Claude Code provider not available
+            pass  # OpenAI Platform API provider not available
 
 
-class AnthropicProviderFactory(ProviderFactory):
-    """Factory for creating Anthropic providers"""
+class AnthropicPlatformApiProviderFactory(ProviderFactory):
+    """Factory for creating Anthropic Platform API providers"""
 
     def create_provider(self, config: Dict[str, Any]) -> BaseLLMProvider:
-        """Create Anthropic provider instance"""
-        from .anthropic_provider import AnthropicProvider
-        return AnthropicProvider(config)
+        """Create Anthropic Platform API provider instance"""
+        from .anthropic_platform_api_provider import AnthropicPlatformApiProvider
+        return AnthropicPlatformApiProvider(config)
 
     def supports_provider_type(self, provider_type: ProviderType) -> bool:
-        """Check if this factory supports Anthropic providers"""
-        return provider_type == ProviderType.ANTHROPIC
+        """Check if this factory supports Anthropic Platform API providers"""
+        return provider_type == ProviderType.ANTHROPIC_PLATFORM
 
 
 class LiteLLMProviderFactory(ProviderFactory):
@@ -174,28 +193,8 @@ class LiteLLMProviderFactory(ProviderFactory):
         return provider_type == ProviderType.LITELLM
 
 
-# Future provider factories will be added here as they are implemented
-
-# class OpenAIProviderFactory(ProviderFactory):
-#     """Factory for creating OpenAI providers"""
-#     
-#     def create_provider(self, config: Dict[str, Any]) -> BaseLLMProvider:
-#         from .openai_provider import OpenAIProvider
-#         return OpenAIProvider(config)
-#     
-#     def supports_provider_type(self, provider_type: ProviderType) -> bool:
-#         return provider_type == ProviderType.OPENAI
-
-
-# class OllamaProviderFactory(ProviderFactory):
-#     """Factory for creating Ollama providers"""
-#     
-#     def create_provider(self, config: Dict[str, Any]) -> BaseLLMProvider:
-#         from .ollama_provider import OllamaProvider
-#         return OllamaProvider(config)
-#     
-#     def supports_provider_type(self, provider_type: ProviderType) -> bool:
-#         return provider_type == ProviderType.OLLAMA
+# Note: Provider factory classes are defined in their respective provider modules.
+# Example: AnthropicPlatformApiProviderFactory is in anthropic_platform_api_provider.py
 
 
 # Global factory instance

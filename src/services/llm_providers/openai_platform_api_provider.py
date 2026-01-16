@@ -44,7 +44,7 @@ except ImportError:
     log = MockLog()
 
 
-class OpenAIProvider(BaseLLMProvider):
+class OpenAIPlatformApiProvider(BaseLLMProvider):
     """
     OpenAI API provider implementation.
     
@@ -590,7 +590,7 @@ class OpenAIProvider(BaseLLMProvider):
     def get_provider_type(self) -> ProviderType:
         """Get the provider type for this provider"""
         # Return the configured provider type (could be OPENAI, LMSTUDIO, or OPENWEBUI)
-        provider_type_str = self.config.get('provider_type', 'openai')
+        provider_type_str = self.config.get('provider_type', 'openai_platform')
         if isinstance(provider_type_str, str):
             return ProviderType(provider_type_str)
         return provider_type_str
@@ -624,18 +624,18 @@ class OpenAIProvider(BaseLLMProvider):
 from ..llm_providers.provider_factory import ProviderFactory
 from ..models.provider_types import ProviderType
 
-class OpenAIProviderFactory(ProviderFactory):
-    """Factory for creating OpenAI provider instances"""
+class OpenAIPlatformApiProviderFactory(ProviderFactory):
+    """Factory for creating OpenAI Platform API provider instances"""
     
-    def create_provider(self, config: Dict[str, Any]) -> OpenAIProvider:
-        """Create OpenAI provider instance"""
-        return OpenAIProvider(config)
+    def create_provider(self, config: Dict[str, Any]) -> OpenAIPlatformApiProvider:
+        """Create OpenAI Platform API provider instance"""
+        return OpenAIPlatformApiProvider(config)
     
     def supports_provider_type(self, provider_type: ProviderType) -> bool:
         """Check if this factory supports the provider type"""
         # OpenAI provider handles OpenAI-compatible APIs
         return provider_type in {
-            ProviderType.OPENAI,
+            ProviderType.OPENAI_PLATFORM,
             ProviderType.LMSTUDIO,
             ProviderType.OPENWEBUI
         }

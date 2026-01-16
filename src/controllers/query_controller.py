@@ -904,7 +904,10 @@ class QueryController:
                 # Fall back to static response
                 self._handle_no_llm_provider(query_text)
                 return
-                
+            
+            # Note: OAuth providers (anthropic_oauth, openai_oauth) authenticate via the
+            # Settings > Edit Provider > Authenticate button before use.
+            
             # Ensure we have an active chat
             if self.current_chat_id is None:
                 self.new_chat()
@@ -921,7 +924,7 @@ class QueryController:
             self._add_message_to_chat(self.current_chat_id, "user", query_text)
             
             # Save user query in native format for the active provider
-            provider_type = active_provider.get('provider_type', 'anthropic')
+            provider_type = active_provider.get('provider_type', 'anthropic_platform')
             self._save_user_message_native(query_text, provider_type)
             
             # Add placeholder for assistant response (don't save to database)
@@ -935,7 +938,7 @@ class QueryController:
             mcp_enabled = self.view.is_mcp_enabled()
             
             # Prepare conversation messages for LLM in provider's native format
-            provider_type = active_provider.get('provider_type', 'anthropic')
+            provider_type = active_provider.get('provider_type', 'anthropic_platform')
             messages = self._prepare_native_messages(query_text, context, rag_enabled, mcp_enabled, provider_type)
             
             # Track RLHF context for this query
@@ -1832,7 +1835,7 @@ Current context:
                     if native_messages:
                         last_message = native_messages[-1]
                         # Extract content from the native message to compare
-                        last_content = format_service.extract_display_info(last_message, provider_enum).get('content', '')
+                        _, last_content, _ = format_service.extract_display_info(last_message, provider_enum)
                         enhanced_query = self._enhance_query_with_context(query_text, context, rag_enabled, mcp_enabled)
                         
                         # If the last message matches our current query, don't add it again
@@ -1897,7 +1900,7 @@ Current context:
                 if not active_provider:
                     log.log_warn("Cannot save assistant response: no active provider")
                     return
-                provider_type = active_provider.get('provider_type', 'anthropic')
+                provider_type = active_provider.get('provider_type', 'anthropic_platform')
             
             from ..services.message_format_service import get_message_format_service
             from ..services.models.provider_types import ProviderType
@@ -2445,7 +2448,7 @@ Tool Usage Guidelines:
             try:
                 binary_hash = self._get_current_binary_hash()
                 if binary_hash and self.current_chat_id and tool_messages:
-                    provider_type = active_provider.get('provider_type', 'anthropic')
+                    provider_type = active_provider.get('provider_type', 'anthropic_platform')
                     for tool_msg in tool_messages:
                         self.analysis_db.save_native_message(
                             binary_hash, str(self.current_chat_id), tool_msg, provider_type
@@ -2466,7 +2469,7 @@ Tool Usage Guidelines:
             try:
                 binary_hash = self._get_current_binary_hash()
                 if binary_hash and self.current_chat_id:
-                    provider_type = active_provider.get('provider_type', 'anthropic')
+                    provider_type = active_provider.get('provider_type', 'anthropic_platform')
                     native_messages = self.analysis_db.get_native_messages_for_provider(
                         binary_hash, str(self.current_chat_id), provider_type
                     )
@@ -2611,7 +2614,7 @@ Tool Usage Guidelines:
                     # Get active provider type for native saving
                     active_provider = self.settings_service.get_active_llm_provider()
                     if active_provider:
-                        provider_type = active_provider.get('provider_type', 'anthropic')
+                        provider_type = active_provider.get('provider_type', 'anthropic_platform')
                         self._save_assistant_response_native(content, provider_type=provider_type)
                     
                     # Also save to legacy format for backward compatibility
@@ -2748,7 +2751,7 @@ Tool Usage Guidelines:
             self._add_message_to_chat(self.current_chat_id, "user", query_text)
 
             # Save user query in native format for the active provider
-            provider_type = active_provider.get('provider_type', 'anthropic')
+            provider_type = active_provider.get('provider_type', 'anthropic_platform')
             self._save_user_message_native(query_text, provider_type)
 
             # Add placeholder for assistant response (will be filled by content chunks)

@@ -198,7 +198,7 @@ class SemanticExtractor:
     def _get_callers(self, node_id: Optional[int]) -> List[str]:
         if not node_id:
             return []
-        callers = self.graph_store.get_callers(self.binary_hash, node_id, "CALLS")
+        callers = self.graph_store.get_callers(self.binary_hash, node_id, "calls")
         results = []
         for node in callers:
             results.append(node.name or f"sub_{node.address:x}")
@@ -212,7 +212,7 @@ class SemanticExtractor:
         edges = self.graph_store.get_edges_for_node(self.binary_hash, node_id)
         results = []
         for edge in edges:
-            if edge.source_id == node_id and edge.edge_type == "CALLS":
+            if edge.source_id == node_id and edge.edge_type == "calls":
                 node = self.graph_store.get_node_by_id(edge.target_id)
                 if node:
                     results.append(node.name or f"sub_{node.address:x}")

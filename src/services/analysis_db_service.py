@@ -1348,7 +1348,7 @@ class AnalysisDBService:
         has_tool_calls = False
         tool_calls_details = []  # Store detailed tool call info
         
-        if provider_type == 'anthropic' and 'content' in native_data:
+        if provider_type.startswith('anthropic') and 'content' in native_data:
             # Anthropic format: content is a list of blocks
             for block in native_data['content']:
                 if isinstance(block, dict) and block.get('type') == 'tool_use':
@@ -1358,7 +1358,7 @@ class AnalysisDBService:
                     if tool_name != 'unknown':
                         tool_calls_details.append({'name': tool_name, 'args': tool_input})
         
-        elif provider_type == 'openai' and 'tool_calls' in native_data:
+        elif provider_type.startswith('openai') and 'tool_calls' in native_data:
             # OpenAI format: tool_calls is a list
             if native_data['tool_calls']:
                 has_tool_calls = True
