@@ -31,10 +31,11 @@
             "httpx",
             "anyio>=4.6",
             "mcp==1.23.3",
-            "whoosh"
+            "whoosh",
+            "aiohttp"
         ]
     },
-    "version": "1.8.0",
+    "version": "1.9.0",
     "author": "Jason Tang",
     "minimumbinaryninjaversion": 5000
 }

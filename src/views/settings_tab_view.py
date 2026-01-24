@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushB
                               QLineEdit, QCheckBox, QHeaderView, QAbstractItemView,
                               QGroupBox, QScrollArea, QFileDialog)
 from PySide6.QtCore import Signal, Qt
+from ..services.service_registry import get_service_registry
 
 
 class SettingsTabView(QWidget):
@@ -24,6 +25,11 @@ class SettingsTabView(QWidget):
     system_prompt_changed = Signal(str)
     database_path_changed = Signal(str, str)  # path_type, path_value
 
+    # SymGraph signals
+    symgraph_api_url_changed = Signal(str)
+    symgraph_api_key_changed = Signal(str)
+    symgraph_test_requested = Signal()
+
     def __init__(self):
         super().__init__()
         self.setup_ui()
@@ -39,6 +45,10 @@ class SettingsTabView(QWidget):
         # Create all sections
         self.create_llm_provider_section(scroll_layout)
         self.create_mcp_provider_section(scroll_layout)
+        registry = get_service_registry()
+        settings = registry.get_settings_service()
+        if settings.is_symgraph_enabled():
+            self.create_symgraph_section(scroll_layout)
         self.create_system_prompt_section(scroll_layout)
         self.create_database_paths_section(scroll_layout)
         
@@ -195,6 +205,83 @@ class SettingsTabView(QWidget):
         group_box.setLayout(layout)
         parent_layout.addWidget(group_box)
 
+    def create_symgraph_section(self, parent_layout):
+        """Create the SymGraph settings section"""
+        group_box = QGroupBox("SymGraph")
+        layout = QVBoxLayout()
+
+        # API URL
+        url_layout = QHBoxLayout()
+        url_layout.addWidget(QLabel("API URL:"))
+        self.symgraph_url_field = QLineEdit()
+        self.symgraph_url_field.setPlaceholderText("https://api.SymGraph")
+        self.symgraph_url_field.setToolTip("SymGraph API URL (for self-hosted instances)")
+        self.symgraph_url_field.editingFinished.connect(
+            lambda: self.symgraph_api_url_changed.emit(self.symgraph_url_field.text())
+        )
+        url_layout.addWidget(self.symgraph_url_field, 1)
+        layout.addLayout(url_layout)
+
+        # API Key
+        key_layout = QHBoxLayout()
+        key_layout.addWidget(QLabel("API Key:"))
+        self.symgraph_key_field = QLineEdit()
+        self.symgraph_key_field.setPlaceholderText("sg_xxxxx")
+        self.symgraph_key_field.setEchoMode(QLineEdit.Password)
+        self.symgraph_key_field.setToolTip("Your SymGraph API key (required for push/pull operations)")
+        self.symgraph_key_field.editingFinished.connect(
+            lambda: self.symgraph_api_key_changed.emit(self.symgraph_key_field.text())
+        )
+        key_layout.addWidget(self.symgraph_key_field, 1)
+
+        # Show/hide key button
+        self.symgraph_key_toggle = QPushButton("Show")
+        self.symgraph_key_toggle.setMaximumWidth(60)
+        self.symgraph_key_toggle.clicked.connect(self._toggle_symgraph_key_visibility)
+        key_layout.addWidget(self.symgraph_key_toggle)
+
+        # Test button
+        self.symgraph_test_button = QPushButton("Test")
+        self.symgraph_test_button.setMaximumWidth(60)
+        self.symgraph_test_button.clicked.connect(self.symgraph_test_requested.emit)
+        key_layout.addWidget(self.symgraph_test_button)
+
+        # Status label for test results
+        self.symgraph_test_status = QLabel()
+        self.symgraph_test_status.setFixedWidth(20)
+        key_layout.addWidget(self.symgraph_test_status)
+
+        layout.addLayout(key_layout)
+
+        # Info label
+        info_label = QLabel(
+            "SymGraph provides cloud-based symbol and graph data sharing. "
+            "Query operations are free; push/pull require an API key."
+        )
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addWidget(info_label)
+
+        group_box.setLayout(layout)
+        parent_layout.addWidget(group_box)
+
+    def _toggle_symgraph_key_visibility(self):
+        """Toggle visibility of the SymGraph API key field"""
+        if self.symgraph_key_field.echoMode() == QLineEdit.Password:
+            self.symgraph_key_field.setEchoMode(QLineEdit.Normal)
+            self.symgraph_key_toggle.setText("Hide")
+        else:
+            self.symgraph_key_field.setEchoMode(QLineEdit.Password)
+            self.symgraph_key_toggle.setText("Show")
+
+    def set_symgraph_api_url(self, url: str):
+        """Set the SymGraph API URL field"""
+        self.symgraph_url_field.setText(url)
+
+    def set_symgraph_api_key(self, key: str):
+        """Set the SymGraph API key field"""
+        self.symgraph_key_field.setText(key)
+
     def _set_test_status(self, label: QLabel, status: str, tooltip: str = ""):
         """Set a test status indicator label
 
@@ -244,6 +331,18 @@ class SettingsTabView(QWidget):
             self.mcp_test_button.setText("Testing...")
         else:
             self.mcp_test_button.setText("Test")
+
+    def set_symgraph_test_status(self, status: str, tooltip: str = ""):
+        """Set the SymGraph test status indicator"""
+        self._set_test_status(self.symgraph_test_status, status, tooltip)
+
+    def set_symgraph_test_enabled(self, enabled: bool):
+        """Enable or disable the SymGraph test button"""
+        self.symgraph_test_button.setEnabled(enabled)
+        if not enabled:
+            self.symgraph_test_button.setText("Testing...")
+        else:
+            self.symgraph_test_button.setText("Test")
 
     def create_system_prompt_section(self, parent_layout):
         group_box = QGroupBox("System Prompt")

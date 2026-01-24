@@ -435,6 +435,28 @@ class AnalysisDBService:
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_chat_metadata_lookup ON BNChatMetadata(binary_hash, chat_id)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_system_prompt_active ON SystemPrompts(is_active)')
 
+                # Line explanations table for per-line caching
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS BNLineExplanations (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        binary_hash TEXT NOT NULL,
+                        function_start INTEGER NOT NULL,
+                        line_address INTEGER NOT NULL,
+                        view_type TEXT NOT NULL,
+                        line_content TEXT,
+                        context_before TEXT,
+                        context_after TEXT,
+                        explanation TEXT NOT NULL,
+                        metadata TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(binary_hash, line_address, view_type)
+                    )
+                ''')
+
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_line_explanations_lookup ON BNLineExplanations(binary_hash, line_address, view_type)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_line_explanations_function ON BNLineExplanations(binary_hash, function_start)')
+
                 # Note: GraphRAG tables (nodes, edges, communities, FTS) are now created
                 # by database migrations in db_migrations.py (migrations 004-006)
 
@@ -775,7 +797,7 @@ class AnalysisDBService:
             finally:
                 conn.close()
     
-    def delete_function_analysis(self, binary_hash: str, function_start: int, 
+    def delete_function_analysis(self, binary_hash: str, function_start: int,
                                query_type: str) -> bool:
         """Delete a specific function analysis"""
         with self._db_lock:
@@ -783,24 +805,147 @@ class AnalysisDBService:
             try:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    DELETE FROM BNAnalysis 
+                    DELETE FROM BNAnalysis
                     WHERE binary_hash = ? AND function_start = ? AND query_type = ?
                 ''', (binary_hash, function_start, query_type))
-                
+
                 deleted = cursor.rowcount > 0
                 conn.commit()
-                
+
                 if deleted:
                     log.log_info(f"Deleted {query_type} analysis for {binary_hash}:{function_start:x}")
-                
+
                 return deleted
-                
+
             except Exception as e:
                 conn.rollback()
                 raise RuntimeError(f"Failed to delete function analysis: {e}")
             finally:
                 conn.close()
-    
+
+    # Line Explanation Operations
+
+    def get_line_explanation(self, binary_hash: str, line_address: int,
+                            view_type: str) -> Optional[Dict[str, Any]]:
+        """Get cached line explanation by binary hash, line address, and view type"""
+        with self._db_lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT id, function_start, line_content, context_before, context_after,
+                           explanation, metadata, created_at, updated_at
+                    FROM BNLineExplanations
+                    WHERE binary_hash = ? AND line_address = ? AND view_type = ?
+                ''', (binary_hash, line_address, view_type))
+
+                row = cursor.fetchone()
+                if row:
+                    metadata = json.loads(row[6]) if row[6] else {}
+                    return {
+                        'id': row[0],
+                        'binary_hash': binary_hash,
+                        'function_start': row[1],
+                        'line_address': line_address,
+                        'view_type': view_type,
+                        'line_content': row[2],
+                        'context_before': row[3],
+                        'context_after': row[4],
+                        'explanation': row[5],
+                        'metadata': metadata,
+                        'created_at': row[7],
+                        'updated_at': row[8]
+                    }
+                return None
+
+            except Exception as e:
+                raise RuntimeError(f"Failed to get line explanation: {e}")
+            finally:
+                conn.close()
+
+    def save_line_explanation(self, binary_hash: str, function_start: int, line_address: int,
+                             view_type: str, line_content: str, context_before: str,
+                             context_after: str, explanation: str,
+                             metadata: Dict[str, Any] = None) -> int:
+        """Save or update line explanation (upsert)"""
+        with self._db_lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                metadata_json = json.dumps(metadata) if metadata else None
+
+                cursor.execute('''
+                    INSERT OR REPLACE INTO BNLineExplanations
+                    (binary_hash, function_start, line_address, view_type, line_content,
+                     context_before, context_after, explanation, metadata, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ''', (binary_hash, function_start, line_address, view_type, line_content,
+                      context_before, context_after, explanation, metadata_json))
+
+                explanation_id = cursor.lastrowid
+                conn.commit()
+
+                log.log_info(f"Saved line explanation for {binary_hash}:{line_address:x} ({view_type})")
+                return explanation_id
+
+            except Exception as e:
+                conn.rollback()
+                raise RuntimeError(f"Failed to save line explanation: {e}")
+            finally:
+                conn.close()
+
+    def delete_line_explanation(self, binary_hash: str, line_address: int,
+                               view_type: str) -> bool:
+        """Delete a specific line explanation"""
+        with self._db_lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    DELETE FROM BNLineExplanations
+                    WHERE binary_hash = ? AND line_address = ? AND view_type = ?
+                ''', (binary_hash, line_address, view_type))
+
+                deleted = cursor.rowcount > 0
+                conn.commit()
+
+                if deleted:
+                    log.log_info(f"Deleted line explanation for {binary_hash}:{line_address:x} ({view_type})")
+
+                return deleted
+
+            except Exception as e:
+                conn.rollback()
+                raise RuntimeError(f"Failed to delete line explanation: {e}")
+            finally:
+                conn.close()
+
+    def clear_line_explanations_for_function(self, binary_hash: str,
+                                            function_start: int) -> int:
+        """Delete all line explanations for a function"""
+        with self._db_lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    DELETE FROM BNLineExplanations
+                    WHERE binary_hash = ? AND function_start = ?
+                ''', (binary_hash, function_start))
+
+                deleted_count = cursor.rowcount
+                conn.commit()
+
+                if deleted_count > 0:
+                    log.log_info(f"Deleted {deleted_count} line explanations for function at {binary_hash}:{function_start:x}")
+
+                return deleted_count
+
+            except Exception as e:
+                conn.rollback()
+                raise RuntimeError(f"Failed to clear line explanations for function: {e}")
+            finally:
+                conn.close()
+
     # Context Caching Operations
     
     def save_context_cache(self, binary_hash: str, function_start: int, 

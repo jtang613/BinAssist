@@ -13,12 +13,15 @@ from .actions_tab_view import ActionsTabView
 from .rag_tab_view import RagTabView
 from .settings_tab_view import SettingsTabView
 from .semantic_graph_tab_view import SemanticGraphTabView
+from .symgraph_tab_view import SymGraphTabView
 from ..controllers.settings_controller import SettingsController
+from ..controllers.symgraph_controller import SymGraphController
 from ..controllers.explain_controller import ExplainController
 from ..controllers.query_controller import QueryController
 from ..controllers.rag_controller import RAGController
 from ..controllers.actions_controller import ActionsController
 from ..controllers.semantic_graph_controller import SemanticGraphController
+from ..services.service_registry import get_service_registry
 
 
 class BinAssistSidebarWidget(SidebarWidget):
@@ -44,6 +47,10 @@ class BinAssistSidebarWidget(SidebarWidget):
         self.create_query_tab()
         self.create_actions_tab()
         self.create_semantic_graph_tab()
+        registry = get_service_registry()
+        settings = registry.get_settings_service()
+        if settings.is_symgraph_enabled():
+            self.create_symgraph_tab()
         self.create_rag_tab()
         self.create_settings_tab()
         
@@ -97,6 +104,19 @@ class BinAssistSidebarWidget(SidebarWidget):
         self.rag_controller = RAGController(self.rag_tab)
 
         self.tab_widget.addTab(self.rag_tab, "RAG")
+
+    def create_symgraph_tab(self):
+        self.symgraph_tab = SymGraphTabView()
+
+        # Create controller to manage SymGraph functionality
+        self.symgraph_controller = SymGraphController(
+            self.symgraph_tab,
+            binary_view=self.data,
+            data=self.data,
+            frame=self.frame
+        )
+
+        self.tab_widget.addTab(self.symgraph_tab, "SymGraph")
 
     def create_semantic_graph_tab(self):
         self.semantic_graph_tab = SemanticGraphTabView()
@@ -154,7 +174,9 @@ class BinAssistSidebarWidget(SidebarWidget):
         if hasattr(self, 'semantic_graph_controller'):
             self.semantic_graph_controller.set_binary_view(self.data)
             self.semantic_graph_controller.set_view_frame(self.frame)
-    
+        if hasattr(self, 'symgraph_controller'):
+            self.symgraph_controller.set_binary_view(self.data)
+
     def contextMenuEvent(self, event):
         self.m_contextMenuManager.show(self.m_menu, self.actionHandler)
     

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 from typing import Optional, Dict, Any, List
+from datetime import datetime
 import asyncio
 import binaryninja as bn
 from PySide6.QtCore import QThread, Signal
@@ -162,9 +163,12 @@ class ExplainController:
     def set_current_offset(self, offset: int):
         """Update current offset in context service"""
         self.context_service.set_current_offset(offset)
-        
+
         # Auto-load cached analysis for the new offset
         self._load_cached_analysis_for_offset(offset)
+
+        # Auto-load cached line explanation for the new offset
+        self._load_cached_line_explanation_for_offset(offset)
     
     def explain_function(self):
         """Handle explain function request"""
@@ -310,117 +314,131 @@ class ExplainController:
             self._set_query_state("function", False)
     
     def explain_line(self):
-        """Handle explain line request"""
+        """Handle explain line request with per-line caching"""
         log.log_info("Explain line requested")
-        
+
         # Check if already running
         if self.line_query_active:
             log.log_warn("Line query already active, ignoring request")
             return
-        
+
         # Set query active state
         self._set_query_state("line", True)
-        
-        # Clear previous content immediately
-        self.view.set_explanation_content("*Preparing line analysis...*")
-        
+
+        # Show preparing message in line panel
+        self.view.set_line_explanation_content("*Preparing line analysis...*")
+
         try:
             # Get current context
             context = self.context_service.get_current_context()
-            
+
             if context.get("error"):
                 error_msg = f"Context Error: {context['error']}"
                 log.log_error(error_msg)
-                self.view.set_explanation_content(f"**Error**: {error_msg}")
+                self.view.set_line_explanation_content(f"**Error**: {error_msg}")
                 self._set_query_state("line", False)
                 return
-            
+
             current_offset = context["offset"]
             current_view_level = self.context_service.get_current_view_level()
-            
-            # Check for cached analysis first
+            view_type = current_view_level.value
+
+            # Check for per-line cached analysis first
             binary_hash = self._get_current_binary_hash()
             function_start = self._get_function_start_address(current_offset)
-            
-            if binary_hash and function_start is not None:
-                cached_analysis = self.analysis_db.get_function_analysis(
-                    binary_hash, function_start, "explain_line"
+
+            if binary_hash:
+                # Check new per-line cache (by line address and view type)
+                cached_line = self.analysis_db.get_line_explanation(
+                    binary_hash, current_offset, view_type
                 )
 
-                if cached_analysis and not self._should_refresh_cache(cached_analysis):
-                    log.log_info("Using cached line analysis")
-                    # Track analysis context for edit/save functionality
-                    self._current_analysis_address = function_start
+                if cached_line and not self._should_refresh_cache(cached_line):
+                    log.log_info(f"Using cached line explanation for 0x{current_offset:x} ({view_type})")
+                    self._current_analysis_address = current_offset
                     self._current_analysis_type = "explain_line"
-                    self.view.set_explanation_content(cached_analysis['response'])
-                    node = self.graphrag_service.get_node_by_address(
-                        binary_hash, "FUNCTION", int(function_start)
-                    )
-                    if node:
-                        self._update_security_panel_from_node(node)
-                    else:
-                        self.view.clear_security_info()
+                    self.view.set_line_explanation_content(cached_line['explanation'])
                     self._set_query_state("line", False)
                     return
-            
-            # Get line context at current offset using current view level
-            line_data = self.context_service.get_line_context(current_offset, current_view_level)
-            
-            if line_data.get("error"):
-                error_msg = f"Failed to get line: {line_data['error']}"
+
+            # Get line with context using the new method
+            line_with_context = self.context_service.get_line_with_context(
+                current_offset, current_view_level, context_lines=5
+            )
+
+            if line_with_context.get("error"):
+                error_msg = f"Failed to get line: {line_with_context['error']}"
                 log.log_error(error_msg)
-                self.view.set_explanation_content(f"**Error**: {error_msg}")
+                self.view.set_line_explanation_content(f"**Error**: {error_msg}")
                 self._set_query_state("line", False)
                 return
-            
+
             # Check if RAG and MCP are enabled
             rag_enabled = self.view.is_rag_enabled()
             mcp_enabled = self.view.is_mcp_enabled()
-            
+
             # Get active LLM provider
             active_provider = self.settings_service.get_active_llm_provider()
             if not active_provider:
                 # Fall back to static analysis
-                explanation = self._format_line_explanation(context, line_data, include_llm_prompt=False)
-                self.view.set_explanation_content(explanation)
+                explanation = self._format_line_explanation_with_context(context, line_with_context, include_llm_prompt=False)
+                self.view.set_line_explanation_content(explanation)
                 log.log_warn("No active LLM provider, showing static analysis")
                 self._set_query_state("line", False)
                 return
-            
-            # Generate LLM query for line analysis
-            llm_query = self._generate_line_llm_query(context, line_data, rag_enabled, mcp_enabled)
-            
+
+            # Generate enhanced LLM query for line analysis with context
+            llm_query = self._generate_line_explanation_prompt(context, line_with_context, rag_enabled, mcp_enabled)
+
             # Track RLHF context for this query
             self._track_rlhf_context(active_provider['name'], llm_query, "Line analysis system")
-            
-            # Send to LLM and stream response
-            self._query_llm_async(llm_query, active_provider)
-            
+
+            # Store line context for saving after completion
+            self._pending_line_context = {
+                'binary_hash': binary_hash,
+                'function_start': function_start,
+                'line_address': current_offset,
+                'view_type': view_type,
+                'line_content': line_with_context.get('current_line', {}).get('content', ''),
+                'context_before': self._format_context_lines(line_with_context.get('lines_before', [])),
+                'context_after': self._format_context_lines(line_with_context.get('lines_after', []))
+            }
+
+            # Send to LLM and stream response to line panel
+            self._query_llm_async_for_line(llm_query, active_provider)
+
             log.log_info("Line explanation sent to LLM")
-            
+
         except Exception as e:
             error_msg = f"Exception in explain_line: {str(e)}"
             log.log_error(error_msg)
-            self.view.set_explanation_content(f"**Error**: {error_msg}")
+            self.view.set_line_explanation_content(f"**Error**: {error_msg}")
             self._set_query_state("line", False)
     
     def clear_explanation(self):
         """Handle clear explanation request"""
         log.log_info("Clear explanation requested")
-        
+
         # Delete cached analyses from database
         try:
             current_offset = self.context_service._current_offset
             binary_hash = self._get_current_binary_hash()
             function_start = self._get_function_start_address(current_offset)
-            
+            view_type = self.context_service.get_current_view_level().value
+
             if binary_hash and function_start is not None:
-                # Delete both function and line analyses for this function
+                # Delete function analysis
                 deleted_function = self.analysis_db.delete_function_analysis(
                     binary_hash, function_start, "explain_function"
                 )
-                deleted_line = self.analysis_db.delete_function_analysis(
+                # Delete legacy line analysis (old format)
+                deleted_line_legacy = self.analysis_db.delete_function_analysis(
                     binary_hash, function_start, "explain_line"
+                )
+
+                # Delete per-line cached explanation for current offset
+                deleted_line = self.analysis_db.delete_line_explanation(
+                    binary_hash, current_offset, view_type
                 )
 
                 node = self.graphrag_service.get_node_by_address(
@@ -431,19 +449,21 @@ class ExplainController:
                     node.user_edited = False
                     node.is_stale = True
                     self.graphrag_service.upsert_node(node)
-                
-                if deleted_function or deleted_line:
+
+                if deleted_function or deleted_line_legacy or deleted_line:
                     log.log_info(f"Deleted cached analysis for function at 0x{function_start:x}")
                 else:
                     log.log_info("No cached analysis found to delete")
             else:
                 log.log_warn("Cannot delete cached analysis - no function context available")
-                
+
         except Exception as e:
             log.log_error(f"Failed to delete cached analysis: {e}")
-        
+
         # Reset display to default content
         self._show_default_content()
+        # Clear line explanation panel
+        self.view.clear_line_explanation()
         self.view.clear_security_info()
     
     def on_edit_mode_changed(self, is_edit_mode: bool):
@@ -1317,9 +1337,22 @@ Analyze the specific instruction/line of code below. Provide a detailed explanat
         # Cancel debounced rendering
         self._debounced_renderer.cancel()
 
+        # Clean up line-specific LLM thread
+        if self.line_query_active and hasattr(self, 'line_llm_thread'):
+            self.line_llm_thread.cancel()
+            self._cleanup_line_llm_thread()
+
+        # Also clean up the regular llm_thread in case it was used
         if self.line_query_active and hasattr(self, 'llm_thread'):
             self.llm_thread.cancel()
             self._cleanup_llm_thread()
+
+        # Clean up pending line context
+        if hasattr(self, '_pending_line_context'):
+            delattr(self, '_pending_line_context')
+        if hasattr(self, '_line_response_buffer'):
+            delattr(self, '_line_response_buffer')
+
         self._set_query_state("line", False)
     
     def _set_query_state(self, query_type: str, active: bool):
@@ -1477,6 +1510,256 @@ Analyze the specific instruction/line of code below. Provide a detailed explanat
         """Show default content when no cached analysis is available"""
         default_content = "No explanation available. Click 'Explain Function' or 'Explain Line' to generate content."
         self.view.set_explanation_content(default_content)
+
+    def _load_cached_line_explanation_for_offset(self, offset: int):
+        """Load and display cached line explanation if available"""
+        try:
+            binary_hash = self._get_current_binary_hash()
+            if not binary_hash:
+                self.view.clear_line_explanation()
+                return
+
+            view_type = self.context_service.get_current_view_level().value
+
+            cached = self.analysis_db.get_line_explanation(binary_hash, offset, view_type)
+            if cached:
+                log.log_info(f"Auto-loaded cached line explanation for 0x{offset:x} ({view_type})")
+                self.view.set_line_explanation_content(cached['explanation'])
+            else:
+                # No cached line explanation - hide the panel
+                self.view.clear_line_explanation()
+
+        except Exception as e:
+            log.log_error(f"Failed to load cached line explanation for 0x{offset:x}: {e}")
+            self.view.clear_line_explanation()
+
+    def _query_llm_async_for_line(self, query: str, provider_config: dict):
+        """Send query to LLM for line explanation and stream response to line panel"""
+        # Clear any previous line response buffer
+        if hasattr(self, '_line_response_buffer'):
+            delattr(self, '_line_response_buffer')
+
+        # Show LLM processing state in line panel
+        self.view.set_line_explanation_content("*Generating AI explanation...*")
+
+        # Get MCP tools if enabled
+        mcp_tools = self._get_current_mcp_tools()
+
+        if mcp_tools or self.mcp_enabled:
+            # Use enhanced thread with MCP support
+            messages = [{"role": "user", "content": query}]
+            self.line_llm_thread = ExplainLLMThread(messages, provider_config, self.llm_factory, mcp_tools)
+        else:
+            # Use original thread
+            self.line_llm_thread = LLMQueryThread(query, provider_config, self.llm_factory)
+
+        # Connect signals for line-specific handling
+        self.line_llm_thread.response_chunk.connect(self._on_line_llm_response_chunk)
+        self.line_llm_thread.response_complete.connect(self._on_line_llm_response_complete)
+        self.line_llm_thread.response_error.connect(self._on_line_llm_response_error)
+        self.line_llm_thread.start()
+
+    def _on_line_llm_response_chunk(self, chunk: str):
+        """Handle streaming response chunk from LLM for line explanation"""
+        # Initialize buffer if not exists
+        if not hasattr(self, '_line_response_buffer'):
+            self._line_response_buffer = ""
+
+        self._line_response_buffer += chunk
+        self.view.set_line_explanation_content(self._line_response_buffer)
+
+    def _on_line_llm_response_complete(self):
+        """Handle completion of LLM response for line explanation"""
+        log.log_info("Line LLM response completed")
+
+        # Update RLHF context with final response
+        if hasattr(self, '_line_response_buffer') and self._line_response_buffer:
+            self._update_rlhf_response(self._line_response_buffer)
+
+        # Save response to new per-line cache
+        if hasattr(self, '_line_response_buffer') and self._line_response_buffer:
+            if hasattr(self, '_pending_line_context') and self._pending_line_context:
+                try:
+                    ctx = self._pending_line_context
+                    metadata = {
+                        "model": self._get_current_model_name(),
+                        "timestamp": str(datetime.now())
+                    }
+
+                    self.analysis_db.save_line_explanation(
+                        ctx['binary_hash'],
+                        ctx['function_start'] or 0,
+                        ctx['line_address'],
+                        ctx['view_type'],
+                        ctx['line_content'],
+                        ctx['context_before'],
+                        ctx['context_after'],
+                        self._line_response_buffer,
+                        metadata
+                    )
+                    log.log_info(f"Saved line explanation to database for 0x{ctx['line_address']:x}")
+                except Exception as e:
+                    log.log_error(f"Failed to save line explanation: {e}")
+
+        # Cleanup
+        if hasattr(self, '_line_response_buffer'):
+            delattr(self, '_line_response_buffer')
+        if hasattr(self, '_pending_line_context'):
+            delattr(self, '_pending_line_context')
+        self._cleanup_line_llm_thread()
+
+        # Reset query state
+        self._set_query_state("line", False)
+
+    def _on_line_llm_response_error(self, error: str):
+        """Handle LLM response error for line explanation"""
+        log.log_error(f"Line LLM query failed: {error}")
+        error_markdown = f"**Error:** {error}\n\n*Falling back to static analysis...*"
+        self.view.set_line_explanation_content(error_markdown)
+
+        if hasattr(self, '_line_response_buffer'):
+            delattr(self, '_line_response_buffer')
+        if hasattr(self, '_pending_line_context'):
+            delattr(self, '_pending_line_context')
+        self._cleanup_line_llm_thread()
+
+        self._set_query_state("line", False)
+
+    def _cleanup_line_llm_thread(self):
+        """Safely cleanup the line LLM thread"""
+        if hasattr(self, 'line_llm_thread'):
+            if self.line_llm_thread.isRunning():
+                self.line_llm_thread.quit()
+                self.line_llm_thread.wait(5000)
+            self.line_llm_thread.deleteLater()
+            delattr(self, 'line_llm_thread')
+
+    def _generate_line_explanation_prompt(self, context: dict, line_with_context: dict, rag_enabled: bool, mcp_enabled: bool) -> str:
+        """Generate enhanced LLM prompt for line explanation with context lines"""
+        binary_info = context.get("binary_info", {})
+        func_ctx = line_with_context.get("function_context", {})
+        current_line = line_with_context.get("current_line", {})
+        lines_before = line_with_context.get("lines_before", [])
+        lines_after = line_with_context.get("lines_after", [])
+
+        prompt = f"""# Line Explanation Request
+
+Analyze the specific instruction/line of code marked with >>> below. Provide a detailed explanation of what this instruction does, its purpose within the function context, potential side effects, and any security considerations.
+
+## Binary Context
+**File**: {binary_info.get('filename', 'Unknown')}
+**Architecture**: {binary_info.get('architecture', 'Unknown')}
+**Platform**: {binary_info.get('platform', 'Unknown')}
+
+## Function Context
+"""
+        if func_ctx:
+            prompt += f"""**Function**: {func_ctx.get('name', 'Unknown')}
+**Prototype**: `{func_ctx.get('prototype', 'unknown')}`
+**Address Range**: {func_ctx.get('start', '?')} - {func_ctx.get('end', '?')}
+
+"""
+
+        prompt += f"""## Code Context ({line_with_context.get('view_level', 'unknown')})
+```
+"""
+        # Add context lines before
+        for line in lines_before:
+            if isinstance(line, dict):
+                addr = line.get('address', '')
+                content = line.get('content', '')
+                if addr:
+                    prompt += f"    {addr}: {content}\n"
+                else:
+                    prompt += f"    {content}\n"
+
+        # Add current line with marker
+        if isinstance(current_line, dict):
+            addr = current_line.get('address', '')
+            content = current_line.get('content', '')
+            if addr:
+                prompt += f">>> {addr}: {content}\n"
+            else:
+                prompt += f">>> {content}\n"
+
+        # Add context lines after
+        for line in lines_after:
+            if isinstance(line, dict):
+                addr = line.get('address', '')
+                content = line.get('content', '')
+                if addr:
+                    prompt += f"    {addr}: {content}\n"
+                else:
+                    prompt += f"    {content}\n"
+
+        prompt += "```\n\n"
+        prompt += "Focus your analysis on the line marked with >>> above. Explain:\n"
+        prompt += "1. What this instruction/statement does\n"
+        prompt += "2. Its role in the surrounding code flow\n"
+        prompt += "3. Any data transformations or state changes\n"
+        prompt += "4. Potential security implications if applicable\n"
+
+        # Add RAG context if enabled
+        if rag_enabled:
+            line_content = current_line.get('content', '') if isinstance(current_line, dict) else str(current_line)
+            if line_content:
+                rag_context = self._get_rag_context(line_content)
+                if rag_context:
+                    prompt += rag_context
+
+        # Add MCP context if enabled
+        if mcp_enabled:
+            prompt += "\n\n**MCP Context**: Please leverage Model Context Protocol tools and resources for enhanced analysis."
+
+        return prompt
+
+    def _format_line_explanation_with_context(self, context: dict, line_with_context: dict, include_llm_prompt: bool = True) -> str:
+        """Format line explanation with context as markdown (static analysis fallback)"""
+        binary_info = context.get("binary_info", {})
+        func_ctx = line_with_context.get("function_context", {})
+        current_line = line_with_context.get("current_line", {})
+
+        explanation = f"""# Line Explanation
+
+## Address: {line_with_context.get('address', 'Unknown')}
+**View Level**: {line_with_context.get('view_level', 'Unknown')}
+**Filename**: {binary_info.get('filename', 'Unknown')}
+**Architecture**: {binary_info.get('architecture', 'Unknown')}
+
+## Instruction
+```
+{current_line.get('content', 'No content available') if isinstance(current_line, dict) else current_line}
+```
+
+"""
+        if func_ctx:
+            explanation += f"**Function**: {func_ctx.get('name', 'Unknown')} ({func_ctx.get('start', '?')} - {func_ctx.get('end', '?')})\n"
+            if func_ctx.get('prototype'):
+                explanation += f"**Prototype**: `{func_ctx['prototype']}`\n"
+
+        if not include_llm_prompt:
+            explanation += "\n*This is a static analysis. Enable LLM integration for AI-powered explanations.*"
+
+        return explanation
+
+    def _format_context_lines(self, lines: list) -> str:
+        """Format context lines as a string for storage"""
+        if not lines:
+            return ""
+
+        formatted = []
+        for line in lines:
+            if isinstance(line, dict):
+                addr = line.get('address', '')
+                content = line.get('content', '')
+                if addr:
+                    formatted.append(f"{addr}: {content}")
+                else:
+                    formatted.append(content)
+            else:
+                formatted.append(str(line))
+
+        return "\n".join(formatted)
 
     def _update_security_panel_from_node(self, node):
         """Update the security panel based on a GraphRAG node."""

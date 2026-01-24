@@ -651,6 +651,267 @@ class BinaryContextService:
         
         return result
     
+    def get_line_with_context(self, address: int, view_level: ViewLevel, context_lines: int = 5) -> Dict[str, Any]:
+        """Get line at address with N lines of context above and below.
+
+        Returns:
+            {
+                "address": "0x...",
+                "view_level": "pseudo_c",
+                "current_line": {"content": "...", "address": "0x..."},
+                "lines_before": [{"content": "...", "address": "0x..."}, ...],
+                "lines_after": [{"content": "...", "address": "0x..."}, ...],
+                "function_context": {...}
+            }
+        """
+        if not self._binary_view:
+            return {"error": "No binary view available"}
+
+        try:
+            target_addr = f"0x{address:x}"
+
+            # For HLIL and pseudo-C views, use direct HLIL instruction matching
+            # This is more reliable than trying to match addresses in formatted output
+            if view_level in [ViewLevel.HLIL, ViewLevel.PSEUDO_C, ViewLevel.PSEUDO_RUST, ViewLevel.PSEUDO_PYTHON]:
+                return self._get_hlil_line_with_context(address, view_level, context_lines)
+
+            # For ASM view, use direct instruction access
+            if view_level == ViewLevel.ASM:
+                return self._get_asm_line_with_context(address, context_lines)
+
+            # For other IL levels (LLIL, MLIL), use the formatted code approach
+            code_data = self.get_code_at_level(address, view_level, context_lines=context_lines)
+
+            if code_data.get("error"):
+                return {"error": code_data.get("error")}
+
+            lines = code_data.get("lines", [])
+            if not lines:
+                return {"error": "No lines found at address"}
+
+            # Find the index of the current line (best match by address)
+            current_index = -1
+
+            # First pass: exact address match
+            for i, line in enumerate(lines):
+                if isinstance(line, dict):
+                    line_addr = line.get("address", "")
+                    if line_addr == target_addr:
+                        current_index = i
+                        break
+
+            # Second pass: find line marked as current
+            if current_index == -1:
+                for i, line in enumerate(lines):
+                    if isinstance(line, dict) and line.get("is_current", False):
+                        current_index = i
+                        break
+
+            # Third pass: find closest address that's <= target
+            if current_index == -1:
+                best_addr = None
+                for i, line in enumerate(lines):
+                    if isinstance(line, dict):
+                        line_addr_str = line.get("address", "")
+                        if line_addr_str and line_addr_str.startswith("0x"):
+                            try:
+                                line_addr = int(line_addr_str, 16)
+                                if line_addr <= address:
+                                    if best_addr is None or line_addr > best_addr:
+                                        best_addr = line_addr
+                                        current_index = i
+                            except ValueError:
+                                continue
+
+            # Fallback to first line if no match found
+            if current_index == -1:
+                current_index = 0
+
+            # Extract current line
+            current_line = lines[current_index] if current_index < len(lines) else {"content": "", "address": target_addr}
+
+            # Extract context before
+            start_index = max(0, current_index - context_lines)
+            lines_before = lines[start_index:current_index]
+
+            # Extract context after
+            end_index = min(len(lines), current_index + context_lines + 1)
+            lines_after = lines[current_index + 1:end_index]
+
+            return {
+                "address": target_addr,
+                "view_level": view_level.value,
+                "current_line": current_line,
+                "lines_before": lines_before,
+                "lines_after": lines_after,
+                "function_context": self._get_function_context(address)
+            }
+
+        except Exception as e:
+            return {"error": f"Failed to get line with context: {str(e)}"}
+
+    def _get_hlil_line_with_context(self, address: int, view_level: ViewLevel, context_lines: int = 5) -> Dict[str, Any]:
+        """Get HLIL/Pseudo-C line at address with context by directly querying HLIL instructions."""
+        target_addr = f"0x{address:x}"
+
+        functions = self._binary_view.get_functions_containing(address)
+        if not functions:
+            return {"error": "No function found at address"}
+
+        function = functions[0]
+        if not function.hlil:
+            return {"error": "No HLIL available for function"}
+
+        # Collect all HLIL instructions with their addresses
+        hlil_instructions = []
+        for instr in function.hlil.instructions:
+            if view_level == ViewLevel.HLIL:
+                content = f"  {str(instr)};"
+            else:
+                content = f"    {str(instr)};"
+
+            hlil_instructions.append({
+                "address": f"0x{instr.address:x}",
+                "content": content,
+                "instr_index": instr.instr_index
+            })
+
+        if not hlil_instructions:
+            return {"error": "No HLIL instructions found"}
+
+        # Find the instruction at or closest to the target address
+        current_index = -1
+        best_distance = float('inf')
+
+        for i, instr in enumerate(hlil_instructions):
+            instr_addr = int(instr["address"], 16)
+            distance = abs(instr_addr - address)
+
+            # Exact match
+            if instr_addr == address:
+                current_index = i
+                break
+
+            # Find closest instruction (prefer instructions before the target)
+            if distance < best_distance:
+                best_distance = distance
+                current_index = i
+
+        if current_index == -1:
+            current_index = 0
+
+        # Mark current line
+        current_line = hlil_instructions[current_index].copy()
+        current_line["is_current"] = True
+
+        # Extract context before
+        start_index = max(0, current_index - context_lines)
+        lines_before = hlil_instructions[start_index:current_index]
+
+        # Extract context after
+        end_index = min(len(hlil_instructions), current_index + context_lines + 1)
+        lines_after = hlil_instructions[current_index + 1:end_index]
+
+        return {
+            "address": target_addr,
+            "view_level": view_level.value,
+            "current_line": current_line,
+            "lines_before": lines_before,
+            "lines_after": lines_after,
+            "function_context": self._get_function_context(address)
+        }
+
+    def _get_asm_line_with_context(self, address: int, context_lines: int = 5) -> Dict[str, Any]:
+        """Get assembly line at address with context by directly querying instructions."""
+        target_addr = f"0x{address:x}"
+
+        functions = self._binary_view.get_functions_containing(address)
+        if not functions:
+            # Not in a function, just get the single instruction
+            length = self._binary_view.get_instruction_length(address)
+            if length and length > 0:
+                instruction_text = self._binary_view.get_disassembly(address)
+                bytes_data = self._binary_view.read(address, length)
+                return {
+                    "address": target_addr,
+                    "view_level": "assembly",
+                    "current_line": {
+                        "address": target_addr,
+                        "content": instruction_text or "???",
+                        "is_current": True,
+                        "bytes": bytes_data.hex() if bytes_data else ""
+                    },
+                    "lines_before": [],
+                    "lines_after": [],
+                    "function_context": None
+                }
+            return {"error": "No instruction found at address"}
+
+        function = functions[0]
+
+        # Collect all instructions in the function
+        asm_instructions = []
+        current_addr = function.start
+        while current_addr < function.start + function.total_bytes:
+            length = self._binary_view.get_instruction_length(current_addr)
+            if not length or length == 0:
+                break
+
+            instruction_text = self._binary_view.get_disassembly(current_addr)
+            bytes_data = self._binary_view.read(current_addr, length)
+
+            asm_instructions.append({
+                "address": f"0x{current_addr:x}",
+                "content": instruction_text or "???",
+                "bytes": bytes_data.hex() if bytes_data else ""
+            })
+
+            current_addr += length
+
+        if not asm_instructions:
+            return {"error": "No assembly instructions found"}
+
+        # Find the instruction at the target address
+        current_index = -1
+        for i, instr in enumerate(asm_instructions):
+            if instr["address"] == target_addr:
+                current_index = i
+                break
+
+        # If exact match not found, find closest
+        if current_index == -1:
+            best_distance = float('inf')
+            for i, instr in enumerate(asm_instructions):
+                instr_addr = int(instr["address"], 16)
+                distance = abs(instr_addr - address)
+                if distance < best_distance:
+                    best_distance = distance
+                    current_index = i
+
+        if current_index == -1:
+            current_index = 0
+
+        # Mark current line
+        current_line = asm_instructions[current_index].copy()
+        current_line["is_current"] = True
+
+        # Extract context before
+        start_index = max(0, current_index - context_lines)
+        lines_before = asm_instructions[start_index:current_index]
+
+        # Extract context after
+        end_index = min(len(asm_instructions), current_index + context_lines + 1)
+        lines_after = asm_instructions[current_index + 1:end_index]
+
+        return {
+            "address": target_addr,
+            "view_level": "assembly",
+            "current_line": current_line,
+            "lines_before": lines_before,
+            "lines_after": lines_after,
+            "function_context": self._get_function_context(address)
+        }
+
     def get_line_context(self, address: int, view_level: ViewLevel) -> Dict[str, Any]:
         """Get specific line context at cursor position"""
         if not self._binary_view:

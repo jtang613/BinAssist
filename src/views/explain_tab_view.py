@@ -2,7 +2,7 @@
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                               QPushButton, QTextBrowser, QTextEdit, QLineEdit, QSizePolicy, QCheckBox,
-                              QApplication, QGroupBox, QGridLayout)
+                              QApplication, QGroupBox, QGridLayout, QSplitter, QFrame)
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QKeySequence, QFontDatabase
 import markdown
@@ -68,38 +68,58 @@ class ExplainTabView(QWidget):
     mcp_enabled_changed = Signal(bool)
     # RLHF feedback signals
     rlhf_feedback_requested = Signal(bool)  # True for upvote, False for downvote
-    
+    # Line explanation panel signals
+    line_explanation_closed = Signal()  # Emitted when user clicks close button
+
     def __init__(self):
         super().__init__()
         self.is_edit_mode = False
         self.function_query_running = False
         self.line_query_running = False
         self.markdown_content = "No explanation available. Click 'Explain Function' or 'Explain Line' to generate content."
+        self.line_markdown_content = ""  # Separate content for line explanation
         self.setup_ui()
     
     def setup_ui(self):
         layout = QVBoxLayout()
         layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(5)
-        
+
         # Top row - Current Offset and Edit/Save button
         self.create_top_row(layout)
-        
-        # Main text widget - HTML browser/Markdown editor
-        self.create_main_text_widget(layout)
+
+        # Create splitter for function and line explanation panels
+        self.main_splitter = QSplitter(Qt.Vertical)
+
+        # Main text widget - HTML browser/Markdown editor (function explanation)
+        self.create_main_text_widget()
+
+        # Line explanation panel (initially hidden)
+        self.create_line_explanation_panel()
+
+        # Add widgets to splitter
+        self.main_splitter.addWidget(self.explain_browser)
+        self.main_splitter.addWidget(self.explain_editor)
+        self.main_splitter.addWidget(self.line_explanation_group)
+
+        # Set initial splitter sizes (function panel takes most space)
+        self.main_splitter.setSizes([400, 0, 150])
+        self.main_splitter.setStretchFactor(0, 3)  # Function browser
+        self.main_splitter.setStretchFactor(1, 3)  # Function editor (same stretch as browser)
+        self.main_splitter.setStretchFactor(2, 1)  # Line explanation
+
+        layout.addWidget(self.main_splitter)
 
         # Security analysis panel
         self.create_security_panel(layout)
-        
+
         # Bottom row - Action buttons
         self.create_bottom_row(layout)
 
-        # Main content should consume vertical space; security panel stays compact.
-        # (Both browser/editor exist in the layout; only one is visible at a time.)
-        layout.setStretchFactor(self.explain_browser, 1)
-        layout.setStretchFactor(self.explain_editor, 1)
+        # Security panel stays compact
+        layout.setStretchFactor(self.main_splitter, 1)
         layout.setStretchFactor(self.security_group, 0)
-        
+
         self.setLayout(layout)
     
     def create_top_row(self, parent_layout):
@@ -139,7 +159,7 @@ class ExplainTabView(QWidget):
         
         parent_layout.addLayout(top_row)
     
-    def create_main_text_widget(self, parent_layout):
+    def create_main_text_widget(self):
         # HTML browser for read-only mode (uses MarkdownCopyBrowser to copy markdown source)
         self.explain_browser = MarkdownCopyBrowser()
         self.explain_browser.set_markdown_source(self.markdown_content)
@@ -154,8 +174,32 @@ class ExplainTabView(QWidget):
         self.explain_editor.setPlainText(self.markdown_content)
         self.explain_editor.hide()  # Hidden by default
 
-        parent_layout.addWidget(self.explain_browser)
-        parent_layout.addWidget(self.explain_editor)
+    def create_line_explanation_panel(self):
+        """Create the line explanation panel (collapsible, dismissable)"""
+        self.line_explanation_group = QGroupBox("Line Explanation")
+        self.line_explanation_group.setVisible(False)  # Initially hidden
+
+        line_layout = QVBoxLayout()
+        line_layout.setContentsMargins(5, 5, 5, 5)
+        line_layout.setSpacing(3)
+
+        # Header row with close button
+        header_row = QHBoxLayout()
+        header_row.addStretch()
+        self.line_close_button = QPushButton("\u00d7")  # × symbol
+        self.line_close_button.setFixedSize(20, 20)
+        self.line_close_button.setToolTip("Close line explanation panel")
+        self.line_close_button.clicked.connect(self._on_line_close_clicked)
+        header_row.addWidget(self.line_close_button)
+        line_layout.addLayout(header_row)
+
+        # Line explanation browser
+        self.line_explanation_browser = MarkdownCopyBrowser()
+        self.line_explanation_browser.setOpenLinks(False)
+        self.line_explanation_browser.anchorClicked.connect(self._on_anchor_clicked)
+        line_layout.addWidget(self.line_explanation_browser)
+
+        self.line_explanation_group.setLayout(line_layout)
     
     def create_bottom_row(self, parent_layout):
         bottom_row = QHBoxLayout()
@@ -335,6 +379,42 @@ class ExplainTabView(QWidget):
         """Clear the explanation content"""
         default_content = "No explanation available. Click 'Explain Function' or 'Explain Line' to generate content."
         self.set_explanation_content(default_content)
+
+    # Line explanation panel methods
+
+    def set_line_explanation_content(self, markdown_text: str):
+        """Set the line explanation content and show the panel"""
+        self.line_markdown_content = markdown_text
+        self.line_explanation_browser.set_markdown_source(markdown_text)
+        self.line_explanation_browser.setHtml(self.markdown_to_html(markdown_text))
+        self.line_explanation_group.setVisible(True)
+
+        # Adjust splitter to show line panel if hidden
+        sizes = self.main_splitter.sizes()
+        if len(sizes) >= 3 and sizes[2] < 50:
+            # Give line panel reasonable space
+            total = sum(sizes)
+            new_sizes = [int(total * 0.6), 0, int(total * 0.4)]
+            if self.is_edit_mode:
+                new_sizes[0] = 0
+                new_sizes[1] = int(total * 0.6)
+            self.main_splitter.setSizes(new_sizes)
+
+    def clear_line_explanation(self):
+        """Clear and hide the line explanation panel"""
+        self.line_markdown_content = ""
+        self.line_explanation_browser.set_markdown_source("")
+        self.line_explanation_browser.setHtml("")
+        self.line_explanation_group.setVisible(False)
+
+    def get_line_explanation_content(self) -> str:
+        """Get the current line explanation content"""
+        return self.line_markdown_content
+
+    def _on_line_close_clicked(self):
+        """Handle close button click on line explanation panel"""
+        self.clear_line_explanation()
+        self.line_explanation_closed.emit()
     
     def _should_auto_scroll_to_bottom(self):
         """Check if we should auto-scroll to bottom (user is following the explanation)"""

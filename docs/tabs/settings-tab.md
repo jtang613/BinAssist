@@ -125,6 +125,33 @@ This section manages Model Context Protocol (MCP) servers that provide tools for
 - Navigation commands
 - Semantic graph queries
 
+## SymGraph Section
+
+Configure connection to the SymGraph cloud service for sharing symbols and graph data.
+
+### Configuration Fields
+
+| Field | Description |
+|-------|-------------|
+| **API URL** | SymGraph server URL (default: `https://api.SymGraph`) |
+| **API Key** | Your SymGraph API key (required for push/pull operations) |
+
+### Features
+
+- **Query**: Look up symbols for any binary by hash (free, no API key required)
+- **Push**: Upload symbols and graph data to share with others (requires API key)
+- **Pull**: Download symbols and graph data from others (requires API key)
+
+### Getting an API Key
+
+To use push/pull features:
+1. Register at [symgraph.io](https://symgraph.io)
+2. Generate an API key in your account settings
+3. Enter the key in the API Key field
+4. Click **Test** to verify connectivity
+
+For more details, see the [SymGraph Tab](symgraph-tab.md) and [SymGraph Workflow](../workflows/symgraph-workflow.md) documentation.
+
 ## System Prompt Section
 
 Customize the system prompt sent to the LLM with every request.

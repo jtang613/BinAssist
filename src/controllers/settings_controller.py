@@ -27,6 +27,7 @@ from ..services import (
     LLMProviderError, APIProviderError, AuthenticationError,
     RateLimitError, NetworkError
 )
+from ..services.symgraph_service import symgraph_service, SymGraphAuthError, SymGraphNetworkError, SymGraphAPIError
 from ..views.settings_tab_view import SettingsTabView
 
 
@@ -256,6 +257,90 @@ class MCPTestWorker(QThread):
             log.log_error(f"MCP server test execution failed for '{server_name}': {e}")
             error_message = f"❌ Test execution error: {str(e)}"
             self.test_completed.emit(False, error_message, {})
+
+
+class SymGraphTestWorker(QThread):
+    """Worker thread for testing SymGraph API connectivity"""
+
+    # Signals
+    test_completed = Signal(bool, str)  # success, message
+
+    def __init__(self):
+        super().__init__()
+
+    def run(self):
+        """Run SymGraph API test in background thread"""
+        try:
+            log.log_info("Testing SymGraph API connection...")
+
+            # Create a new event loop for this thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            try:
+                # Run the async test with timeout
+                success, message = loop.run_until_complete(
+                    asyncio.wait_for(self._test_symgraph(), timeout=30.0)
+                )
+
+                if success:
+                    log.log_info("SymGraph API test successful")
+                else:
+                    log.log_warn("SymGraph API test failed")
+
+                self.test_completed.emit(success, message)
+
+            except asyncio.TimeoutError:
+                log.log_warn("SymGraph API test timeout after 30 seconds")
+                self.test_completed.emit(False, "⏱️ Test timeout after 30 seconds")
+
+            except Exception as e:
+                log.log_error(f"SymGraph API test execution failed: {e}")
+                self.test_completed.emit(False, f"❌ Test execution error: {str(e)}")
+
+            finally:
+                # Clean shutdown of event loop
+                try:
+                    pending = asyncio.all_tasks(loop)
+                    if pending:
+                        for task in pending:
+                            task.cancel()
+                        loop.run_until_complete(
+                            asyncio.gather(*pending, return_exceptions=True)
+                        )
+                except Exception as cleanup_error:
+                    log.log_debug(f"Event loop cleanup warning: {cleanup_error}")
+                finally:
+                    loop.close()
+
+        except Exception as e:
+            log.log_error(f"SymGraph API test setup failed: {e}")
+            self.test_completed.emit(False, f"❌ Test setup error: {str(e)}")
+
+    async def _test_symgraph(self):
+        """Async method to test SymGraph API connectivity"""
+        try:
+            # Test basic connectivity by checking if a known test hash exists
+            # This tests the API URL is reachable without requiring authentication
+            test_hash = "0000000000000000000000000000000000000000000000000000000000000000"
+            await symgraph_service.check_binary_exists(test_hash)
+
+            # If we have an API key, test authentication
+            if symgraph_service.has_api_key:
+                try:
+                    await symgraph_service.get_symbols(test_hash)
+                    return True, "✅ API reachable, authentication successful"
+                except SymGraphAuthError as e:
+                    return False, f"🔐 API reachable but authentication failed: {str(e)}"
+            else:
+                return True, "✅ API reachable (no API key configured)"
+
+        except SymGraphNetworkError as e:
+            return False, f"🌐 Network error: {str(e)}"
+        except SymGraphAPIError as e:
+            return False, f"🔧 API error: {str(e)}"
+        except Exception as e:
+            return False, f"❌ Unexpected error: {str(e)}"
 
 
 class ProviderDialog(QDialog):
@@ -1121,6 +1206,10 @@ class SettingsController(QObject):
         self.view.system_prompt_changed.connect(self.update_system_prompt)
         self.view.database_path_changed.connect(self.update_database_path)
 
+        # SymGraph signals
+        self.view.symgraph_api_url_changed.connect(self.update_symgraph_api_url)
+        self.view.symgraph_api_key_changed.connect(self.update_symgraph_api_key)
+        self.view.symgraph_test_requested.connect(self.test_symgraph)
     
     def load_initial_data(self):
         """Load initial data from service into view"""
@@ -1188,6 +1277,10 @@ class SettingsController(QObject):
             self.view.rlhf_db_path.setText(self.service.get_setting('rlhf_db_path', ''))
             self.view.rag_index_path.setText(self.service.get_setting('rag_index_path', ''))
 
+            # Load SymGraph settings (only if section was created)
+            if hasattr(self.view, 'symgraph_url_field'):
+                self.view.set_symgraph_api_url(self.service.get_symgraph_api_url())
+                self.view.set_symgraph_api_key(self.service.get_symgraph_api_key())
 
         except Exception as e:
             self.show_error("Failed to load settings", str(e))
@@ -1557,6 +1650,56 @@ class SettingsController(QObject):
         except Exception as e:
             self.show_error("Failed to Update Database Path", str(e))
 
+    # SymGraph methods
+
+    def update_symgraph_api_url(self, url):
+        """Handle SymGraph API URL updates"""
+        try:
+            self.service.set_symgraph_api_url(url)
+            log.log_debug(f"Updated SymGraph API URL: {url}")
+        except Exception as e:
+            self.show_error("Failed to Update SymGraph API URL", str(e))
+
+    def update_symgraph_api_key(self, key):
+        """Handle SymGraph API key updates"""
+        try:
+            self.service.set_symgraph_api_key(key)
+            log.log_debug("Updated SymGraph API key")
+        except Exception as e:
+            self.show_error("Failed to Update SymGraph API Key", str(e))
+
+    def test_symgraph(self):
+        """Handle testing SymGraph API connection"""
+        try:
+            # Save current field values before testing
+            self.service.set_symgraph_api_url(self.view.symgraph_url_field.text().strip())
+            self.service.set_symgraph_api_key(self.view.symgraph_key_field.text())
+
+            # Disable the test button and show testing state
+            self.view.set_symgraph_test_enabled(False)
+            self.view.set_symgraph_test_status('testing', 'Testing SymGraph API connection...')
+
+            # Create and start the test worker
+            self.symgraph_test_worker = SymGraphTestWorker()
+            self.symgraph_test_worker.test_completed.connect(self.on_symgraph_test_completed)
+            self.symgraph_test_worker.finished.connect(self.symgraph_test_worker.deleteLater)
+            self.symgraph_test_worker.start()
+
+        except Exception as e:
+            self.show_error("Test Failed", str(e))
+            self.view.set_symgraph_test_enabled(True)
+            self.view.set_symgraph_test_status('failure', f'Test failed: {str(e)}')
+
+    def on_symgraph_test_completed(self, success, message):
+        """Handle SymGraph test completion"""
+        # Re-enable the test button
+        self.view.set_symgraph_test_enabled(True)
+
+        # Update status indicator
+        if success:
+            self.view.set_symgraph_test_status('success', message)
+        else:
+            self.view.set_symgraph_test_status('failure', message)
 
     # Utility methods
     

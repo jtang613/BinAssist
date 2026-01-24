@@ -12,6 +12,10 @@ Before installing BinAssist, ensure you have:
 
 ## Installation
 
+### Step 0: Running Windows? Read this first
+
+BinAssist works on Windows, but the MCP SDK has some dependencies that require manual effort to install properly. Please refer to: [BinAssist on Windows](binassist-on-windows.md)
+
 ### Step 1: Install the Plugin
 
 BinAssist can be installed from the Binary Ninja Plugin Manager or manually:

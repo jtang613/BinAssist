@@ -10,7 +10,7 @@ BinAssist is an advanced LLM plugin designed to enhance binary analysis and reve
 The plugin supports any OpenAI v1-compatible or Anthropic API, making it compatible with popular LLM providers including Ollama, LM Studio, Open-WebUI, OpenAI, Anthropic, AWS Bedrock (via LiteLLM), and others.
 
 **Recommended models:**
-- **With Reasoning Support**: Claude Sonnet 4+, OpenAI o1/o3/gpt-5, GPT-OSS (supports extended thinking for complex analysis)
+- **With Reasoning Support**: Claude Sonnet 4+, OpenAI GPT-5+, GPT-OSS (supports extended thinking for complex analysis)
 - **General Purpose**: DeepSeek, LLaMA-based coder models, Claude Sonnet 3.5, GPT-4
 
 ## Core Features
@@ -107,6 +107,8 @@ The plugin supports any OpenAI v1-compatible or Anthropic API, making it compati
 ## Quick Start Guide
 
 ### 1. Installation
+
+Windows users should start with: [BinAssist on Windows](docs/binassist-on-windows.md)
 ```bash
 # Install dependencies from the plugin directory
 pip install -r requirements.txt
@@ -117,7 +119,7 @@ pip install -r requirements.txt
 2. Configure your LLM provider:
    - **API Host**: Point to your preferred API endpoint (e.g., `http://localhost:11434` for Ollama)
    - **API Key**: Set authentication key if required
-   - **Model**: Choose your preferred model (e.g., `gpt-oss:20b`, `claude-sonnet-4-5`, `o1-preview`)
+   - **Model**: Choose your preferred model (e.g., `gpt-oss:20b`, `claude-sonnet-4-5`, `gpt-5.2-codex`)
 3. Set database paths for RLHF and RAG features
 4. Adjust token limits based on your needs
 5. Configure **Reasoning Effort** in the Settings tab for models that support extended thinking
@@ -265,7 +267,7 @@ ollama serve  # Runs on http://localhost:11434
 
 1. **Install Dependencies**:
    ```bash
-   cd /path/to/BinAssist2
+   cd /path/to/BinAssist
    pip install -r requirements.txt
    ```
 
@@ -289,6 +291,7 @@ httpx                  # HTTP client for API calls
 anyio>=4.6             # Async I/O support
 mcp                    # Model Context Protocol client
 whoosh                 # Full-text search for RAG documents
+aiohttp                # OAuth clients
 ```
 
 ## Contributing

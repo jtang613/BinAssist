@@ -564,7 +564,7 @@ class ReActOrchestrator:
         request = ChatRequest(
             messages=managed_history,
             model=self.llm_provider.model if hasattr(self.llm_provider, 'model') else '',
-            max_tokens=4096,
+            max_tokens=getattr(self.llm_provider, 'max_tokens', 4096),
             temperature=0.7,
             stream=True,
             tools=self.mcp_tools if has_tool_messages else None
@@ -658,7 +658,7 @@ class ReActOrchestrator:
         request = ChatRequest(
             messages=managed_history,
             model=self.llm_provider.model if hasattr(self.llm_provider, 'model') else '',
-            max_tokens=4096,
+            max_tokens=getattr(self.llm_provider, 'max_tokens', 4096),
             temperature=0.7,
             stream=True,
             tools=self.mcp_tools if self.mcp_tools else None

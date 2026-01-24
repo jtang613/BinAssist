@@ -13,7 +13,7 @@ The plugin supports both local LLMs (via Ollama, LM Studio) and cloud providers 
 
 ## Core Capabilities
 
-BinAssist is organized into six tabs, each focused on a specific aspect of LLM-assisted analysis:
+BinAssist is organized into seven tabs, each focused on a specific aspect of LLM-assisted analysis:
 
 | Tab | Purpose |
 |-----|---------|

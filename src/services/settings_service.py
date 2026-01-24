@@ -197,6 +197,24 @@ class SettingsService:
                 'category': 'ui'
             },
 
+            # SymGraph feature flag
+            'symgraph_enabled': {
+                'value': '0',
+                'type': 'boolean',
+                'category': 'symgraph'
+            },
+
+            # SymGraph settings
+            'symgraph_api_url': {
+                'value': 'https://api.SymGraph',
+                'type': 'string',
+                'category': 'symgraph'
+            },
+            'symgraph_api_key': {
+                'value': '',
+                'type': 'string',
+                'category': 'symgraph'
+            }
         }
         
         with self._db_lock:
@@ -866,7 +884,34 @@ class SettingsService:
         except Exception as e:
             log.log_error(f"Failed to save system prompt: {e}")
             return False
-    
+
+    # SymGraph Settings
+
+    def is_symgraph_enabled(self) -> bool:
+        """Check if the SymGraph feature is enabled"""
+        return self.get_setting('symgraph_enabled', False)
+
+    def get_symgraph_api_url(self) -> str:
+        """Get the SymGraph API URL"""
+        return self.get_setting('symgraph_api_url', 'https://api.SymGraph')
+
+    def set_symgraph_api_url(self, url: str) -> bool:
+        """Set the SymGraph API URL"""
+        return self.set_setting('symgraph_api_url', url, 'symgraph')
+
+    def get_symgraph_api_key(self) -> str:
+        """Get the SymGraph API key"""
+        return self.get_setting('symgraph_api_key', '')
+
+    def set_symgraph_api_key(self, key: str) -> bool:
+        """Set the SymGraph API key"""
+        return self.set_setting('symgraph_api_key', key, 'symgraph')
+
+    def has_symgraph_api_key(self) -> bool:
+        """Check if a SymGraph API key is configured"""
+        key = self.get_symgraph_api_key()
+        return bool(key and key.strip())
+
     def close(self):
         """Close database connections (for cleanup)"""
         # SQLite connections are closed after each operation
