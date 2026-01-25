@@ -18,7 +18,8 @@ from ..services.mcp_tool_orchestrator import MCPToolOrchestrator
 from ..services.models.llm_models import ToolCall, ToolResult
 from ..services.rlhf_service import rlhf_service
 from ..services.models.rlhf_models import RLHFFeedbackEntry
-from ..services.debounced_renderer import DebouncedRenderer
+from ..services.streaming import StreamingMarkdownRenderer
+from ..services.streaming.reasoning_filter import ReasoningFilter
 
 try:
     import binaryninja
@@ -76,9 +77,13 @@ class ExplainController:
             'response': None
         }
 
-        # Debounced rendering for streaming responses
-        self._debounced_renderer = DebouncedRenderer(
-            update_callback=self._debounced_update_callback
+        # Streaming renderer and reasoning filter for responsive streaming
+        self._streaming_renderer = StreamingMarkdownRenderer(
+            update_callback=self._on_streaming_update
+        )
+        self._reasoning_filter = ReasoningFilter(
+            on_content=self._streaming_renderer.on_chunk,
+            on_thinking_start=self._on_thinking_start,
         )
 
         # Connect view signals
@@ -782,8 +787,10 @@ Analyze the specific instruction/line of code below. Provide a detailed explanat
         self._tool_call_attempts.clear()
         self._tool_call_rounds = 0  # Reset round counter
 
-        # Start debounced rendering for streaming responses
-        self._debounced_renderer.start()
+        # Reset streaming state for new query
+        self._reasoning_filter.reset()
+        self._streaming_renderer.reset()
+        self.view.explain_browser.reset_streaming()
 
         # Initialize conversation history with the user query
         self._conversation_history = [{"role": "user", "content": query}]
@@ -813,25 +820,15 @@ Analyze the specific instruction/line of code below. Provide a detailed explanat
             self.llm_thread.response_error.connect(self._on_llm_response_error)
             self.llm_thread.start()
 
-    def _debounced_update_callback(self, accumulated_content: str):
-        """
-        Callback for debounced renderer - called periodically with accumulated content.
+    def _on_streaming_update(self, update) -> None:
+        """Handle streaming renderer updates."""
+        self.view.explain_browser.apply_render_update(update)
+        markdown = self._streaming_renderer.get_full_markdown()
+        self.view.explain_browser.set_markdown_source(markdown)
 
-        This is called every 1 second (by default) instead of on every chunk,
-        reducing UI updates by 10-40x and preventing stuttering.
-
-        We do proper markdown rendering here, but only ~10-20 times per response
-        instead of 200+ times. Even though markdown parsing is on the main thread,
-        it only happens periodically (1s intervals), keeping the UI responsive.
-
-        This matches the GhidrAssist implementation strategy.
-
-        Args:
-            accumulated_content: The accumulated response content from all deltas
-        """
-        # Use set_explanation_content to properly update both markdown_content and HTML
-        # This ensures get_explanation_content() returns the correct value when saving to DB
-        self.view.set_explanation_content(accumulated_content)
+    def _on_thinking_start(self) -> None:
+        """Show thinking indicator when <reasoning> detected."""
+        self._streaming_renderer.on_chunk("*Thinking...*\n\n")
 
     def _on_llm_response_chunk(self, chunk: str):
         """Handle streaming response chunk from LLM"""
@@ -841,19 +838,24 @@ Analyze the specific instruction/line of code below. Provide a detailed explanat
 
         self._llm_response_buffer += chunk
 
-        # Feed ONLY the chunk (not the entire buffer) to debounced renderer
-        # The debouncer will accumulate the chunks and render periodically (every 1 second)
-        # instead of on every delta, reducing UI updates by 10-40x
-        self._debounced_renderer.on_delta(chunk)
+        # Feed chunk through reasoning filter (which feeds to streaming renderer)
+        self._reasoning_filter.feed(chunk)
     
     def _on_llm_response_complete(self):
         """Handle completion of LLM response"""
         log.log_info("LLM response completed")
 
-        # Stop debounced rendering and do final render
-        # This ensures the final complete response is displayed
-        if hasattr(self, '_llm_response_buffer'):
-            self._debounced_renderer.complete(self._llm_response_buffer)
+        # Complete streaming and get filtered content
+        self._reasoning_filter.complete()
+        self._streaming_renderer.on_stream_complete()
+        filtered_content = self._streaming_renderer.get_full_markdown()
+
+        # Update view markdown content for edit mode compatibility
+        self.view.markdown_content = filtered_content
+
+        # Reset streaming state for next query
+        self._reasoning_filter.reset()
+        self._streaming_renderer.reset()
 
         # Update RLHF context with final response
         if hasattr(self, '_llm_response_buffer') and self._llm_response_buffer:
@@ -922,8 +924,9 @@ Analyze the specific instruction/line of code below. Provide a detailed explanat
         """Handle LLM response error"""
         log.log_error(f"LLM query failed: {error}")
 
-        # Cancel debounced rendering
-        self._debounced_renderer.cancel()
+        # Reset streaming state
+        self._reasoning_filter.reset()
+        self._streaming_renderer.reset()
 
         error_markdown = f"**Error:** {error}\n\n*Falling back to static analysis...*"
         self.view.set_explanation_content(error_markdown)
@@ -1322,8 +1325,9 @@ Analyze the specific instruction/line of code below. Provide a detailed explanat
         """Stop the current function query"""
         log.log_info("Stop function query requested")
 
-        # Cancel debounced rendering
-        self._debounced_renderer.cancel()
+        # Reset streaming state
+        self._reasoning_filter.reset()
+        self._streaming_renderer.reset()
 
         if self.function_query_active and hasattr(self, 'llm_thread'):
             self.llm_thread.cancel()
@@ -1334,8 +1338,9 @@ Analyze the specific instruction/line of code below. Provide a detailed explanat
         """Stop the current line query"""
         log.log_info("Stop line query requested")
 
-        # Cancel debounced rendering
-        self._debounced_renderer.cancel()
+        # Reset streaming state
+        self._reasoning_filter.reset()
+        self._streaming_renderer.reset()
 
         # Clean up line-specific LLM thread
         if self.line_query_active and hasattr(self, 'line_llm_thread'):

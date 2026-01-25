@@ -8,6 +8,8 @@ from PySide6.QtGui import QKeySequence, QFontDatabase
 import markdown
 import re
 
+from .streaming_markdown_browser import StreamingMarkdownBrowser
+
 
 class MarkdownCopyBrowser(QTextBrowser):
     """
@@ -160,8 +162,8 @@ class ExplainTabView(QWidget):
         parent_layout.addLayout(top_row)
     
     def create_main_text_widget(self):
-        # HTML browser for read-only mode (uses MarkdownCopyBrowser to copy markdown source)
-        self.explain_browser = MarkdownCopyBrowser()
+        # HTML browser for read-only mode (uses StreamingMarkdownBrowser for responsive streaming)
+        self.explain_browser = StreamingMarkdownBrowser()
         self.explain_browser.set_markdown_source(self.markdown_content)
         self.explain_browser.setHtml(self.markdown_to_html(self.markdown_content))
         self.explain_browser.anchorClicked.connect(self._on_anchor_clicked)

@@ -371,12 +371,7 @@ class OpenAIPlatformApiProvider(BaseLLMProvider):
             accumulated_content = ""
             accumulated_tool_calls = []
             building_tool_calls = {}  # tool_index -> partial tool data
-            
-            # Batching variables to reduce UI update frequency
-            batch_content = ""
-            batch_count = 0
-            BATCH_SIZE = 10  # Emit every 10 chunks
-            
+
             try:
                 finished = False
                 for chunk in stream:
@@ -386,25 +381,19 @@ class OpenAIPlatformApiProvider(BaseLLMProvider):
                     choice = chunk.choices[0]
                     delta = choice.delta
                     
-                    # Handle content delta with batching
+                    # Handle content delta - yield immediately for responsive streaming
                     if delta.content is not None and delta.content:
                         accumulated_content += delta.content
-                        batch_content += delta.content
-                        batch_count += 1
-                        
-                        # Emit batched content every BATCH_SIZE chunks
-                        if batch_count >= BATCH_SIZE:
-                            yield ChatResponse(
-                                content=batch_content,
-                                model=self.model,
-                                usage=Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
-                                tool_calls=[],
-                                finish_reason="",
-                                is_streaming=True
-                            )
-                            # Reset batch
-                            batch_content = ""
-                            batch_count = 0
+                        yield ChatResponse(
+                            content=delta.content,
+                            model=self.model,
+                            usage=Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
+                            tool_calls=[],
+                            finish_reason="",
+                            is_streaming=True
+                        )
+                        # Yield control to event loop for responsive UI updates
+                        await asyncio.sleep(0)
                     
                     # Handle tool call deltas - properly accumulate across chunks
                     if delta.tool_calls:
@@ -432,19 +421,6 @@ class OpenAIPlatformApiProvider(BaseLLMProvider):
                     
                     # Handle finish reason - only process the first one
                     if choice.finish_reason and not finished:
-                        # Emit any remaining batched content before finalizing
-                        if batch_content:
-                            yield ChatResponse(
-                                content=batch_content,
-                                model=self.model,
-                                usage=Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
-                                tool_calls=[],
-                                finish_reason="",
-                                is_streaming=True
-                            )
-                            batch_content = ""
-                            batch_count = 0
-                        
                         # Convert accumulated tool calls to ToolCall objects
                         final_tool_calls = []
                         for tool_index, tool_data in building_tool_calls.items():

@@ -73,16 +73,15 @@ class LiteLLMProvider(OpenAIPlatformApiProvider):
         if not original_api_key:
             self.api_key = ''
 
-        # Override timeout and retry settings for LiteLLM/Bedrock
+        # Override timeout settings for LiteLLM/Bedrock
         # Bedrock can be significantly slower than direct API calls
-        # LiteLLM adds overhead, and Bedrock throttles aggressively
-        try:
-            import httpx
-            # Recreate client with longer timeout (5 minutes for LiteLLM/Bedrock)
-            timeout = 300.0
-            log.log_info(f"LiteLLM: Using extended timeout of {timeout}s for reliability")
+        # Only recreate client if TLS is disabled (requires custom httpx client)
+        timeout = 300.0
+        log.log_info(f"LiteLLM: Using extended timeout of {timeout}s for reliability")
 
-            if self.disable_tls:
+        if self.disable_tls:
+            try:
+                import httpx
                 import ssl
                 ssl_context = ssl.create_default_context()
                 ssl_context.check_hostname = False
@@ -97,17 +96,16 @@ class LiteLLMProvider(OpenAIPlatformApiProvider):
                     max_retries=0,
                     http_client=http_client
                 )
-            else:
-                self._client.close()  # Close old client
-                from openai import OpenAI
-                self._client = OpenAI(
-                    api_key=self.api_key or 'dummy',
-                    base_url=self.url if self.url else None,
-                    timeout=timeout,
-                    max_retries=0
-                )
-        except Exception as e:
-            log.log_warn(f"Failed to update LiteLLM client timeout: {e}")
+            except Exception as e:
+                log.log_warn(f"Failed to update LiteLLM client for TLS bypass: {e}")
+        else:
+            # Don't recreate client - use the one from parent with default settings
+            # This preserves better streaming behavior from the SDK defaults
+            # Just update the timeout on the existing client
+            try:
+                self._client.timeout = timeout
+            except Exception as e:
+                log.log_debug(f"Could not update client timeout: {e}")
 
         # Use longer retry delays for LiteLLM/Bedrock (5s base instead of 2s)
         self.rate_limit_min_delay = 5.0
@@ -217,12 +215,8 @@ class LiteLLMProvider(OpenAIPlatformApiProvider):
             # Tools provided by orchestrator (either for actual use or for Bedrock compatibility)
             completion_kwargs["tools"] = request_tools
             log.log_debug(f"LiteLLM: Using {len(request_tools)} tools from request")
-        else:
-            # LITELLM/BEDROCK QUIRK #1: Empty tools array for compatibility
-            # The orchestrator handles detecting when tools are needed for Bedrock compatibility
-            # If no tools provided, use empty array
-            completion_kwargs["tools"] = []
-            log.log_debug("LiteLLM: Added empty tools array for compatibility")
+        # Note: Don't add empty tools array - it can interfere with streaming on some backends
+        # The Bedrock compatibility quirk was causing streaming issues
 
         # Handle reasoning effort based on model family
         reasoning_effort_str = self.config.get('reasoning_effort', 'none')
@@ -311,6 +305,16 @@ class LiteLLMProvider(OpenAIPlatformApiProvider):
                 log.log_info(f"       tool_call_id={msg.get('tool_call_id')}, name={msg.get('name', 'N/A')}")
             if has_thinking:
                 log.log_info(f"       thinking_blocks={len(msg.get('thinking_blocks', []))}, reasoning_content={len(msg.get('reasoning_content', '')) if msg.get('reasoning_content') else 0} chars")
+
+        # Fix empty content in assistant messages with tool calls
+        # Bedrock rejects content blocks with empty text (OpenAI format `content: ""`
+        # becomes Bedrock format `content: [{"type": "text", "text": ""}]` which fails)
+        for msg in result:
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                content = msg.get("content")
+                if content is None or (isinstance(content, str) and not content.strip()):
+                    msg["content"] = " "  # Minimal non-empty content
+                    log.log_debug(f"LiteLLM: Fixed empty content in assistant message with tool calls")
 
         return result
 
@@ -422,12 +426,22 @@ class LiteLLMProvider(OpenAIPlatformApiProvider):
                     total_tokens=response.usage.total_tokens
                 )
 
+            # Build native_content with thinking blocks for ReAct to capture
+            # (same data that goes to native_message_callback, but embedded in ChatResponse)
+            native_content_for_response = {}
+            choice = response.choices[0]
+            if hasattr(choice.message, 'reasoning_content') and choice.message.reasoning_content:
+                native_content_for_response["reasoning_content"] = choice.message.reasoning_content
+            if hasattr(choice.message, 'thinking_blocks') and choice.message.thinking_blocks:
+                native_content_for_response["thinking_blocks"] = choice.message.thinking_blocks
+
             return ChatResponse(
                 content=content,
                 model=self.model,
                 usage=usage,
                 tool_calls=tool_calls,
-                finish_reason=response.choices[0].finish_reason or "stop"
+                finish_reason=response.choices[0].finish_reason or "stop",
+                native_content=native_content_for_response if native_content_for_response else None
             )
 
         except openai.AuthenticationError as e:
@@ -518,39 +532,34 @@ class LiteLLMProvider(OpenAIPlatformApiProvider):
                 # Call non-streaming API with native_message_callback to capture thinking_blocks
                 non_streaming_response = await self.chat_completion(request, native_message_callback)
 
-                # Simulate streaming by yielding the response in chunks
-                # First yield content if present
+                # Yield the full content at once (no fake chunking)
                 if non_streaming_response.content:
-                    # Break content into smaller chunks for smoother UI updates
-                    chunk_size = 50  # characters per chunk
-                    content = non_streaming_response.content
-                    for i in range(0, len(content), chunk_size):
-                        chunk_text = content[i:i+chunk_size]
-                        yield ChatResponse(
-                            content=chunk_text,
-                            model=self.model,
-                            usage=Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
-                            tool_calls=[],
-                            finish_reason="",
-                            is_streaming=True
-                        )
-                        # Small delay to simulate streaming (optional)
-                        await asyncio.sleep(0.01)
+                    yield ChatResponse(
+                        content=non_streaming_response.content,
+                        model=self.model,
+                        usage=Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
+                        tool_calls=[],
+                        finish_reason="",
+                        is_streaming=True
+                    )
 
-                # Finally yield the complete response with tool calls
+                # Yield the final response with tool calls, usage, and native_content
                 yield ChatResponse(
-                    content="",  # Already sent as chunks
+                    content="",
                     model=non_streaming_response.model,
                     usage=non_streaming_response.usage,
                     tool_calls=non_streaming_response.tool_calls,
                     finish_reason=non_streaming_response.finish_reason,
-                    is_streaming=False  # Mark as final
+                    is_streaming=False,  # Mark as final
+                    native_content=non_streaming_response.native_content  # Pass through from non-streaming
                 )
                 return
 
             # Use our quirk-aware completion kwargs builder
             completion_kwargs = self._prepare_completion_kwargs(request)
             completion_kwargs["stream"] = True
+            # Add stream_options for better streaming control (if supported by backend)
+            completion_kwargs["stream_options"] = {"include_usage": True}
 
             # Make streaming API call
             stream = self._client.chat.completions.create(**completion_kwargs)
@@ -559,11 +568,6 @@ class LiteLLMProvider(OpenAIPlatformApiProvider):
             accumulated_reasoning = ""  # Track reasoning content for thinking-enabled models
             building_tool_calls = {}  # tool_index -> partial tool data
             thinking_blocks = []  # Store complete thinking blocks when received
-
-            # Batching variables to reduce UI update frequency
-            batch_content = ""
-            batch_count = 0
-            BATCH_SIZE = 10  # Emit every 10 chunks
 
             try:
                 finished = False
@@ -578,25 +582,19 @@ class LiteLLMProvider(OpenAIPlatformApiProvider):
                     if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
                         accumulated_reasoning += delta.reasoning_content
 
-                    # Handle content delta with batching
+                    # Handle content delta - yield immediately for responsive streaming
                     if delta.content is not None and delta.content:
                         accumulated_content += delta.content
-                        batch_content += delta.content
-                        batch_count += 1
-
-                        # Emit batched content every BATCH_SIZE chunks
-                        if batch_count >= BATCH_SIZE:
-                            yield ChatResponse(
-                                content=batch_content,
-                                model=self.model,
-                                usage=Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
-                                tool_calls=[],
-                                finish_reason="",
-                                is_streaming=True
-                            )
-                            # Reset batch
-                            batch_content = ""
-                            batch_count = 0
+                        yield ChatResponse(
+                            content=delta.content,
+                            model=self.model,
+                            usage=Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
+                            tool_calls=[],
+                            finish_reason="",
+                            is_streaming=True
+                        )
+                        # Yield control to event loop for responsive UI updates
+                        await asyncio.sleep(0)
 
                     # Handle tool call deltas - accumulate across chunks
                     if delta.tool_calls:
@@ -624,17 +622,6 @@ class LiteLLMProvider(OpenAIPlatformApiProvider):
 
                     # Handle finish reason
                     if choice.finish_reason and not finished:
-                        # Emit any remaining batched content
-                        if batch_content:
-                            yield ChatResponse(
-                                content=batch_content,
-                                model=self.model,
-                                usage=Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
-                                tool_calls=[],
-                                finish_reason="",
-                                is_streaming=True
-                            )
-
                         # Convert accumulated tool calls to ToolCall objects
                         final_tool_calls = []
                         for tool_index, tool_data in building_tool_calls.items():
@@ -693,14 +680,22 @@ class LiteLLMProvider(OpenAIPlatformApiProvider):
 
                             native_message_callback(native_message, self.get_provider_type())
 
-                        # Emit final response with tool calls
+                        # Build native_content with thinking blocks for ReAct to capture
+                        native_content_for_response = {}
+                        if accumulated_reasoning:
+                            native_content_for_response["reasoning_content"] = accumulated_reasoning
+                        if thinking_blocks:
+                            native_content_for_response["thinking_blocks"] = thinking_blocks
+
+                        # Emit final response with tool calls AND native_content
                         final_response = ChatResponse(
                             content="",  # Empty content since all sent as deltas
                             model=self.model,
                             usage=Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
                             tool_calls=final_tool_calls,
                             finish_reason=choice.finish_reason,
-                            is_streaming=False  # Mark as final response
+                            is_streaming=False,  # Mark as final response
+                            native_content=native_content_for_response if native_content_for_response else None
                         )
                         yield final_response
                         finished = True

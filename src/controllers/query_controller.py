@@ -18,7 +18,8 @@ from ..services.models.llm_models import ToolCall, ToolResult
 from ..services.rlhf_service import rlhf_service
 from ..services.models.rlhf_models import RLHFFeedbackEntry
 from .chat_edit_manager import ChatEditManager
-from ..services.debounced_renderer import DebouncedRenderer
+from ..services.streaming import StreamingMarkdownRenderer
+from ..services.streaming.reasoning_filter import ReasoningFilter
 from .react_thread import ReActOrchestratorThread
 from ..services.models.react_models import ReActConfig, ReActResult, ReActStatus
 
@@ -533,9 +534,13 @@ class QueryController:
         self._continuation_complete = False
         self._tool_call_attempts = {}  # Track tool call attempts for loop prevention
 
-        # Debounced rendering for streaming responses
-        self._debounced_renderer = DebouncedRenderer(
-            update_callback=self._debounced_update_callback
+        # Streaming renderer and reasoning filter for responsive streaming
+        self._streaming_renderer = StreamingMarkdownRenderer(
+            update_callback=self._on_streaming_update
+        )
+        self._reasoning_filter = ReasoningFilter(
+            on_content=self._streaming_renderer.on_chunk,
+            on_thinking_start=self._on_thinking_start,
         )
 
         # ReAct (agentic mode) state
@@ -975,8 +980,9 @@ class QueryController:
         """Stop the current query"""
         log.log_info("Stop query requested")
 
-        # Cancel debounced rendering
-        self._debounced_renderer.cancel()
+        # Reset streaming state
+        self._reasoning_filter.reset()
+        self._streaming_renderer.reset()
 
         # Cancel ReAct if active
         if self._react_active and self._react_thread:
@@ -1550,31 +1556,21 @@ class QueryController:
             except Exception as e:
                 log.log_error(f"Failed to persist chat message: {e}")
 
-    def _debounced_update_callback(self, accumulated_content: str):
-        """
-        Callback for debounced renderer - called periodically with accumulated content.
-
-        This is called every 1 second (by default) instead of on every chunk,
-        reducing UI updates by 10-40x and preventing stuttering.
-
-        We do proper markdown rendering here, but only ~10-20 times per response
-        instead of 200+ times. Even though markdown parsing is on the main thread,
-        it only happens periodically (1s intervals), keeping the UI responsive.
-
-        This matches the GhidrAssist implementation strategy.
-
-        Args:
-            accumulated_content: The accumulated response content from all deltas
-        """
+    def _on_streaming_update(self, update) -> None:
+        """Handle streaming renderer updates with incremental display."""
         if not self.current_chat_id or self.current_chat_id not in self.chats:
             return
 
-        # Format chat as markdown and update the view
-        # The view handles scroll tracking internally via _on_scroll_changed
-        # which detects user-initiated scrolls and auto-enables/disables scroll following
-        chat = self.chats[self.current_chat_id]
-        markdown_content = self._format_chat_as_markdown(chat)
-        self.view.set_chat_content(markdown_content)
+        # Get filtered markdown and update assistant message in memory
+        filtered_markdown = self._streaming_renderer.get_full_markdown()
+        self._update_last_assistant_message(filtered_markdown)
+
+        # Pass RenderUpdate directly to view for cursor-based update (no full rebuild)
+        self.view.apply_streaming_update(update)
+
+    def _on_thinking_start(self) -> None:
+        """Show thinking indicator when <reasoning> detected."""
+        self._streaming_renderer.on_chunk("*Thinking...*\n\n")
 
     def _update_chat_display(self):
         """Update the chat display with current chat content"""
@@ -1669,7 +1665,37 @@ class QueryController:
                 content += f"{text}\n\n"
 
         return content
-    
+
+    def _render_chat_history_for_streaming(self, chat: Dict[str, Any]) -> str:
+        """Render chat history excluding last assistant message (which is streaming).
+
+        Returns HTML that can be used as the static base for incremental streaming updates.
+        """
+        messages = chat.get("messages", [])
+
+        # Exclude the last message if it's an assistant message (the streaming one)
+        if messages and messages[-1]["role"] == "assistant":
+            history_messages = messages[:-1]
+        else:
+            history_messages = messages
+
+        # Create a temporary chat dict with just the history
+        history_chat = {
+            "name": chat.get("name", "Chat"),
+            "messages": history_messages
+        }
+
+        # Format as markdown
+        markdown_content = self._format_chat_as_markdown(history_chat)
+
+        # Add the assistant header for the streaming message
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        markdown_content += f"## BinAssist ({timestamp})\n"
+
+        # Convert to HTML using the view's markdown_to_html method
+        return self.view.markdown_to_html(markdown_content)
+
     def _get_initial_chat_content(self) -> str:
         """Get initial content for new chat"""
         try:
@@ -2131,8 +2157,16 @@ Tool Usage Guidelines:
         self._continuation_complete = False
         self._tool_call_attempts = {}  # Reset tool call attempt tracking
 
-        # Start debounced rendering for streaming responses
-        self._debounced_renderer.start()
+        # Reset streaming state for new query
+        self._reasoning_filter.reset()
+        self._streaming_renderer.reset()
+
+        # Set up static chat history for incremental streaming updates
+        # This renders history excluding the streaming assistant message
+        if self.current_chat_id and self.current_chat_id in self.chats:
+            chat = self.chats[self.current_chat_id]
+            history_html = self._render_chat_history_for_streaming(chat)
+            self.view.begin_streaming(history_html)
 
         # Create and start the LLM query thread
         native_callback = self._create_native_message_callback()
@@ -2148,13 +2182,8 @@ Tool Usage Guidelines:
         """Handle streaming response chunk from LLM"""
         self._llm_response_buffer += chunk
 
-        # Feed chunk to debounced renderer instead of immediate update
-        # This accumulates chunks and renders periodically (every 1 second)
-        # instead of on every delta, reducing UI updates by 10-40x
-        self._debounced_renderer.on_delta(chunk)
-
-        # Update the last assistant message in memory (no UI update yet)
-        self._update_last_assistant_message(self._llm_response_buffer)
+        # Feed chunk through reasoning filter (which feeds to streaming renderer)
+        self._reasoning_filter.feed(chunk)
     
     def _on_llm_response_complete(self):
         """Handle completion of LLM response"""
@@ -2162,9 +2191,14 @@ Tool Usage Guidelines:
         log.log_info(f"LLM response buffer: {len(self._llm_response_buffer)} chars")
         log.log_info(f"Response content: '{self._llm_response_buffer[:200]}{'...' if len(self._llm_response_buffer) > 200 else ''}'")
 
-        # Stop debounced rendering and do final render
-        # This ensures the final complete response is displayed
-        self._debounced_renderer.complete(self._llm_response_buffer)
+        # Complete streaming and get filtered content
+        self._reasoning_filter.complete()
+        self._streaming_renderer.on_stream_complete()
+        filtered_content = self._streaming_renderer.get_full_markdown()
+
+        # Reset streaming state for next query
+        self._reasoning_filter.reset()
+        self._streaming_renderer.reset()
 
         # Only complete if no tool execution is active
         if not self._tool_execution_active:
@@ -2181,7 +2215,7 @@ Tool Usage Guidelines:
                         # Use the existing content as our response buffer for RLHF and final update
                         self._llm_response_buffer = existing_content
 
-            # Final update of the assistant message (debouncer already did the display update)
+            # Final update of the assistant message
             if has_content:
                 log.log_info("Updating last assistant message with LLM response")
                 self._update_last_assistant_message(self._llm_response_buffer, final_update=True)
@@ -2189,6 +2223,10 @@ Tool Usage Guidelines:
                 self._update_rlhf_response(self._llm_response_buffer)
             else:
                 log.log_debug("No LLM response content - this might be a tool-only response")
+
+            # Rebuild full chat display after streaming completes
+            # This ensures chat history + final assistant response are properly rendered
+            self._update_chat_display()
 
             # Clean up
             self._cleanup_llm_thread()
@@ -2202,8 +2240,9 @@ Tool Usage Guidelines:
         """Handle LLM response error"""
         log.log_error(f"LLM query failed: {error}")
 
-        # Cancel debounced rendering
-        self._debounced_renderer.cancel()
+        # Reset streaming state
+        self._reasoning_filter.reset()
+        self._streaming_renderer.reset()
 
         # Cancel any pending tool execution
         self._tool_execution_active = False
@@ -2317,21 +2356,22 @@ Tool Usage Guidelines:
         return True
     
     def _on_stop_reason_received(self, stop_reason: str):
-        """Handle stop reason from LLM response"""
+        """Handle stop reason from LLM response.
+
+        Note: This handler only logs the stop reason. Actual response completion
+        is handled by the response_complete signal to avoid double-calls.
+        """
         log.log_info(f"Stop reason received: {stop_reason}, tool_execution_active: {self._tool_execution_active}")
-        
+
         if stop_reason == "end_turn":
-            # LLM is completely done - this is the final response
-            log.log_info("LLM finished with end_turn - completing response")
-            self._on_llm_response_complete()
+            log.log_info("LLM finished with end_turn")
+            # response_complete signal will handle completion
         elif stop_reason == "tool_use":
-            # LLM wants to use tools - tool execution will handle this
             log.log_info("LLM finished with tool_use - tools will be executed")
             # Tool execution is handled by the tool_calls_detected signal
-        elif stop_reason != "tool_calls" and not self._tool_execution_active:
-            # Other stop reasons without active tool execution - complete normally
-            log.log_info(f"LLM finished with {stop_reason} - completing response")
-            self._on_llm_response_complete()
+        else:
+            log.log_info(f"LLM finished with {stop_reason}")
+            # response_complete signal will handle completion
     
     # Removed _execute_tools_async - tool execution now handled by ToolExecutorThread
     
@@ -2420,8 +2460,9 @@ Tool Usage Guidelines:
             # Each continuation should start fresh, not accumulate previous responses
             self._llm_response_buffer = ""
 
-            # Restart debounced renderer for this new continuation
-            self._debounced_renderer.start()
+            # Reset streaming state for this new continuation
+            self._reasoning_filter.reset()
+            self._streaming_renderer.reset()
 
             # Start thread
             self.continuation_thread.start()
@@ -2502,12 +2543,8 @@ Tool Usage Guidelines:
         # Add the chunk directly to the main LLM response buffer (just like initial streaming)
         self._llm_response_buffer += chunk
 
-        # Feed chunk to debounced renderer (same as initial streaming)
-        self._debounced_renderer.on_delta(chunk)
-
-        # For continuation, we need to add a new assistant message or update existing one
-        # This happens in memory only - debounced renderer handles UI updates
-        self._update_or_create_continuation_message(self._llm_response_buffer)
+        # Feed chunk through reasoning filter (which feeds to streaming renderer)
+        self._reasoning_filter.feed(chunk)
     
     def _update_or_create_continuation_message(self, content: str):
         """Update existing assistant message or create new one for continuation"""
@@ -2536,13 +2573,36 @@ Tool Usage Guidelines:
     def _on_continuation_complete(self, final_response: str):
         """Handle continuation completion - this means the LLM is truly done (no more tool calls)"""
         try:
-            # Stop debounced rendering and do final render with full markdown
-            self._debounced_renderer.complete(self._llm_response_buffer)
+            # Complete streaming and get filtered content
+            self._reasoning_filter.complete()
+            self._streaming_renderer.on_stream_complete()
+            filtered_content = self._streaming_renderer.get_full_markdown()
 
-            # Update final assistant message and save to storage
-            if self._llm_response_buffer:
-                self._update_last_assistant_message(self._llm_response_buffer, final_update=True)
-                self._update_rlhf_response(self._llm_response_buffer)
+            # Reset streaming state
+            self._reasoning_filter.reset()
+            self._streaming_renderer.reset()
+
+            # Use final_response if buffer is empty (non-streaming fallback case)
+            response_content = self._llm_response_buffer or final_response
+            log.log_info(f"Continuation complete - buffer: {len(self._llm_response_buffer)} chars, final_response: {len(final_response)} chars")
+
+            # Update or add assistant message with the final response
+            if response_content:
+                # Check if last message is already an assistant message we can update
+                can_update = False
+                if self.current_chat_id in self.chats:
+                    messages = self.chats[self.current_chat_id]["messages"]
+                    if messages and messages[-1]["role"] == "assistant":
+                        can_update = True
+
+                if can_update:
+                    self._update_last_assistant_message(response_content, final_update=True)
+                else:
+                    # After tool execution, last message is tool_status - add new assistant message
+                    log.log_info("Adding new assistant message after tool execution")
+                    self._add_message_to_chat(self.current_chat_id, "assistant", response_content, save_to_db=True)
+
+                self._update_rlhf_response(response_content)
 
             # Final display with full markdown rendering (not plain text)
             self._update_chat_display()
@@ -2812,9 +2872,16 @@ Current Offset: {context.get('offset_hex', 'N/A')}"""
         """Start the ReAct analysis thread"""
         log.log_info("Starting ReAct analysis thread")
 
-        # Start debounced rendering
-        self._debounced_renderer.start()
+        # Reset streaming state for ReAct analysis
+        self._reasoning_filter.reset()
+        self._streaming_renderer.reset()
         self._llm_response_buffer = ""
+
+        # Set up static chat history for incremental streaming updates
+        if self.current_chat_id and self.current_chat_id in self.chats:
+            chat = self.chats[self.current_chat_id]
+            history_html = self._render_chat_history_for_streaming(chat)
+            self.view.begin_streaming(history_html)
 
         # Create and configure thread
         self._react_thread = ReActOrchestratorThread(
@@ -2872,25 +2939,18 @@ Current Offset: {context.get('offset_hex', 'N/A')}"""
 
         self._llm_response_buffer += chunk
 
-        # Update the assistant message in chat (will be rendered by debounced callback)
-        if self.current_chat_id and self.current_chat_id in self.chats:
-            chat = self.chats[self.current_chat_id]
-            if chat["messages"] and chat["messages"][-1]["role"] == "assistant":
-                chat["messages"][-1]["content"] = self._llm_response_buffer
-            else:
-                log.log_warn("No assistant message found to update in chat")
-        else:
-            log.log_warn(f"Chat {self.current_chat_id} not found for content update")
-
-        # Feed to debounced renderer for periodic UI updates
-        self._debounced_renderer.on_delta(chunk)
+        # Feed chunk through reasoning filter (which feeds to streaming renderer)
+        self._reasoning_filter.feed(chunk)
 
     def _on_react_complete(self, result: ReActResult):
         """Handle ReAct analysis completion"""
         log.log_info(f"ReAct complete: {result.status.value}, {result.iteration_count} iterations, {result.tool_call_count} tool calls")
 
-        # Stop debounced rendering and do final render
-        self._debounced_renderer.complete()
+        # Complete streaming and reset state
+        self._reasoning_filter.complete()
+        self._streaming_renderer.on_stream_complete()
+        self._reasoning_filter.reset()
+        self._streaming_renderer.reset()
 
         # Format final response with statistics
         status_emoji = "✅" if result.status == ReActStatus.SUCCESS else "⚠️"
@@ -2926,8 +2986,9 @@ Current Offset: {context.get('offset_hex', 'N/A')}"""
         """Handle ReAct error"""
         log.log_error(f"ReAct error: {error}")
 
-        # Cancel debounced rendering
-        self._debounced_renderer.cancel()
+        # Reset streaming state
+        self._reasoning_filter.reset()
+        self._streaming_renderer.reset()
 
         error_response = f"**Agentic Investigation Error:** {error}"
         self._update_last_assistant_message(error_response, final_update=True)

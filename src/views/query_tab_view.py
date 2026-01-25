@@ -9,6 +9,9 @@ from PySide6.QtGui import QKeySequence, QFontDatabase
 import markdown
 import re
 
+from .streaming_markdown_browser import StreamingMarkdownBrowser
+from ..services.streaming.render_update import RenderUpdate
+
 
 class MarkdownCopyBrowser(QTextBrowser):
     """
@@ -163,8 +166,8 @@ class QueryTabView(QWidget):
         parent_layout.addLayout(top_row)
     
     def create_main_text_widget(self):
-        # HTML browser for read-only mode (uses MarkdownCopyBrowser to copy markdown source)
-        self.query_browser = MarkdownCopyBrowser()
+        # HTML browser for read-only mode (uses StreamingMarkdownBrowser for responsive streaming)
+        self.query_browser = StreamingMarkdownBrowser()
         self.query_browser.set_markdown_source(self.markdown_content)
         self.query_browser.setHtml(self.markdown_to_html(self.markdown_content))
         self.query_browser.anchorClicked.connect(self._on_anchor_clicked)
@@ -532,7 +535,20 @@ class QueryTabView(QWidget):
                 self._programmatic_scroll = True
                 scrollbar.setValue(scrollbar.maximum())
                 self._programmatic_scroll = False
-    
+
+    def begin_streaming(self, chat_history_html: str) -> None:
+        """Begin streaming session by setting static chat history."""
+        if not self.is_edit_mode:
+            self.query_browser.setHtml(chat_history_html)
+            self.query_browser._committed_html = chat_history_html
+            self.query_browser._pending_start = self.query_browser.document().characterCount()
+            self._auto_scroll_enabled = True
+
+    def apply_streaming_update(self, update: RenderUpdate) -> None:
+        """Apply incremental streaming update during active stream."""
+        if not self.is_edit_mode:
+            self.query_browser.apply_render_update(update)
+
     def markdown_to_html(self, markdown_text):
         """Convert Markdown text to HTML for display"""
         try:

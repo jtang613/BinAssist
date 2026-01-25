@@ -286,11 +286,6 @@ class OllamaProvider(BaseLLMProvider):
             # Make streaming API call
             url = f"{self.url}/api/chat"
 
-            # Batching variables to reduce UI update frequency (like OpenAI)
-            batch_content = ""
-            batch_count = 0
-            BATCH_SIZE = 5  # Smaller batch size for Ollama as it might send larger chunks
-
             accumulated_content = ""
             accumulated_tool_calls = []
 
@@ -366,41 +361,22 @@ class OllamaProvider(BaseLLMProvider):
                                             )
                                             accumulated_tool_calls.append(tool_call)
                                 
-                                # Handle regular content (simple, like other providers)
+                                # Handle regular content - yield immediately for responsive streaming
                                 if 'message' in chunk and 'content' in chunk['message']:
                                     content_chunk = chunk['message']['content']
                                     if content_chunk:
                                         accumulated_content += content_chunk
-                                        batch_content += content_chunk
-                                        batch_count += 1
-                                        
-                                        # Emit batched content every BATCH_SIZE chunks
-                                        if batch_count >= BATCH_SIZE:
-                                            yield ChatResponse(
-                                                content=batch_content,
-                                                model=self.model,
-                                                usage=Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
-                                                tool_calls=[],
-                                                finish_reason="",
-                                                is_streaming=True
-                                            )
-                                            # Reset batch
-                                            batch_content = ""
-                                            batch_count = 0
-                                
-                                # Check if streaming is done
-                                if chunk.get('done', False):
-                                    # Emit any remaining batched content
-                                    if batch_content:
                                         yield ChatResponse(
-                                            content=batch_content,
+                                            content=content_chunk,
                                             model=self.model,
                                             usage=Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
                                             tool_calls=[],
                                             finish_reason="",
                                             is_streaming=True
                                         )
-                                    
+                                
+                                # Check if streaming is done
+                                if chunk.get('done', False):
                                     # Call native message callback with complete streaming response
                                     if native_message_callback and (accumulated_content or accumulated_tool_calls):
                                         native_message = {
