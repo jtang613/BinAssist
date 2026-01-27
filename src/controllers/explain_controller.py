@@ -441,9 +441,9 @@ class ExplainController:
                     binary_hash, function_start, "explain_line"
                 )
 
-                # Delete per-line cached explanation for current offset
-                deleted_line = self.analysis_db.delete_line_explanation(
-                    binary_hash, current_offset, view_type
+                # Delete ALL line explanations for this function
+                deleted_line_count = self.analysis_db.clear_all_line_explanations_for_function(
+                    binary_hash, function_start
                 )
 
                 node = self.graphrag_service.get_node_by_address(
@@ -455,7 +455,7 @@ class ExplainController:
                     node.is_stale = True
                     self.graphrag_service.upsert_node(node)
 
-                if deleted_function or deleted_line_legacy or deleted_line:
+                if deleted_function or deleted_line_legacy or deleted_line_count:
                     log.log_info(f"Deleted cached analysis for function at 0x{function_start:x}")
                 else:
                     log.log_info("No cached analysis found to delete")

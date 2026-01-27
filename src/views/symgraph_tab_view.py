@@ -495,9 +495,9 @@ class SymGraphTabView(QWidget):
         symbols_layout = QVBoxLayout()
 
         self.conflict_table = QTableWidget()
-        self.conflict_table.setColumnCount(5)
+        self.conflict_table.setColumnCount(6)
         self.conflict_table.setHorizontalHeaderLabels([
-            "Select", "Address", "Local Name", "Remote Name", "Action"
+            "Select", "Address", "Type/Storage", "Local Name", "Remote Name", "Action"
         ])
         self.conflict_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.conflict_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -505,13 +505,15 @@ class SymGraphTabView(QWidget):
         header = self.conflict_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.Fixed)
         header.setSectionResizeMode(1, QHeaderView.Fixed)
-        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.Fixed)
         header.setSectionResizeMode(3, QHeaderView.Stretch)
-        header.setSectionResizeMode(4, QHeaderView.Fixed)
+        header.setSectionResizeMode(4, QHeaderView.Stretch)
+        header.setSectionResizeMode(5, QHeaderView.Fixed)
 
         self.conflict_table.setColumnWidth(0, 50)
         self.conflict_table.setColumnWidth(1, 100)
-        self.conflict_table.setColumnWidth(4, 80)
+        self.conflict_table.setColumnWidth(2, 120)
+        self.conflict_table.setColumnWidth(5, 80)
 
         symbols_layout.addWidget(self.conflict_table)
 
@@ -806,6 +808,38 @@ class SymGraphTabView(QWidget):
         # Show summary page
         self.wizard_stack.setCurrentIndex(self.PAGE_SUMMARY)
 
+    def _format_storage_info(self, symbol) -> str:
+        """Format symbol type and storage location for display."""
+        if not symbol:
+            return ""
+
+        sym_type = getattr(symbol, 'symbol_type', 'function')
+        metadata = getattr(symbol, 'metadata', {}) or {}
+
+        if sym_type != 'variable':
+            return "func"
+
+        storage_class = metadata.get('storage_class', '')
+        scope = metadata.get('scope', '')
+
+        if storage_class == 'parameter':
+            idx = metadata.get('parameter_index', '?')
+            reg = metadata.get('register')
+            if reg:
+                return f"param[{idx}] ({reg})"
+            return f"param[{idx}]"
+        elif storage_class == 'stack':
+            offset = metadata.get('stack_offset', 0)
+            sign = '+' if offset >= 0 else ''
+            return f"local [{sign}0x{abs(offset):x}]"
+        elif storage_class == 'register':
+            reg = metadata.get('register', '?')
+            return f"local ({reg})"
+        elif scope == 'local':
+            return "local"
+        else:
+            return "global"
+
     def add_conflict_row(self, conflict: ConflictEntry):
         """Add a single conflict entry to the table."""
         row = self.conflict_table.rowCount()
@@ -827,19 +861,25 @@ class SymGraphTabView(QWidget):
         addr_item.setData(Qt.UserRole, conflict.address)
         self.conflict_table.setItem(row, 1, addr_item)
 
+        # Type/Storage info
+        storage_text = self._format_storage_info(conflict.remote_symbol)
+        storage_item = QTableWidgetItem(storage_text)
+        storage_item.setFlags(storage_item.flags() & ~Qt.ItemIsEditable)
+        self.conflict_table.setItem(row, 2, storage_item)
+
         # Local Name
         local_item = QTableWidgetItem(conflict.local_name or "<none>")
         local_item.setFlags(local_item.flags() & ~Qt.ItemIsEditable)
         if conflict.local_name is None:
             local_item.setForeground(Qt.gray)
-        self.conflict_table.setItem(row, 2, local_item)
+        self.conflict_table.setItem(row, 3, local_item)
 
         # Remote Name
         remote_item = QTableWidgetItem(conflict.remote_name or "<none>")
         remote_item.setFlags(remote_item.flags() & ~Qt.ItemIsEditable)
         if conflict.remote_name is None:
             remote_item.setForeground(Qt.gray)
-        self.conflict_table.setItem(row, 3, remote_item)
+        self.conflict_table.setItem(row, 4, remote_item)
 
         # Action type
         action_item = QTableWidgetItem(conflict.action.value.upper())
@@ -853,7 +893,7 @@ class SymGraphTabView(QWidget):
         elif conflict.action == ConflictAction.SAME:
             action_item.setForeground(Qt.darkGray)
 
-        self.conflict_table.setItem(row, 4, action_item)
+        self.conflict_table.setItem(row, 5, action_item)
 
         # Store conflict reference for later retrieval
         addr_item.setData(Qt.UserRole + 1, conflict)

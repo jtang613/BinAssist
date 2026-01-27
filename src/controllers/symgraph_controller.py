@@ -335,16 +335,31 @@ class ApplySymbolsWorker(QThread):
                 if hasattr(symbol, 'remote_symbol'):
                     # It's a ConflictEntry
                     addr = symbol.address
-                    name = symbol.remote_symbol.name if symbol.remote_symbol else None
+                    remote_sym = symbol.remote_symbol
+                    name = remote_sym.name if remote_sym else None
+                    symbol_type = getattr(remote_sym, 'symbol_type', 'function') if remote_sym else 'function'
+                    metadata = getattr(remote_sym, 'metadata', {}) if remote_sym else {}
                 else:
                     # It's a Symbol object
                     addr = symbol.address
                     name = symbol.name
+                    symbol_type = getattr(symbol, 'symbol_type', 'function')
+                    metadata = getattr(symbol, 'metadata', {})
 
                 if name:
                     try:
-                        self._apply_symbol(addr, name)
-                        applied += 1
+                        if symbol_type == 'variable':
+                            # Use storage-aware variable application
+                            symbol_data = {
+                                'name': name,
+                                'metadata': metadata
+                            }
+                            if self._apply_variable(addr, symbol_data):
+                                applied += 1
+                        else:
+                            # Existing function/symbol application
+                            self._apply_symbol(addr, name)
+                            applied += 1
                     except Exception as e:
                         log.log_error(f"Error applying symbol at 0x{addr:x}: {e}")
                         errors += 1
@@ -375,6 +390,58 @@ class ApplySymbolsWorker(QThread):
             binaryninja.Symbol(binaryninja.SymbolType.FunctionSymbol, addr, name)
         )
         log.log_debug(f"Created symbol at 0x{addr:x}: {name}")
+
+    def _apply_variable(self, func_addr: int, symbol_data: dict) -> bool:
+        """Apply a variable symbol to Binary Ninja using storage matching."""
+        from binaryninja.enums import VariableSourceType
+
+        funcs = self.bv.get_functions_at(func_addr)
+        if not funcs:
+            return False
+
+        func = funcs[0]
+        metadata = symbol_data.get('metadata', {})
+        target_name = symbol_data.get('name')
+        storage_class = metadata.get('storage_class')
+
+        if not target_name or not storage_class:
+            return False
+
+        try:
+            if storage_class == 'parameter':
+                param_idx = metadata.get('parameter_index')
+                if param_idx is not None and param_idx < len(func.parameter_vars):
+                    func.parameter_vars[param_idx].name = target_name
+                    log.log_debug(f"Renamed parameter {param_idx} at 0x{func_addr:x} to {target_name}")
+                    return True
+
+            elif storage_class == 'stack':
+                stack_offset = metadata.get('stack_offset')
+                if stack_offset is not None:
+                    for var in func.vars:
+                        if (var.source_type == VariableSourceType.StackVariableSourceType
+                            and var.storage == stack_offset):
+                            var.name = target_name
+                            log.log_debug(f"Renamed stack var at offset {stack_offset} to {target_name}")
+                            return True
+
+            elif storage_class == 'register':
+                reg_name = metadata.get('register')
+                if reg_name:
+                    for var in func.vars:
+                        if var.source_type == VariableSourceType.RegisterVariableSourceType:
+                            try:
+                                var_reg = self.bv.arch._regs_by_index.get(var.storage)
+                                if var_reg == reg_name:
+                                    var.name = target_name
+                                    log.log_debug(f"Renamed register var {reg_name} to {target_name}")
+                                    return True
+                            except:
+                                pass
+        except Exception as e:
+            log.log_error(f"Error applying variable: {e}")
+
+        return False
 
     def _merge_graph_data(self):
         if not self.graph_export or not self.binary_hash:
@@ -1066,14 +1133,18 @@ class SymGraphController(QObject):
                 sym = self.bv.get_symbol_at(addr)
                 name = sym.name if sym else None
 
+                # Skip variables without names
+                if not name:
+                    continue
+
                 # Check for auto-generated names
                 is_auto = is_default_name(name)
                 if is_auto:
                     confidence = 0.3
                     provenance = 'decompiler'
                 else:
-                    confidence = 0.85 if name else 0.3
-                    provenance = 'user' if name else 'decompiler'
+                    confidence = 0.85
+                    provenance = 'user'
 
                 symbols.append({
                     'address': f"0x{addr:x}",
@@ -1088,13 +1159,34 @@ class SymGraphController(QObject):
         return symbols
 
     def _collect_function_variables(self, func) -> List[Dict[str, Any]]:
-        """Collect local variables from a function."""
+        """Collect local variables from a function with storage identification."""
+        from binaryninja.enums import VariableSourceType
+
         symbols = []
         try:
-            # Function parameters
-            for param in func.parameter_vars:
+            # Function parameters - use enumeration index for ordering
+            for param_idx, param in enumerate(func.parameter_vars):
                 if param.name:
                     is_auto = is_default_name(param.name)
+
+                    metadata = {
+                        'scope': 'parameter',
+                        'function': func.name,
+                        'storage_class': 'parameter',
+                        'parameter_index': param_idx
+                    }
+
+                    # Also capture storage location for full info
+                    if param.source_type == VariableSourceType.RegisterVariableSourceType:
+                        try:
+                            reg_name = self.bv.arch._regs_by_index.get(param.storage)
+                            if reg_name:
+                                metadata['register'] = reg_name
+                        except:
+                            pass
+                    elif param.source_type == VariableSourceType.StackVariableSourceType:
+                        metadata['stack_offset'] = param.storage
+
                     symbols.append({
                         'address': f"0x{func.start:x}",
                         'symbol_type': 'variable',
@@ -1102,13 +1194,34 @@ class SymGraphController(QObject):
                         'data_type': str(param.type) if param.type else None,
                         'confidence': 0.3 if is_auto else 0.8,
                         'provenance': 'decompiler' if is_auto else 'user',
-                        'metadata': {'scope': 'parameter', 'function': func.name}
+                        'metadata': metadata
                     })
 
             # Local variables (stack and register)
             for var in func.vars:
                 if var.name:
                     is_auto = is_default_name(var.name)
+
+                    metadata = {
+                        'scope': 'local',
+                        'function': func.name
+                    }
+
+                    # Determine storage class and identifier
+                    if var.source_type == VariableSourceType.StackVariableSourceType:
+                        metadata['storage_class'] = 'stack'
+                        metadata['stack_offset'] = var.storage
+                    elif var.source_type == VariableSourceType.RegisterVariableSourceType:
+                        metadata['storage_class'] = 'register'
+                        try:
+                            reg_name = self.bv.arch._regs_by_index.get(var.storage)
+                            metadata['register'] = reg_name if reg_name else f"reg_{var.storage}"
+                        except:
+                            metadata['register'] = f"reg_{var.storage}"
+                    else:
+                        metadata['storage_class'] = 'other'
+                        metadata['storage_id'] = var.storage
+
                     symbols.append({
                         'address': f"0x{func.start:x}",
                         'symbol_type': 'variable',
@@ -1116,7 +1229,7 @@ class SymGraphController(QObject):
                         'data_type': str(var.type) if var.type else None,
                         'confidence': 0.3 if is_auto else 0.75,
                         'provenance': 'decompiler' if is_auto else 'user',
-                        'metadata': {'scope': 'local', 'function': func.name}
+                        'metadata': metadata
                     })
         except Exception as e:
             log.log_error(f"Error collecting function variables: {e}")
