@@ -4,6 +4,7 @@ from PySide6.QtWidgets import QTextBrowser, QAbstractScrollArea, QApplication
 from PySide6.QtGui import QTextCursor, QKeySequence
 
 from ..services.streaming.render_update import RenderUpdate, UpdateType
+from ..services.streaming.streaming_renderer import MARKDOWN_CSS
 
 _BOTTOM_THRESHOLD = 50
 
@@ -46,6 +47,9 @@ class StreamingMarkdownBrowser(QTextBrowser):
         self._last_rendered_html = ""
         self._committed_html = ""  # Track committed HTML separately for RenderUpdate
         self._pending_start = 0  # Track character position where pending content starts
+
+        # Initialize with CSS so content is styled from the start
+        self.setHtml(MARKDOWN_CSS)
 
     # --- Markdown Copy Functionality (from MarkdownCopyBrowser) ---
 
@@ -170,7 +174,8 @@ class StreamingMarkdownBrowser(QTextBrowser):
         self._last_rendered_html = ""
         self._committed_html = ""
         self._pending_start = 0
-        self.clear()
+        # Initialize document with CSS so streaming content is styled
+        self.setHtml(MARKDOWN_CSS)
 
     def _force_layout(self) -> None:
         """Force Qt to complete document layout for accurate scrollbar"""

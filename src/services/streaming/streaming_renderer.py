@@ -12,6 +12,22 @@ _EXTENSION_CONFIGS = {
     "codehilite": {"css_class": "highlight", "guess_lang": False},
 }
 
+# Shared CSS for markdown rendering - used by both streaming and final render
+MARKDOWN_CSS = """
+<style>
+    table { border-collapse: collapse; margin: 10px 0; width: auto; }
+    th, td { border: 1px solid rgba(128, 128, 128, 0.4); padding: 6px 10px; text-align: left; }
+    th { background-color: rgba(128, 128, 128, 0.2); font-weight: bold; }
+    tr:nth-child(even) { background-color: rgba(128, 128, 128, 0.1); }
+    p { font-size: 12px; margin: 8px 0; }
+    strong { font-size: inherit; }
+    h1 { font-size: 18px; margin: 12px 0 8px 0; }
+    h2 { font-size: 16px; margin: 10px 0 6px 0; }
+    h3 { font-size: 14px; margin: 8px 0 4px 0; }
+    h4, h5, h6 { font-size: 12px; margin: 6px 0 4px 0; }
+</style>
+"""
+
 
 def preprocess_markdown_tables(text: str) -> str:
     """
@@ -64,12 +80,16 @@ def preprocess_markdown_hrs(text: str) -> str:
     return '\n'.join(result)
 
 
-def render_markdown_to_html(markdown_text: str) -> str:
+def render_markdown_to_html(markdown_text: str, include_css: bool = True) -> str:
     """
     Render markdown text to HTML with preprocessing and extensions.
 
     This is the shared utility for static (non-streaming) markdown rendering,
     used by controllers for history rendering and full-replace operations.
+
+    Args:
+        markdown_text: The markdown text to render
+        include_css: Whether to wrap output with MARKDOWN_CSS (default True)
     """
     try:
         preprocessed = preprocess_markdown_tables(markdown_text)
@@ -79,7 +99,11 @@ def render_markdown_to_html(markdown_text: str) -> str:
             extensions=_EXTENSIONS,
             extension_configs=_EXTENSION_CONFIGS
         )
-        return md.convert(preprocessed)
+        html = md.convert(preprocessed)
+
+        if include_css:
+            return f"{MARKDOWN_CSS}<div>{html}</div>"
+        return html
     except Exception:
         return f"<pre>{markdown_text}</pre>"
 

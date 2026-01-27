@@ -9,6 +9,7 @@ import markdown
 import re
 
 from .streaming_markdown_browser import StreamingMarkdownBrowser
+from ..services.streaming.streaming_renderer import MARKDOWN_CSS
 
 
 class MarkdownCopyBrowser(QTextBrowser):
@@ -448,45 +449,20 @@ class ExplainTabView(QWidget):
     def markdown_to_html(self, markdown_text):
         """Convert Markdown text to HTML for display"""
         try:
-            # Preprocess to ensure tables are properly parsed
             preprocessed = self._preprocess_markdown_tables(markdown_text)
-
-            # Preprocess to ensure --- (horizontal rules) have a blank line before them
-            # Without a blank line, markdown interprets the preceding line as a heading
             preprocessed = self._preprocess_markdown_hrs(preprocessed)
+            html = markdown.markdown(preprocessed, extensions=['codehilite', 'fenced_code', 'tables', 'sane_lists'])
 
-            html = markdown.markdown(preprocessed, extensions=['codehilite', 'fenced_code', 'tables'])
-
-            # Add CSS for table styling and normalize text rendering
-            # Uses semi-transparent colors that work in both light and dark modes
-            table_css = """
-            <style>
-                table { border-collapse: collapse; margin: 10px 0; width: auto; }
-                th, td { border: 1px solid rgba(128, 128, 128, 0.4); padding: 6px 10px; text-align: left; }
-                th { background-color: rgba(128, 128, 128, 0.2); font-weight: bold; }
-                tr:nth-child(even) { background-color: rgba(128, 128, 128, 0.1); }
-                /* Normalize paragraph and text styles to prevent unexpected large text */
-                p { font-size: 12px; margin: 8px 0; }
-                strong { font-size: inherit; }
-                h1 { font-size: 18px; margin: 12px 0 8px 0; }
-                h2 { font-size: 16px; margin: 10px 0 6px 0; }
-                h3 { font-size: 14px; margin: 8px 0 4px 0; }
-                h4, h5, h6 { font-size: 12px; margin: 6px 0 4px 0; }
-            </style>
-            """
-
-            # Add RLHF feedback links at the bottom
             feedback_html = self._get_feedback_html()
 
             return f"""
-            {table_css}
-            <div style='font-family: Arial, sans-serif; font-size: 12px;'>
+            {MARKDOWN_CSS}
+            <div>
                 {html}
                 {feedback_html}
             </div>
             """
         except:
-            # Fallback if markdown parsing fails
             return f"<pre>{markdown_text}</pre>"
 
     def _preprocess_markdown_tables(self, text):
