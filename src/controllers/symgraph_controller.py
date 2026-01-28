@@ -298,7 +298,7 @@ class PullPreviewWorker(QThread):
 class ApplySymbolsWorker(QThread):
     """Worker thread for applying symbols to Binary Ninja."""
 
-    progress = Signal(int, int)  # current, total
+    progress = Signal(int, int, str)  # current, total, message
     apply_complete = Signal(int, int)  # applied, errors
     apply_cancelled = Signal(int)  # applied so far
     apply_error = Signal(str)
@@ -319,13 +319,25 @@ class ApplySymbolsWorker(QThread):
     def run(self):
         try:
             import binaryninja
-            total = len(self.symbols)
+
+            # Calculate total work items (nodes + edges + symbols)
+            num_nodes = len(self.graph_export.nodes) if self.graph_export else 0
+            num_edges = len(self.graph_export.edges) if self.graph_export else 0
+            num_symbols = len(self.symbols)
+            total = num_nodes + num_edges + num_symbols
+
+            progress_count = 0
             applied = 0
             errors = 0
 
+            # Phase 1: Merge graph data (with progress)
             if self.graph_export and self.binary_hash:
-                self._merge_graph_data()
+                progress_count = self._merge_graph_data(progress_count, total, num_nodes, num_edges)
+                if self._cancelled:
+                    self.apply_cancelled.emit(applied)
+                    return
 
+            # Phase 2: Apply symbols (with progress)
             for i, symbol in enumerate(self.symbols):
                 if self._cancelled:
                     self.apply_cancelled.emit(applied)
@@ -364,7 +376,9 @@ class ApplySymbolsWorker(QThread):
                         log.log_error(f"Error applying symbol at 0x{addr:x}: {e}")
                         errors += 1
 
-                self.progress.emit(i + 1, total)
+                progress_count += 1
+                self.progress.emit(progress_count, total,
+                    f"Applying symbol {i + 1}/{num_symbols}...")
 
             self.apply_complete.emit(applied, errors)
 
@@ -443,9 +457,13 @@ class ApplySymbolsWorker(QThread):
 
         return False
 
-    def _merge_graph_data(self):
+    def _merge_graph_data(self, progress_count: int, total: int, num_nodes: int, num_edges: int) -> int:
+        """Merge graph data with progress updates.
+
+        Returns the updated progress count after processing nodes and edges.
+        """
         if not self.graph_export or not self.binary_hash:
-            return
+            return progress_count
 
         graph_store = GraphStore(analysis_db_service)
         merge_policy = self.merge_policy or "upsert"
@@ -455,9 +473,9 @@ class ApplySymbolsWorker(QThread):
             graph_store.delete_communities(self.binary_hash)
 
         address_to_id: Dict[int, str] = {}
-        for node in self.graph_export.nodes:
+        for i, node in enumerate(self.graph_export.nodes):
             if self._cancelled:
-                return
+                return progress_count
 
             node_type_str = (node.node_type or "FUNCTION").upper()
             node_type = NodeType.from_string(node_type_str) or NodeType.FUNCTION
@@ -465,44 +483,50 @@ class ApplySymbolsWorker(QThread):
 
             if merge_policy == "prefer_local" and existing:
                 address_to_id[node.address] = existing.id
-                continue
+            else:
+                props = node.properties or {}
+                node_id = existing.id if existing else node.id
 
-            props = node.properties or {}
-            node_id = existing.id if existing else node.id
+                local_node = LocalGraphNode(
+                    id=node_id,
+                    binary_hash=self.binary_hash,
+                    node_type=node_type,
+                    address=node.address,
+                    name=node.name,
+                    raw_code=props.get("raw_code") or props.get("raw_content"),
+                    llm_summary=node.summary or props.get("llm_summary"),
+                    confidence=float(props.get("confidence", 0.0) or 0.0),
+                    security_flags=self._coerce_list(props.get("security_flags")),
+                    network_apis=self._coerce_list(props.get("network_apis")),
+                    file_io_apis=self._coerce_list(props.get("file_io_apis")),
+                    ip_addresses=self._coerce_list(props.get("ip_addresses")),
+                    urls=self._coerce_list(props.get("urls")),
+                    file_paths=self._coerce_list(props.get("file_paths")),
+                    domains=self._coerce_list(props.get("domains")),
+                    registry_keys=self._coerce_list(props.get("registry_keys")),
+                    risk_level=props.get("risk_level"),
+                    activity_profile=props.get("activity_profile"),
+                    analysis_depth=int(props.get("analysis_depth", 0) or 0),
+                    is_stale=bool(props.get("is_stale", False)),
+                    user_edited=bool(props.get("user_edited", False))
+                )
+                graph_store.upsert_node(local_node)
+                address_to_id[node.address] = local_node.id
 
-            local_node = LocalGraphNode(
-                id=node_id,
-                binary_hash=self.binary_hash,
-                node_type=node_type,
-                address=node.address,
-                name=node.name,
-                raw_code=props.get("raw_code") or props.get("raw_content"),
-                llm_summary=node.summary or props.get("llm_summary"),
-                confidence=float(props.get("confidence", 0.0) or 0.0),
-                security_flags=self._coerce_list(props.get("security_flags")),
-                network_apis=self._coerce_list(props.get("network_apis")),
-                file_io_apis=self._coerce_list(props.get("file_io_apis")),
-                ip_addresses=self._coerce_list(props.get("ip_addresses")),
-                urls=self._coerce_list(props.get("urls")),
-                file_paths=self._coerce_list(props.get("file_paths")),
-                domains=self._coerce_list(props.get("domains")),
-                registry_keys=self._coerce_list(props.get("registry_keys")),
-                risk_level=props.get("risk_level"),
-                activity_profile=props.get("activity_profile"),
-                analysis_depth=int(props.get("analysis_depth", 0) or 0),
-                is_stale=bool(props.get("is_stale", False)),
-                user_edited=bool(props.get("user_edited", False))
-            )
-            graph_store.upsert_node(local_node)
-            address_to_id[node.address] = local_node.id
+            progress_count += 1
+            self.progress.emit(progress_count, total,
+                f"Merging node {i + 1}/{num_nodes}...")
 
-        for edge in self.graph_export.edges:
+        for i, edge in enumerate(self.graph_export.edges):
             if self._cancelled:
-                return
+                return progress_count
 
             source_id = address_to_id.get(edge.source_address)
             target_id = address_to_id.get(edge.target_address)
             if not source_id or not target_id:
+                progress_count += 1
+                self.progress.emit(progress_count, total,
+                    f"Merging edge {i + 1}/{num_edges}...")
                 continue
 
             edge_type = EdgeType.from_string(edge.edge_type) or EdgeType.CALLS
@@ -518,6 +542,12 @@ class ApplySymbolsWorker(QThread):
                 weight=weight,
                 metadata=metadata_json
             ))
+
+            progress_count += 1
+            self.progress.emit(progress_count, total,
+                f"Merging edge {i + 1}/{num_edges}...")
+
+        return progress_count
 
     @staticmethod
     def _coerce_list(value):
@@ -914,9 +944,9 @@ class SymGraphController(QObject):
         self.apply_worker.finished.connect(self._on_apply_finished)
         self.apply_worker.start()
 
-    def _on_wizard_apply_progress(self, current: int, total: int):
+    def _on_wizard_apply_progress(self, current: int, total: int, message: str):
         """Handle apply progress update for wizard mode."""
-        self.view.update_apply_progress(current, total, f"Applying {current}/{total}...")
+        self.view.update_apply_progress(current, total, message)
 
     def _on_wizard_apply_complete(self, applied: int, errors: int):
         """Handle apply completion for wizard mode."""
@@ -928,9 +958,9 @@ class SymGraphController(QObject):
         self.view.show_complete_page(applied, 0)
         log.log_info(f"Apply cancelled after {applied} symbols")
 
-    def _on_apply_progress(self, current: int, total: int):
+    def _on_apply_progress(self, current: int, total: int, message: str):
         """Handle apply progress update."""
-        self.view.set_pull_status(f"Applying {current}/{total}...", success=None)
+        self.view.set_pull_status(message, success=None)
 
     def _on_apply_complete(self, applied: int, errors: int):
         """Handle apply completion."""

@@ -34,6 +34,26 @@ class SymbolType(Enum):
     COMMENT = "comment"
 
 
+def _parse_address(value: Any) -> int:
+    """Parse an address from API response (handles int, hex string, or None)."""
+    if value is None:
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        value = value.strip()
+        if value.startswith('0x') or value.startswith('0X'):
+            try:
+                return int(value, 16)
+            except ValueError:
+                return 0
+        try:
+            return int(value)
+        except ValueError:
+            return 0
+    return 0
+
+
 @dataclass
 class BinaryStats:
     """Statistics for a binary in SymGraph."""
@@ -132,13 +152,44 @@ class GraphNode:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'GraphNode':
         """Create graph node from API response dictionary."""
+        # Build properties from all available fields
+        properties = data.get('properties', {})
+
+        # Map API fields to properties if not already present
+        if 'raw_content' in data and 'raw_content' not in properties:
+            properties['raw_content'] = data.get('raw_content')
+        if 'confidence' in data and 'confidence' not in properties:
+            properties['confidence'] = data.get('confidence', 0.0)
+        if 'security_flags' in data and 'security_flags' not in properties:
+            properties['security_flags'] = data.get('security_flags', [])
+        if 'network_apis' in data and 'network_apis' not in properties:
+            properties['network_apis'] = data.get('network_apis', [])
+        if 'file_io_apis' in data and 'file_io_apis' not in properties:
+            properties['file_io_apis'] = data.get('file_io_apis', [])
+        if 'ip_addresses' in data and 'ip_addresses' not in properties:
+            properties['ip_addresses'] = data.get('ip_addresses', [])
+        if 'urls' in data and 'urls' not in properties:
+            properties['urls'] = data.get('urls', [])
+        if 'file_paths' in data and 'file_paths' not in properties:
+            properties['file_paths'] = data.get('file_paths', [])
+        if 'domains' in data and 'domains' not in properties:
+            properties['domains'] = data.get('domains', [])
+        if 'registry_keys' in data and 'registry_keys' not in properties:
+            properties['registry_keys'] = data.get('registry_keys', [])
+        if 'risk_level' in data and 'risk_level' not in properties:
+            properties['risk_level'] = data.get('risk_level')
+        if 'activity_profile' in data and 'activity_profile' not in properties:
+            properties['activity_profile'] = data.get('activity_profile')
+        if 'analysis_depth' in data and 'analysis_depth' not in properties:
+            properties['analysis_depth'] = data.get('analysis_depth', 0)
+
         return cls(
             id=data.get('id'),
-            address=data.get('address', 0),
+            address=_parse_address(data.get('address')),
             node_type=data.get('node_type', 'function'),
             name=data.get('name'),
-            summary=data.get('summary'),
-            properties=data.get('properties', {})
+            summary=data.get('summary') or data.get('llm_summary'),
+            properties=properties
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -169,11 +220,22 @@ class GraphEdge:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'GraphEdge':
         """Create graph edge from API response dictionary."""
+        # Build properties from metadata if present
+        properties = data.get('properties', {})
+        if 'metadata' in data and data['metadata']:
+            metadata = data['metadata']
+            if isinstance(metadata, dict):
+                for k, v in metadata.items():
+                    if k not in properties:
+                        properties[k] = v
+        if 'weight' in data and 'weight' not in properties:
+            properties['weight'] = data.get('weight', 1.0)
+
         return cls(
-            source_address=data.get('source_address', 0),
-            target_address=data.get('target_address', 0),
+            source_address=_parse_address(data.get('source_address')),
+            target_address=_parse_address(data.get('target_address')),
             edge_type=data.get('edge_type', 'calls'),
-            properties=data.get('properties', {})
+            properties=properties
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -289,12 +351,25 @@ class GraphExport:
         """Create export from API response dictionary."""
         nodes = [GraphNode.from_dict(n) for n in data.get('nodes', [])]
         edges = [GraphEdge.from_dict(e) for e in data.get('edges', [])]
+
+        # Handle both nested (API) and flat (legacy) binary_sha256 formats
+        binary_sha256 = data.get('binary_sha256', '')
+        if not binary_sha256 and 'binary' in data:
+            binary_info = data['binary']
+            if isinstance(binary_info, dict):
+                binary_sha256 = binary_info.get('sha256', '')
+
+        # Build metadata from available fields
+        metadata = data.get('metadata', {})
+        if 'exported_at' in data:
+            metadata['exported_at'] = data['exported_at']
+
         return cls(
-            binary_sha256=data.get('binary_sha256', ''),
+            binary_sha256=binary_sha256,
             nodes=nodes,
             edges=edges,
-            export_version=data.get('export_version', '1.0'),
-            metadata=data.get('metadata', {})
+            export_version=data.get('version') or data.get('export_version', '1.0'),
+            metadata=metadata
         )
 
     def to_dict(self) -> Dict[str, Any]:
