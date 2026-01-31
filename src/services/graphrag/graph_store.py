@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 
 import json
+import threading
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .models import GraphNode, GraphEdge, EdgeType
 from ..analysis_db_service import AnalysisDBService
@@ -22,12 +23,26 @@ except ImportError:
     log = MockLog()
 
 
+# Default batch size for bulk operations
+DEFAULT_BATCH_SIZE = 100
+
+
 class GraphStore:
     """SQLite-backed storage for GraphRAG nodes and edges."""
 
     def __init__(self, analysis_db: Optional[AnalysisDBService] = None):
         self.analysis_db = analysis_db or AnalysisDBService()
         self._db_lock = self.analysis_db.get_db_lock()
+
+        # Batch operation queues (thread-safe)
+        self._batch_lock = threading.Lock()
+        self._node_batch: List[GraphNode] = []
+        self._edge_batch: List[Tuple[str, str, EdgeType, str]] = []  # (source_id, target_id, edge_type, binary_hash)
+
+        # Node cache for deduplication during batch operations
+        # Key: (binary_hash, address) -> node_id
+        self._node_cache: Dict[Tuple[str, int], str] = {}
+        self._node_cache_lock = threading.Lock()
 
     @staticmethod
     def _serialize_list(values: Optional[List[str]]) -> str:
@@ -178,14 +193,12 @@ class GraphStore:
                         user_edited
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
+                        -- STRUCTURAL DATA: Always update from fresh extraction
                         type = excluded.type,
                         address = excluded.address,
                         binary_id = excluded.binary_id,
                         name = excluded.name,
-                        raw_content = excluded.raw_content,
-                        llm_summary = excluded.llm_summary,
-                        confidence = excluded.confidence,
-                        embedding = excluded.embedding,
+                        raw_content = COALESCE(excluded.raw_content, graph_nodes.raw_content),
                         security_flags = excluded.security_flags,
                         network_apis = excluded.network_apis,
                         file_io_apis = excluded.file_io_apis,
@@ -196,10 +209,15 @@ class GraphStore:
                         registry_keys = excluded.registry_keys,
                         risk_level = excluded.risk_level,
                         activity_profile = excluded.activity_profile,
-                        analysis_depth = excluded.analysis_depth,
                         updated_at = excluded.updated_at,
                         is_stale = excluded.is_stale,
-                        user_edited = excluded.user_edited
+                        -- SEMANTIC DATA: Preserve existing, only update if explicitly set
+                        llm_summary = COALESCE(excluded.llm_summary, graph_nodes.llm_summary),
+                        confidence = CASE WHEN excluded.confidence > 0 THEN excluded.confidence ELSE graph_nodes.confidence END,
+                        embedding = COALESCE(excluded.embedding, graph_nodes.embedding),
+                        analysis_depth = CASE WHEN excluded.analysis_depth > 0 THEN excluded.analysis_depth ELSE graph_nodes.analysis_depth END,
+                        -- USER DATA: Never reset during reindex
+                        user_edited = graph_nodes.user_edited
                 ''', (
                     node.id,
                     node.node_type,
@@ -236,30 +254,30 @@ class GraphStore:
             raise ValueError("binary_hash is required for GraphEdge insert")
         if not edge.source_id or not edge.target_id or not edge.edge_type:
             raise ValueError("source_id, target_id, and edge_type are required for GraphEdge insert")
-        if not edge.id:
-            edge.id = str(uuid.uuid4())
 
         # Convert EdgeType enum to string for storage
         edge_type_str = edge.get_edge_type_str()
+
+        # Use deterministic edge ID based on (source_id, target_id, type)
+        # This ensures idempotent edge insertion
+        edge_id = f"{edge.source_id}:{edge.target_id}:{edge_type_str}"
+        edge.id = edge_id
 
         now_ms = self._now_ms()
         with self._db_lock:
             conn = self.analysis_db.get_connection()
             try:
                 cursor = conn.cursor()
-                cursor.execute('''
-                    SELECT 1 FROM graph_edges
-                    WHERE source_id = ? AND target_id = ? AND type = ?
-                    LIMIT 1
-                ''', (edge.source_id, edge.target_id, edge_type_str))
+                # Check if edge already exists by deterministic ID
+                cursor.execute('SELECT 1 FROM graph_edges WHERE id = ? LIMIT 1', (edge_id,))
                 if cursor.fetchone():
-                    return edge
+                    return edge  # Already exists
                 cursor.execute('''
                     INSERT INTO graph_edges (
                         id, source_id, target_id, type, weight, metadata, created_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ''', (
-                    edge.id,
+                    edge_id,
                     edge.source_id,
                     edge.target_id,
                     edge_type_str,
@@ -321,8 +339,9 @@ class GraphStore:
             conn = self.analysis_db.get_connection()
             try:
                 cursor = conn.cursor()
+                # Use DISTINCT to prevent duplicate nodes from duplicate edges
                 cursor.execute('''
-                    SELECT n.id, n.binary_id, n.type, n.address, n.name, n.raw_content,
+                    SELECT DISTINCT n.id, n.binary_id, n.type, n.address, n.name, n.raw_content,
                            n.llm_summary, n.confidence, n.embedding, n.security_flags,
                            n.network_apis, n.file_io_apis, n.ip_addresses, n.urls,
                            n.file_paths, n.domains, n.registry_keys, n.risk_level,
@@ -335,9 +354,14 @@ class GraphStore:
                 ''', (str(node_id), edge_type, binary_hash, binary_hash))
                 rows = cursor.fetchall()
                 callers = []
+                seen_ids = set()  # Additional deduplication by node ID
                 for row in rows:
+                    caller_id = row[0]
+                    if caller_id in seen_ids:
+                        continue
+                    seen_ids.add(caller_id)
                     callers.append(GraphNode(
-                        id=row[0],
+                        id=caller_id,
                         binary_hash=row[1],
                         node_type=row[2],
                         address=row[3],
@@ -383,13 +407,19 @@ class GraphStore:
                 ''', (str(node_id), str(node_id), binary_hash, binary_hash))
                 rows = cursor.fetchall()
                 edges = []
+                seen_keys = set()  # Deduplicate by (source_id, target_id, type)
                 for row in rows:
+                    source_id, target_id, edge_type = row[1], row[2], row[3]
+                    key = (source_id, target_id, edge_type)
+                    if key in seen_keys:
+                        continue
+                    seen_keys.add(key)
                     edges.append(GraphEdge(
                         id=row[0],
                         binary_hash=binary_hash,
-                        source_id=row[1],
-                        target_id=row[2],
-                        edge_type=row[3],
+                        source_id=source_id,
+                        target_id=target_id,
+                        edge_type=edge_type,
                         weight=row[4] if row[4] is not None else 1.0,
                         metadata=row[5],
                         created_at=row[6],
@@ -426,6 +456,8 @@ class GraphStore:
     def delete_graph(self, binary_hash: str) -> None:
         if not binary_hash:
             return
+        # Clear caches for this binary
+        self.clear_batch_caches(binary_hash)
         with self._db_lock:
             conn = self.analysis_db.get_connection()
             try:
@@ -434,6 +466,351 @@ class GraphStore:
                 conn.commit()
             finally:
                 conn.close()
+
+    # ==================== Batch Operations ====================
+
+    def clear_batch_caches(self, binary_hash: Optional[str] = None) -> None:
+        """Clear batch queues and node cache, optionally for a specific binary."""
+        with self._batch_lock:
+            if binary_hash:
+                self._node_batch = [n for n in self._node_batch if n.binary_hash != binary_hash]
+                self._edge_batch = [e for e in self._edge_batch if e[3] != binary_hash]
+            else:
+                self._node_batch.clear()
+                self._edge_batch.clear()
+
+        with self._node_cache_lock:
+            if binary_hash:
+                keys_to_remove = [k for k in self._node_cache if k[0] == binary_hash]
+                for key in keys_to_remove:
+                    del self._node_cache[key]
+            else:
+                self._node_cache.clear()
+
+    def deduplicate_nodes(self, binary_hash: str) -> int:
+        """
+        Remove duplicate nodes, keeping only one per (binary_id, address).
+
+        When duplicates exist, keeps the node with the most data (non-null llm_summary,
+        or highest analysis_depth, or most recent updated_at).
+
+        Returns:
+            Number of duplicate nodes removed
+        """
+        if not binary_hash:
+            return 0
+
+        with self._db_lock:
+            conn = self.analysis_db.get_connection()
+            try:
+                cursor = conn.cursor()
+                # Delete duplicates, keeping the "best" node per address
+                # Priority: has llm_summary > higher analysis_depth > newer updated_at
+                cursor.execute('''
+                    DELETE FROM graph_nodes
+                    WHERE id IN (
+                        SELECT id FROM (
+                            SELECT id,
+                                ROW_NUMBER() OVER (
+                                    PARTITION BY binary_id, address
+                                    ORDER BY
+                                        CASE WHEN llm_summary IS NOT NULL AND llm_summary != '' THEN 0 ELSE 1 END,
+                                        analysis_depth DESC,
+                                        updated_at DESC
+                                ) as rn
+                            FROM graph_nodes
+                            WHERE binary_id = ?
+                        ) WHERE rn > 1
+                    )
+                ''', (binary_hash,))
+                deleted = cursor.rowcount
+                conn.commit()
+                return deleted
+            finally:
+                conn.close()
+
+    def deduplicate_edges(self, binary_hash: str) -> int:
+        """
+        Remove duplicate edges, keeping only one per (source_id, target_id, type).
+
+        Keeps the oldest edge (by created_at) when duplicates exist.
+
+        Returns:
+            Number of duplicate edges removed
+        """
+        if not binary_hash:
+            return 0
+
+        with self._db_lock:
+            conn = self.analysis_db.get_connection()
+            try:
+                cursor = conn.cursor()
+                # Delete duplicate edges for nodes belonging to this binary
+                # Keep the oldest edge per (source_id, target_id, type)
+                cursor.execute('''
+                    DELETE FROM graph_edges
+                    WHERE id IN (
+                        SELECT e.id FROM (
+                            SELECT id,
+                                ROW_NUMBER() OVER (
+                                    PARTITION BY source_id, target_id, type
+                                    ORDER BY created_at ASC
+                                ) as rn
+                            FROM graph_edges
+                            WHERE source_id IN (
+                                SELECT id FROM graph_nodes WHERE binary_id = ?
+                            )
+                        ) e WHERE e.rn > 1
+                    )
+                ''', (binary_hash,))
+                deleted = cursor.rowcount
+                conn.commit()
+                return deleted
+            finally:
+                conn.close()
+
+    def preload_node_cache(self, binary_hash: str) -> int:
+        """
+        Pre-load existing node IDs from the database into the cache.
+
+        This ensures that queue_node_for_batch() will reuse existing node IDs
+        during non-destructive reindexing, preventing duplicate nodes.
+
+        Returns:
+            Number of nodes loaded into cache
+        """
+        if not binary_hash:
+            return 0
+
+        with self._db_lock:
+            conn = self.analysis_db.get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT id, address FROM graph_nodes
+                    WHERE binary_id = ? AND type = 'FUNCTION'
+                ''', (binary_hash,))
+                rows = cursor.fetchall()
+
+                with self._node_cache_lock:
+                    for row in rows:
+                        node_id, address = row
+                        cache_key = (binary_hash, address)
+                        self._node_cache[cache_key] = node_id
+
+                return len(rows)
+            finally:
+                conn.close()
+
+    def queue_node_for_batch(self, node: GraphNode) -> GraphNode:
+        """
+        Queue a node for batch insert. Returns the canonical node with assigned ID.
+
+        If a node with the same (binary_hash, address) already exists in the cache,
+        returns the existing node to ensure consistent IDs for edge creation.
+        """
+        if not node.binary_hash or node.address is None:
+            raise ValueError("binary_hash and address are required for batch node")
+
+        cache_key = (node.binary_hash, node.address)
+
+        with self._node_cache_lock:
+            # Check if we already have this node in cache - reuse existing ID
+            if cache_key in self._node_cache:
+                node.id = self._node_cache[cache_key]
+            elif not node.id:
+                # Assign new ID if not set
+                node.id = str(uuid.uuid4())
+                # Cache the node ID
+                self._node_cache[cache_key] = node.id
+
+        # Always queue for batch insert/update (even existing nodes need is_stale updated)
+        with self._batch_lock:
+            self._node_batch.append(node)
+
+            # Auto-flush if batch is large
+            if len(self._node_batch) >= DEFAULT_BATCH_SIZE:
+                self._flush_node_batch_internal()
+
+        return node
+
+    def queue_edge_for_batch(
+        self,
+        source_id: str,
+        target_id: str,
+        edge_type: EdgeType,
+        binary_hash: str
+    ) -> None:
+        """Queue an edge for batch insert."""
+        if not source_id or not target_id or not edge_type or not binary_hash:
+            return
+
+        with self._batch_lock:
+            self._edge_batch.append((source_id, target_id, edge_type, binary_hash))
+
+            # Auto-flush if batch is large
+            # IMPORTANT: Flush nodes first to satisfy foreign key constraints
+            if len(self._edge_batch) >= DEFAULT_BATCH_SIZE:
+                self._flush_node_batch_internal()
+                self._flush_edge_batch_internal()
+
+    def flush_all_batches(self) -> Tuple[int, int]:
+        """
+        Flush all pending nodes and edges to the database.
+        Returns (nodes_flushed, edges_flushed).
+        """
+        nodes_flushed = 0
+        edges_flushed = 0
+
+        with self._batch_lock:
+            nodes_flushed = self._flush_node_batch_internal()
+            edges_flushed = self._flush_edge_batch_internal()
+
+        return nodes_flushed, edges_flushed
+
+    def _flush_node_batch_internal(self) -> int:
+        """Flush pending nodes to DB. Must be called with _batch_lock held."""
+        if not self._node_batch:
+            return 0
+
+        nodes_to_flush = self._node_batch[:]
+        self._node_batch.clear()
+
+        now_ms = self._now_ms()
+        rows = []
+        for node in nodes_to_flush:
+            rows.append((
+                node.id,
+                node.node_type,
+                node.address,
+                node.binary_hash,
+                node.name,
+                node.raw_code,
+                node.llm_summary,
+                node.confidence,
+                node.embedding,
+                self._serialize_list(node.security_flags),
+                self._serialize_list(node.network_apis),
+                self._serialize_list(node.file_io_apis),
+                self._serialize_list(node.ip_addresses),
+                self._serialize_list(node.urls),
+                self._serialize_list(node.file_paths),
+                self._serialize_list(node.domains),
+                self._serialize_list(node.registry_keys),
+                node.risk_level,
+                node.activity_profile,
+                node.analysis_depth,
+                now_ms,
+                now_ms,
+                1 if node.is_stale else 0,
+                1 if node.user_edited else 0
+            ))
+
+        with self._db_lock:
+            conn = self.analysis_db.get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.executemany('''
+                    INSERT INTO graph_nodes (
+                        id, type, address, binary_id, name, raw_content, llm_summary,
+                        confidence, embedding, security_flags, network_apis, file_io_apis,
+                        ip_addresses, urls, file_paths, domains, registry_keys, risk_level,
+                        activity_profile, analysis_depth, created_at, updated_at, is_stale,
+                        user_edited
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        -- STRUCTURAL DATA: Always update from fresh extraction
+                        type = excluded.type,
+                        address = excluded.address,
+                        binary_id = excluded.binary_id,
+                        name = excluded.name,
+                        raw_content = COALESCE(excluded.raw_content, graph_nodes.raw_content),
+                        security_flags = excluded.security_flags,
+                        network_apis = excluded.network_apis,
+                        file_io_apis = excluded.file_io_apis,
+                        ip_addresses = excluded.ip_addresses,
+                        urls = excluded.urls,
+                        file_paths = excluded.file_paths,
+                        domains = excluded.domains,
+                        registry_keys = excluded.registry_keys,
+                        risk_level = excluded.risk_level,
+                        activity_profile = excluded.activity_profile,
+                        updated_at = excluded.updated_at,
+                        is_stale = excluded.is_stale,
+                        -- SEMANTIC DATA: Preserve existing, only update if explicitly set
+                        llm_summary = COALESCE(excluded.llm_summary, graph_nodes.llm_summary),
+                        confidence = CASE WHEN excluded.confidence > 0 THEN excluded.confidence ELSE graph_nodes.confidence END,
+                        embedding = COALESCE(excluded.embedding, graph_nodes.embedding),
+                        analysis_depth = CASE WHEN excluded.analysis_depth > 0 THEN excluded.analysis_depth ELSE graph_nodes.analysis_depth END,
+                        -- USER DATA: Never reset during reindex
+                        user_edited = graph_nodes.user_edited
+                ''', rows)
+                conn.commit()
+                return len(rows)
+            except Exception as e:
+                log.log_error(f"Batch node flush failed: {e}")
+                return 0
+            finally:
+                conn.close()
+
+    def _flush_edge_batch_internal(self) -> int:
+        """Flush pending edges to DB. Must be called with _batch_lock held."""
+        if not self._edge_batch:
+            return 0
+
+        edges_to_flush = self._edge_batch[:]
+        self._edge_batch.clear()
+
+        now_ms = self._now_ms()
+        rows = []
+        seen = set()  # Dedupe within batch
+
+        for source_id, target_id, edge_type, binary_hash in edges_to_flush:
+            edge_type_str = edge_type.value if isinstance(edge_type, EdgeType) else str(edge_type)
+            key = (source_id, target_id, edge_type_str)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            # Generate deterministic edge ID from source/target/type
+            # This ensures INSERT OR REPLACE will update existing edges with same key
+            edge_id = f"{source_id}:{target_id}:{edge_type_str}"
+
+            rows.append((
+                edge_id,
+                source_id,
+                target_id,
+                edge_type_str,
+                1.0,  # weight
+                None,  # metadata
+                now_ms
+            ))
+
+        if not rows:
+            return 0
+
+        with self._db_lock:
+            conn = self.analysis_db.get_connection()
+            try:
+                cursor = conn.cursor()
+                # Use INSERT OR REPLACE with deterministic edge IDs to prevent duplicates
+                cursor.executemany('''
+                    INSERT OR REPLACE INTO graph_edges (
+                        id, source_id, target_id, type, weight, metadata, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', rows)
+                conn.commit()
+                return len(rows)
+            except Exception as e:
+                log.log_error(f"Batch edge flush failed: {e}")
+                return 0
+            finally:
+                conn.close()
+
+    def get_cached_node_id(self, binary_hash: str, address: int) -> Optional[str]:
+        """Get a node ID from cache if it exists."""
+        with self._node_cache_lock:
+            return self._node_cache.get((binary_hash, address))
 
     def search_nodes(self, binary_hash: str, query: str, limit: int = 10) -> List[GraphNode]:
         if not binary_hash or not query:

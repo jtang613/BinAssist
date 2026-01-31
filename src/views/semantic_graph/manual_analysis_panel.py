@@ -11,7 +11,7 @@ Provides organized UI for triggering various analysis operations:
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QPushButton, QLabel,
-    QProgressBar, QFrame
+    QProgressBar, QFrame, QCheckBox
 )
 
 
@@ -64,6 +64,25 @@ class ManualAnalysisPanel(QWidget):
         self.semantic_button = semantic_row.findChild(QPushButton)
         self.semantic_button.clicked.connect(self.semantic_analysis_requested.emit)
         primary_layout.addWidget(semantic_row)
+
+        # RAG/MCP/Force options for Semantic Analysis
+        options_row = QHBoxLayout()
+        options_row.setContentsMargins(self.BUTTON_WIDTH + 10, 0, 0, 0)  # Align with description
+
+        self.rag_checkbox = QCheckBox("Enable RAG")
+        self.rag_checkbox.setToolTip("Include RAG (Retrieval-Augmented Generation) context in prompts")
+        options_row.addWidget(self.rag_checkbox)
+
+        self.mcp_checkbox = QCheckBox("Enable MCP")
+        self.mcp_checkbox.setToolTip("Include MCP (Model Context Protocol) context in prompts")
+        options_row.addWidget(self.mcp_checkbox)
+
+        self.force_checkbox = QCheckBox("Force")
+        self.force_checkbox.setToolTip("Force re-analyze all functions, not just stale/unsummarized ones")
+        options_row.addWidget(self.force_checkbox)
+
+        options_row.addStretch()
+        primary_layout.addLayout(options_row)
 
         layout.addWidget(primary_group)
 
@@ -197,3 +216,15 @@ class ManualAnalysisPanel(QWidget):
     def set_community_running(self, running: bool):
         """Update Community Detection button state."""
         self.community_button.setText("Stop" if running else "Community Detection")
+
+    def is_rag_enabled(self) -> bool:
+        """Return whether RAG is enabled for semantic analysis."""
+        return self.rag_checkbox.isChecked()
+
+    def is_mcp_enabled(self) -> bool:
+        """Return whether MCP is enabled for semantic analysis."""
+        return self.mcp_checkbox.isChecked()
+
+    def is_force_enabled(self) -> bool:
+        """Return whether force re-analysis is enabled for semantic analysis."""
+        return self.force_checkbox.isChecked()

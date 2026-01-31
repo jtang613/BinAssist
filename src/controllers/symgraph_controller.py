@@ -1439,7 +1439,90 @@ class SymGraphController(QObject):
         return symbols
 
     def _collect_local_graph(self, scope: str) -> Optional[Dict[str, Any]]:
-        """Collect graph data from Binary Ninja based on scope."""
+        """Collect graph data from local graph store (with rich metadata) or fallback to Binary Ninja."""
+        if not self.bv:
+            return None
+
+        try:
+            nodes = []
+            edges = []
+
+            # Get binary hash for graph store queries
+            binary_hash = self._get_sha256()
+            if not binary_hash:
+                return self._collect_minimal_graph(scope)
+
+            # Try to read from local graph store first
+            graph_store = GraphStore(analysis_db_service)
+
+            if scope == PushScope.CURRENT_FUNCTION.value:
+                current_func = self._get_current_function()
+                if current_func:
+                    # Try to get rich node data from graph store
+                    local_node = graph_store.get_node_by_address(
+                        binary_hash, "FUNCTION", current_func.start
+                    )
+                    if local_node:
+                        nodes.append(self._local_node_to_push_dict(local_node))
+                        # Get edges with weights from graph store
+                        graph_edges = graph_store.get_edges_for_node(binary_hash, local_node.id)
+                        for edge in graph_edges:
+                            edge_dict = self._local_edge_to_push_dict(edge, graph_store)
+                            if edge_dict:
+                                edges.append(edge_dict)
+                    else:
+                        # Fallback: create minimal node from Binary Ninja
+                        nodes.append(self._function_to_node_dict(current_func))
+                        for callee in current_func.callees:
+                            edges.append({
+                                'source_address': f"0x{current_func.start:x}",
+                                'target_address': f"0x{callee.start:x}",
+                                'edge_type': 'calls',
+                                'weight': 1.0
+                            })
+            else:
+                # Full binary scope
+                local_nodes = graph_store.get_nodes_by_type(binary_hash, "FUNCTION")
+
+                if local_nodes:
+                    # Build node ID to address mapping for edge resolution
+                    node_id_to_address = {}
+                    for local_node in local_nodes:
+                        nodes.append(self._local_node_to_push_dict(local_node))
+                        node_id_to_address[local_node.id] = local_node.address
+
+                    # Get all edges from graph store
+                    all_edges = graph_store.get_edges_by_types(
+                        binary_hash,
+                        ["calls", "calls_vulnerable", "network_send", "network_recv",
+                         "taint_flows_to", "similar_purpose", "references"]
+                    )
+                    for edge in all_edges:
+                        edge_dict = self._local_edge_to_push_dict(edge, graph_store, node_id_to_address)
+                        if edge_dict:
+                            edges.append(edge_dict)
+                else:
+                    # Fallback: create minimal graph from Binary Ninja
+                    for func in self.bv.functions:
+                        nodes.append(self._function_to_node_dict(func))
+                        for callee in func.callees:
+                            edges.append({
+                                'source_address': f"0x{func.start:x}",
+                                'target_address': f"0x{callee.start:x}",
+                                'edge_type': 'calls',
+                                'weight': 1.0
+                            })
+
+            if nodes:
+                return {'nodes': nodes, 'edges': edges}
+
+        except Exception as e:
+            log.log_error(f"Error collecting graph: {e}")
+
+        return None
+
+    def _collect_minimal_graph(self, scope: str) -> Optional[Dict[str, Any]]:
+        """Fallback: Collect minimal graph data directly from Binary Ninja."""
         if not self.bv:
             return None
 
@@ -1451,39 +1534,129 @@ class SymGraphController(QObject):
                 current_func = self._get_current_function()
                 if current_func:
                     nodes.append(self._function_to_node_dict(current_func))
-                    # Add edges for callees
                     for callee in current_func.callees:
                         edges.append({
                             'source_address': f"0x{current_func.start:x}",
                             'target_address': f"0x{callee.start:x}",
-                            'edge_type': 'calls'
+                            'edge_type': 'calls',
+                            'weight': 1.0
                         })
             else:
-                # Full binary
                 for func in self.bv.functions:
                     nodes.append(self._function_to_node_dict(func))
                     for callee in func.callees:
                         edges.append({
                             'source_address': f"0x{func.start:x}",
                             'target_address': f"0x{callee.start:x}",
-                            'edge_type': 'calls'
+                            'edge_type': 'calls',
+                            'weight': 1.0
                         })
 
             if nodes:
                 return {'nodes': nodes, 'edges': edges}
 
         except Exception as e:
-            log.log_error(f"Error collecting graph: {e}")
+            log.log_error(f"Error collecting minimal graph: {e}")
 
         return None
 
     def _function_to_node_dict(self, func) -> Dict[str, Any]:
-        """Convert a Binary Ninja function to a graph node dictionary."""
+        """Convert a Binary Ninja function to a minimal graph node dictionary (fallback)."""
         return {
             'address': f"0x{func.start:x}",
             'node_type': 'function',
             'name': func.name,
-            'properties': {}
+            'raw_content': None,
+            'llm_summary': None,
+            'confidence': 0.0,
+            'provenance': 'decompiler',
+            'is_stale': True,
+            'user_edited': False
+        }
+
+    def _local_node_to_push_dict(self, node: LocalGraphNode) -> Dict[str, Any]:
+        """Convert a local GraphNode to push format with all rich metadata."""
+        # Determine confidence - fix up old nodes that were analyzed before confidence was set
+        confidence = node.confidence or 0.0
+        if node.llm_summary and confidence == 0.0:
+            # Node was analyzed with old code that didn't set confidence
+            # Assign reasonable defaults based on provenance
+            confidence = 0.95 if node.user_edited else 0.85
+            log.log_debug(f"Fixed up confidence for {node.name}: {confidence}")
+
+        result = {
+            'address': f"0x{node.address:x}" if node.address else "0x0",
+            'node_type': node.get_node_type_str().lower(),
+            'name': node.name,
+            'raw_content': node.raw_code,
+            'llm_summary': node.llm_summary,
+            'confidence': confidence,
+            'provenance': 'user' if node.user_edited else 'decompiler',
+        }
+
+        # Add security-related fields if present
+        if node.security_flags:
+            result['security_flags'] = list(node.security_flags)
+        if node.network_apis:
+            result['network_apis'] = list(node.network_apis)
+        if node.file_io_apis:
+            result['file_io_apis'] = list(node.file_io_apis)
+        if node.ip_addresses:
+            result['ip_addresses'] = list(node.ip_addresses)
+        if node.urls:
+            result['urls'] = list(node.urls)
+        if node.file_paths:
+            result['file_paths'] = list(node.file_paths)
+        if node.domains:
+            result['domains'] = list(node.domains)
+        if node.registry_keys:
+            result['registry_keys'] = list(node.registry_keys)
+
+        # Add analysis metadata
+        if node.risk_level:
+            result['risk_level'] = node.risk_level
+        if node.activity_profile:
+            result['activity_profile'] = node.activity_profile
+        if node.analysis_depth:
+            result['analysis_depth'] = node.analysis_depth
+
+        # Add state flags
+        result['is_stale'] = node.is_stale
+        result['user_edited'] = node.user_edited
+
+        return result
+
+    def _local_edge_to_push_dict(
+        self,
+        edge: LocalGraphEdge,
+        graph_store: GraphStore,
+        node_id_to_address: Optional[Dict[str, int]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Convert a local GraphEdge to push format with weight."""
+        source_addr = None
+        target_addr = None
+
+        if node_id_to_address:
+            # Use cached mapping for efficiency
+            source_addr = node_id_to_address.get(edge.source_id)
+            target_addr = node_id_to_address.get(edge.target_id)
+        else:
+            # Look up nodes by ID
+            source_node = graph_store.get_node_by_id(edge.source_id)
+            target_node = graph_store.get_node_by_id(edge.target_id)
+            if source_node:
+                source_addr = source_node.address
+            if target_node:
+                target_addr = target_node.address
+
+        if source_addr is None or target_addr is None:
+            return None
+
+        return {
+            'source_address': f"0x{source_addr:x}",
+            'target_address': f"0x{target_addr:x}",
+            'edge_type': edge.get_edge_type_str(),
+            'weight': edge.weight or 1.0
         }
 
     def _get_current_function(self):

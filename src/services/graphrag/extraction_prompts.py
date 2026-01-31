@@ -64,6 +64,24 @@ def analyze_complexity(code: str) -> ComplexityMetrics:
 
 def function_summary_prompt(function_name: str, decompiled_code: str,
                             callers: List[str], callees: List[str]) -> str:
+    """
+    Generate a prompt for function summarization.
+
+    .. deprecated::
+        Use :class:`~services.function_summary_service.FunctionSummaryService` instead.
+        This function provides a simplified prompt without RAG/MCP support.
+        The FunctionSummaryService provides the unified prompt format used by both
+        the Explain tab and Semantic Analysis, with full RAG and MCP support.
+
+    Args:
+        function_name: The name of the function
+        decompiled_code: The decompiled code of the function
+        callers: List of functions that call this function
+        callees: List of functions called by this function
+
+    Returns:
+        A prompt string for the LLM
+    """
     complexity = analyze_complexity(decompiled_code)
 
     prompt = ["Analyze this decompiled function and provide a structured summary.\n\n"]

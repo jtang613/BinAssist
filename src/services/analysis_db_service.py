@@ -305,6 +305,8 @@ class AnalysisDBService:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_edges_target ON graph_edges(target_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_edges_type ON graph_edges(type)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_edges_source_type ON graph_edges(source_id, type)")
+        # UNIQUE index to prevent duplicate edges at the database level
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_edge_unique ON graph_edges(source_id, target_id, type)")
 
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_communities_binary ON graph_communities(binary_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_communities_level ON graph_communities(level)")

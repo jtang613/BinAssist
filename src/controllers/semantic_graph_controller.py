@@ -159,6 +159,8 @@ class SemanticGraphController:
         binary_hash = self.analysis_db.get_binary_hash(self.binary_view)
         self.view.status_label.setText("Status: Reindexing...")
         self._set_reindex_button_running(True)
+        if hasattr(self.view, "show_bottom_progress"):
+            self.view.show_bottom_progress()
         self._reindex_worker = ReindexWorker(
             self.graph_service,
             self.graph_store,
@@ -195,12 +197,24 @@ class SemanticGraphController:
         binary_hash = self.analysis_db.get_binary_hash(self.binary_view)
         self.view.status_label.setText("Status: Running semantic analysis...")
         self._set_semantic_button_running(True)
+        if hasattr(self.view, "show_bottom_progress"):
+            self.view.show_bottom_progress()
+
+        # Get RAG/MCP/Force settings from the view if available
+        rag_enabled = self.view.is_rag_enabled() if hasattr(self.view, 'is_rag_enabled') else False
+        mcp_enabled = self.view.is_mcp_enabled() if hasattr(self.view, 'is_mcp_enabled') else False
+        force_enabled = self.view.is_force_enabled() if hasattr(self.view, 'is_force_enabled') else False
+
         self._semantic_worker = SemanticAnalysisWorker(
             provider_config,
             self.llm_factory,
             self.graph_service,
             self.binary_view,
             binary_hash,
+            settings_service=self.settings_service,
+            rag_enabled=rag_enabled,
+            mcp_enabled=mcp_enabled,
+            force=force_enabled,
         )
         self._semantic_worker.progress.connect(self._on_semantic_progress)
         self._semantic_worker.completed.connect(self._on_semantic_complete)
@@ -218,6 +232,8 @@ class SemanticGraphController:
         binary_hash = self.analysis_db.get_binary_hash(self.binary_view)
         self.view.status_label.setText("Status: Running security analysis...")
         self._set_security_button_running(True)
+        if hasattr(self.view, "show_bottom_progress"):
+            self.view.show_bottom_progress()
         self._security_worker = SecurityAnalysisWorker(self.graph_store, binary_hash)
         self._security_worker.completed.connect(self._on_security_complete)
         self._security_worker.cancelled.connect(self._on_security_cancelled)
@@ -234,6 +250,8 @@ class SemanticGraphController:
         binary_hash = self.analysis_db.get_binary_hash(self.binary_view)
         self.view.status_label.setText("Status: Running network flow analysis...")
         self._set_network_button_running(True)
+        if hasattr(self.view, "show_bottom_progress"):
+            self.view.show_bottom_progress()
         self._network_worker = NetworkFlowAnalysisWorker(self.graph_store, binary_hash)
         self._network_worker.progress.connect(self._on_network_progress)
         self._network_worker.completed.connect(self._on_network_complete)
@@ -260,6 +278,8 @@ class SemanticGraphController:
         binary_hash = self.analysis_db.get_binary_hash(self.binary_view)
         self._update_panel_status("Detecting communities...")
         self._set_community_button_running(True)
+        if hasattr(self.view, "show_bottom_progress"):
+            self.view.show_bottom_progress()
         self._community_worker = CommunityDetectionWorker(
             self.graph_store,
             binary_hash,
@@ -294,6 +314,7 @@ class SemanticGraphController:
         if not node:
             return
         node.llm_summary = summary
+        node.confidence = 0.95  # User-edited content has high confidence
         node.user_edited = True
         node.is_stale = False
         self.graph_service.upsert_node(node)
@@ -550,25 +571,28 @@ class SemanticGraphController:
         return callees
 
     def _on_semantic_progress(self, processed: int, total: int, summarized: int, errors: int):
-        self.view.status_label.setText(
-            f"Status: Summarizing... {processed}/{total} ({errors} errors)"
-        )
+        message = f"Summarizing... {processed}/{total} ({errors} errors)"
+        self.view.status_label.setText(f"Status: {message}")
+        self._update_panel_progress(processed, total, message)
 
     def _on_semantic_complete(self, summarized: int, errors: int, elapsed_ms: int):
         self.view.status_label.setText(
             f"Status: Semantic analysis complete ({summarized} summaries, {errors} errors)"
         )
         self._set_semantic_button_running(False)
+        self._reset_panel_progress()
         self.refresh_current_view()
 
     def _on_semantic_cancelled(self):
         self.view.status_label.setText("Status: Semantic analysis stopped")
         self._set_semantic_button_running(False)
+        self._reset_panel_progress()
 
     def _on_semantic_error(self, message: str):
         log.log_error(f"Semantic analysis failed: {message}")
         self.view.status_label.setText("Status: Semantic analysis failed")
         self._set_semantic_button_running(False)
+        self._reset_panel_progress()
 
     def _on_security_complete(self, path_count: int, edges_created: int, chain: bool = False):
         self.view.status_label.setText(
@@ -579,11 +603,13 @@ class SemanticGraphController:
             # Chain to network flow analysis
             self._start_network_flow_chain()
         else:
+            self._reset_panel_progress()
             self.refresh_current_view()
 
     def _on_security_cancelled(self):
         self.view.status_label.setText("Status: Security analysis stopped")
         self._set_security_button_running(False)
+        self._reset_panel_progress()
 
     def _on_security_error(self, message: str):
         log.log_error(f"Security analysis failed: {message}")
@@ -592,6 +618,8 @@ class SemanticGraphController:
         # Continue chain even on error
         if hasattr(self, '_chain_active') and self._chain_active:
             self._start_network_flow_chain()
+        else:
+            self._reset_panel_progress()
 
     def _on_network_progress(self, current: int, total: int, message: str):
         self.view.status_label.setText(f"Status: {message}")
@@ -605,11 +633,13 @@ class SemanticGraphController:
             # Chain to community detection
             self._start_community_detection(force=True)
         else:
+            self._reset_panel_progress()
             self.refresh_current_view()
 
     def _on_network_cancelled(self):
         self.view.status_label.setText("Status: Network flow analysis stopped")
         self._set_network_button_running(False)
+        self._reset_panel_progress()
 
     def _on_network_error(self, message: str):
         log.log_error(f"Network flow analysis failed: {message}")
@@ -618,6 +648,8 @@ class SemanticGraphController:
         # Continue chain even on error
         if hasattr(self, '_chain_active') and self._chain_active:
             self._start_community_detection(force=True)
+        else:
+            self._reset_panel_progress()
 
     def _on_community_progress(self, iteration: int, max_iterations: int):
         self.view.status_label.setText(
@@ -632,20 +664,23 @@ class SemanticGraphController:
         else:
             self._update_panel_status(f"Community detection complete ({count} communities detected)")
         self._set_community_button_running(False)
+        self._reset_panel_progress()
         self.refresh_current_view()
 
     def _on_community_cancelled(self):
         self._update_panel_status("Community detection stopped")
         self._set_community_button_running(False)
+        self._reset_panel_progress()
 
     def _on_community_error(self, message: str):
         log.log_error(f"Community detection failed: {message}")
         self._update_panel_status("Community detection failed")
         self._set_community_button_running(False)
+        self._reset_panel_progress()
 
-    def _on_reindex_progress(self, processed: int, total: int):
-        self._update_panel_status(f"Reindexing... {processed}/{total}")
-        self._update_panel_progress(processed, total, f"Indexing functions")
+    def _on_reindex_progress(self, processed: int, total: int, message: str):
+        self._update_panel_status(f"Reindexing: {message}")
+        self._update_panel_progress(processed, total, message)
 
     def _on_reindex_complete(self, processed: int):
         self._update_panel_status(f"Reindex complete ({processed} functions), running security analysis...")
@@ -657,12 +692,14 @@ class SemanticGraphController:
     def _on_reindex_cancelled(self, processed: int):
         self.view.status_label.setText(f"Status: Reindex stopped ({processed} functions)")
         self._set_reindex_button_running(False)
+        self._reset_panel_progress()
         self.refresh_current_view()
 
     def _on_reindex_error(self, message: str):
         log.log_error(f"Reindex failed: {message}")
         self.view.status_label.setText("Status: Reindex failed")
         self._set_reindex_button_running(False)
+        self._reset_panel_progress()
 
     def _set_reindex_button_running(self, running: bool):
         if hasattr(self.view, "manual_analysis_view"):
@@ -695,14 +732,18 @@ class SemanticGraphController:
             self.view.manual_analysis_view.set_status(message)
 
     def _update_panel_progress(self, current: int, total: int, message: str = ""):
-        """Update the Manual Analysis Panel progress bar."""
+        """Update both the Manual Analysis Panel and bottom row progress bars."""
         if hasattr(self.view, "manual_analysis_view"):
             self.view.manual_analysis_view.set_progress(current, total, message)
+        if hasattr(self.view, "set_bottom_progress"):
+            self.view.set_bottom_progress(current, total, message)
 
     def _reset_panel_progress(self):
-        """Reset the Manual Analysis Panel progress bar."""
+        """Reset both progress bars."""
         if hasattr(self.view, "manual_analysis_view"):
             self.view.manual_analysis_view.reset_progress()
+        if hasattr(self.view, "hide_bottom_progress"):
+            self.view.hide_bottom_progress()
 
     def _start_security_chain(self):
         """Start security analysis as part of reindex chain."""
@@ -740,7 +781,9 @@ class SemanticAnalysisWorker(QThread):
     failed = Signal(str)
 
     def __init__(self, provider_config, llm_factory, graph_service,
-                 binary_view, binary_hash: str, limit: int = 0):
+                 binary_view, binary_hash: str, limit: int = 0,
+                 settings_service=None, rag_enabled: bool = False,
+                 mcp_enabled: bool = False, force: bool = False):
         super().__init__()
         self.provider_config = provider_config
         self.llm_factory = llm_factory
@@ -748,6 +791,10 @@ class SemanticAnalysisWorker(QThread):
         self.binary_view = binary_view
         self.binary_hash = binary_hash
         self.limit = limit
+        self.settings_service = settings_service
+        self.rag_enabled = rag_enabled
+        self.mcp_enabled = mcp_enabled
+        self.force = force
         self._cancelled = False
         self._extractor = None
 
@@ -764,16 +811,30 @@ class SemanticAnalysisWorker(QThread):
 
     async def _async_run(self):
         provider = self.llm_factory.create_provider(self.provider_config)
+
+        # Create FunctionSummaryService for unified prompt generation
+        from ..services.function_summary_service import FunctionSummaryService
+        summary_service = FunctionSummaryService(
+            self.binary_view,
+            settings_service=self.settings_service,
+            rag_enabled=self.rag_enabled,
+            mcp_enabled=self.mcp_enabled,
+        )
+
         from ..services.graphrag.semantic_extractor import SemanticExtractor
         self._extractor = SemanticExtractor(
             provider,
             self.graph_service.store,
             self.binary_view,
             self.binary_hash,
+            summary_service=summary_service,
+            rag_enabled=self.rag_enabled,
+            mcp_enabled=self.mcp_enabled,
         )
         result = await self._extractor.summarize_stale_nodes(
             self.limit,
             self._progress_callback,
+            force=self.force,
         )
         if self._cancelled or (self._extractor and self._extractor.cancelled):
             self.cancelled.emit()
@@ -817,7 +878,7 @@ class SecurityAnalysisWorker(QThread):
 
 
 class ReindexWorker(QThread):
-    progress = Signal(int, int)
+    progress = Signal(int, int, str)  # current, total, message
     completed = Signal(int)
     cancelled = Signal(int)
     failed = Signal(str)
@@ -830,24 +891,38 @@ class ReindexWorker(QThread):
         self.binary_view = binary_view
         self.binary_hash = binary_hash
         self._cancelled = False
+        self._extractor = None
 
     def cancel(self):
         self._cancelled = True
+        if self._extractor:
+            self._extractor.cancel()
 
     def run(self):
         try:
-            self.graph_store.delete_graph(self.binary_hash)
-            functions = list(self.binary_view.functions)
-            total = len(functions)
-            processed = 0
-            for function in functions:
-                if self._cancelled:
-                    self.cancelled.emit(processed)
-                    return
-                self.graph_service.index_function(self.binary_view, function, self.binary_hash)
-                processed += 1
-                self.progress.emit(processed, total)
-            self.completed.emit(processed)
+            from ..services.graphrag.structure_extractor import StructureExtractor
+
+            # Non-destructive reindex: do NOT delete_graph() here.
+            # The upsert logic will update changed fields while preserving semantic data.
+            # Use "Reset Graph" if a full wipe is needed.
+
+            # Use two-phase extraction with progress on both phases
+            self._extractor = StructureExtractor(self.binary_view, self.graph_store)
+
+            def progress_callback(current: int, total: int, message: str):
+                if not self._cancelled:
+                    self.progress.emit(current, total, message)
+
+            result = self._extractor.extract_all_parallel(
+                self.binary_hash,
+                progress_callback=progress_callback
+            )
+
+            if self._cancelled:
+                self.cancelled.emit(result.functions_extracted)
+                return
+
+            self.completed.emit(result.functions_extracted)
         except Exception as exc:
             self.failed.emit(str(exc))
 

@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QGroupBox, QGridLayout, QSplitter, QListWidget, QListWidgetItem, QTableWidget,
     QTableWidgetItem, QComboBox, QTextEdit, QCheckBox, QSpinBox, QGraphicsView,
     QGraphicsScene, QGraphicsPathItem, QGraphicsLineItem, QGraphicsTextItem, QGraphicsItem,
-    QGraphicsPolygonItem,
+    QGraphicsPolygonItem, QProgressBar,
     QScrollArea,
     QFrame, QRadioButton, QButtonGroup, QAbstractItemView, QInputDialog
 )
@@ -33,6 +33,9 @@ class ClickableGraphicsView(QGraphicsView):
         item = self.itemAt(event.pos())
         if item:
             node_data = item.data(0)
+            # If no data on this item, check parent (text items are children of rects)
+            if not node_data and item.parentItem():
+                node_data = item.parentItem().data(0)
             if node_data:
                 self.node_double_clicked.emit(node_data)
                 return
@@ -102,6 +105,26 @@ class SemanticGraphTabView(QWidget):
         self.semantic_button = QPushButton("Semantic Analysis")
         self.semantic_button.setToolTip("Use LLM to generate summaries for unsummarized functions.")
         bottom.addWidget(self.semantic_button)
+
+        # Progress indicator widget (hidden by default)
+        self.bottom_progress_container = QWidget()
+        progress_layout = QHBoxLayout(self.bottom_progress_container)
+        progress_layout.setContentsMargins(10, 0, 0, 0)
+
+        self.bottom_progress_bar = QProgressBar()
+        self.bottom_progress_bar.setRange(0, 100)
+        self.bottom_progress_bar.setValue(0)
+        self.bottom_progress_bar.setTextVisible(True)
+        self.bottom_progress_bar.setFixedWidth(200)
+        self.bottom_progress_bar.setFixedHeight(22)
+        progress_layout.addWidget(self.bottom_progress_bar)
+
+        self.bottom_progress_label = QLabel("")
+        self.bottom_progress_label.setStyleSheet("color: gray; font-size: 11px;")
+        progress_layout.addWidget(self.bottom_progress_label)
+
+        self.bottom_progress_container.setVisible(False)
+        bottom.addWidget(self.bottom_progress_container)
 
         bottom.addStretch()
         layout.addLayout(bottom)
@@ -202,6 +225,44 @@ class SemanticGraphTabView(QWidget):
             return datetime.fromtimestamp(epoch).strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
             return "unknown"
+
+    def show_bottom_progress(self):
+        """Show the bottom progress indicator."""
+        self.bottom_progress_container.setVisible(True)
+
+    def hide_bottom_progress(self):
+        """Hide the bottom progress indicator and reset values."""
+        self.bottom_progress_container.setVisible(False)
+        self.bottom_progress_bar.setValue(0)
+        self.bottom_progress_bar.setFormat("0%")
+        self.bottom_progress_label.setText("")
+
+    def set_bottom_progress(self, current: int, total: int, message: str = ""):
+        """Update the bottom progress indicator."""
+        if total > 0:
+            percent = int((current / total) * 100)
+            self.bottom_progress_bar.setValue(percent)
+            self.bottom_progress_bar.setFormat(f"{percent}%")
+        else:
+            self.bottom_progress_bar.setValue(0)
+            self.bottom_progress_bar.setFormat("0%")
+
+        self.bottom_progress_label.setText(message if message else "")
+
+        if not self.bottom_progress_container.isVisible():
+            self.bottom_progress_container.setVisible(True)
+
+    def is_rag_enabled(self) -> bool:
+        """Return whether RAG is enabled for semantic analysis."""
+        return self.manual_analysis_view.is_rag_enabled()
+
+    def is_mcp_enabled(self) -> bool:
+        """Return whether MCP is enabled for semantic analysis."""
+        return self.manual_analysis_view.is_mcp_enabled()
+
+    def is_force_enabled(self) -> bool:
+        """Return whether force re-analysis is enabled for semantic analysis."""
+        return self.manual_analysis_view.is_force_enabled()
 
 
 class SemanticGraphListView(QWidget):
@@ -492,13 +553,11 @@ class SemanticGraphGraphView(QWidget):
         controls.addWidget(QLabel("Edge Types:"))
         self.calls_cb = QCheckBox("CALLS")
         self.calls_cb.setChecked(True)
-        self.refs_cb = QCheckBox("REFS")
-        self.refs_cb.setChecked(True)
         self.vuln_cb = QCheckBox("VULN")
         self.vuln_cb.setChecked(True)
         self.network_cb = QCheckBox("NETWORK")
         self.network_cb.setChecked(True)
-        for cb in (self.calls_cb, self.refs_cb, self.vuln_cb, self.network_cb):
+        for cb in (self.calls_cb, self.vuln_cb, self.network_cb):
             cb.stateChanged.connect(self._on_refresh)
             controls.addWidget(cb)
         controls.addStretch()
@@ -999,8 +1058,6 @@ class SemanticGraphGraphView(QWidget):
         edge_types = []
         if self.calls_cb.isChecked():
             edge_types.append("calls")
-        if self.refs_cb.isChecked():
-            edge_types.append("references")
         if self.vuln_cb.isChecked():
             edge_types.append("calls_vulnerable")
         if self.network_cb.isChecked():

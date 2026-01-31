@@ -4,6 +4,7 @@ from typing import Optional, Dict, Any, List, Tuple
 from enum import Enum
 import hashlib
 import os
+import time
 import binaryninja as bn
 from binaryninja import BinaryView, Function, BasicBlock, DisassemblySettings, DisassemblyOption, LinearViewObject, LinearViewCursor
 
@@ -580,14 +581,47 @@ class BinaryContextService:
         except Exception as e:
             return [{"error": f"Failed to generate pseudo code: {str(e)}"}]
     
-    def _pseudo_c_to_text(self, addr: int) -> str:
-        """Convert Pseudo-C instructions at a specific address to text using Linear View"""
+    def _pseudo_c_to_text(self, addr: int, max_retries: int = 5, retry_delay: float = 0.5) -> str:
+        """Convert Pseudo-C instructions at a specific address to text using Linear View.
+
+        Includes retry logic to handle Binary Ninja's async decompilation which may
+        initially return 'Loading...' placeholder text.
+
+        Args:
+            addr: Function address
+            max_retries: Maximum number of retry attempts (default: 5)
+            retry_delay: Delay in seconds between retries (default: 0.5)
+
+        Returns:
+            Pseudo-C text, or None if decompilation fails or times out
+        """
+        for attempt in range(max_retries):
+            result = self._pseudo_c_to_text_internal(addr)
+
+            # Check if we got valid content (not None and not containing "Loading...")
+            if result and "Loading..." not in result:
+                return result
+
+            # Wait before retry (but not after the last attempt)
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+                log.log_debug(f"Pseudo-C retry {attempt + 1}/{max_retries} for 0x{addr:x}")
+
+        # All retries exhausted - return None to fall back to other view levels
+        if result and "Loading..." in result:
+            log.log_warn(f"Pseudo-C decompilation timed out for 0x{addr:x}, falling back")
+            return None
+
+        return result
+
+    def _pseudo_c_to_text_internal(self, addr: int) -> str:
+        """Internal: Convert Pseudo-C instructions using Linear View (may return Loading...)"""
         function = self._binary_view.get_functions_containing(addr)
         if not function:
             return None
-        
+
         function = function[0]
-        
+
         lines = []
         settings = DisassemblySettings()
         settings.set_option(DisassemblyOption.ShowAddress, False)

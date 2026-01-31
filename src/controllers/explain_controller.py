@@ -442,7 +442,7 @@ class ExplainController:
                 )
 
                 # Delete ALL line explanations for this function
-                deleted_line_count = self.analysis_db.clear_all_line_explanations_for_function(
+                deleted_line_count = self.analysis_db.clear_line_explanations_for_function(
                     binary_hash, function_start
                 )
 
@@ -536,6 +536,7 @@ class ExplainController:
                         )
                 if node:
                     node.llm_summary = edited_content
+                    node.confidence = 0.95  # User-edited content has high confidence
                     node.user_edited = True
                     node.is_stale = False
                     self.graphrag_service.upsert_node(node)
@@ -903,6 +904,7 @@ Analyze the specific instruction/line of code below. Provide a detailed explanat
                                 )
                         if node:
                             node.llm_summary = complete_content
+                            node.confidence = 0.85  # LLM-generated summary confidence
                             node.is_stale = False
                             self.graphrag_service.upsert_node(node)
                             self._update_security_panel_from_node(node)
