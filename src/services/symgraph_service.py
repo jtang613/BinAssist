@@ -10,6 +10,7 @@ import asyncio
 import re
 import threading
 from typing import Dict, List, Optional, Any
+from urllib.parse import urlparse
 
 try:
     import httpx
@@ -157,6 +158,31 @@ class SymGraphService:
         if not self.has_api_key:
             raise SymGraphAuthError("SymGraph API key not configured. Add your API key in Settings > SymGraph")
 
+    def _is_private_network(self) -> bool:
+        """Check if the API URL points to a private/internal network address."""
+        try:
+            parsed = urlparse(self.base_url)
+            host = parsed.hostname or ''
+            if host in ('localhost', '127.0.0.1', '::1'):
+                return True
+            # RFC 1918 private networks
+            if re.match(r'^10\.', host):
+                return True
+            if re.match(r'^172\.(1[6-9]|2[0-9]|3[01])\.', host):
+                return True
+            if re.match(r'^192\.168\.', host):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _client_kwargs(self, timeout: float = 30.0) -> dict:
+        """Build common kwargs for httpx.AsyncClient."""
+        kwargs = {'timeout': timeout}
+        if self._is_private_network():
+            kwargs['verify'] = False
+        return kwargs
+
     # === Unauthenticated Operations ===
 
     async def check_binary_exists(self, sha256: str) -> bool:
@@ -175,7 +201,7 @@ class SymGraphService:
         log.log_debug(f"Checking binary existence: {url}")
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(**self._client_kwargs(30.0)) as client:
                 response = await client.head(url, headers=self._get_headers())
 
                 if response.status_code == 200:
@@ -207,7 +233,7 @@ class SymGraphService:
         log.log_debug(f"Getting binary stats: {url}")
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(**self._client_kwargs(30.0)) as client:
                 response = await client.get(url, headers=self._get_headers())
 
                 if response.status_code == 200:
@@ -270,7 +296,7 @@ class SymGraphService:
         log.log_debug(f"Getting symbols: {url}")
 
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(**self._client_kwargs(60.0)) as client:
                 response = await client.get(
                     url,
                     headers=self._get_headers(authenticated=True)
@@ -315,7 +341,7 @@ class SymGraphService:
         log.log_debug(f"Pushing {len(symbols)} symbols to: {url}")
 
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
+            async with httpx.AsyncClient(**self._client_kwargs(120.0)) as client:
                 response = await client.post(
                     url,
                     headers=self._get_headers(authenticated=True),
@@ -355,7 +381,7 @@ class SymGraphService:
         log.log_debug(f"Exporting symbols: {url}")
 
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
+            async with httpx.AsyncClient(**self._client_kwargs(120.0)) as client:
                 response = await client.get(
                     url,
                     headers=self._get_headers(authenticated=True)
@@ -394,7 +420,7 @@ class SymGraphService:
         log.log_debug(f"Importing symbols to: {url}")
 
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
+            async with httpx.AsyncClient(**self._client_kwargs(120.0)) as client:
                 response = await client.post(
                     url,
                     headers=self._get_headers(authenticated=True),
@@ -434,7 +460,7 @@ class SymGraphService:
         log.log_debug(f"Exporting graph: {url}")
 
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
+            async with httpx.AsyncClient(**self._client_kwargs(120.0)) as client:
                 response = await client.get(
                     url,
                     headers=self._get_headers(authenticated=True)
@@ -473,7 +499,7 @@ class SymGraphService:
         log.log_debug(f"Importing graph to: {url}")
 
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
+            async with httpx.AsyncClient(**self._client_kwargs(120.0)) as client:
                 response = await client.post(
                     url,
                     headers=self._get_headers(authenticated=True),
@@ -518,7 +544,7 @@ class SymGraphService:
         log.log_debug(f"Adding fingerprint {fp_type}={fp_value} to {sha256[:16]}...")
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(**self._client_kwargs(30.0)) as client:
                 response = await client.post(
                     url,
                     headers=self._get_headers(authenticated=True),
@@ -565,10 +591,23 @@ class SymGraphService:
         conflicts = []
         skipped_default = 0
         skipped_confidence = 0
+        skipped_duplicate = 0
 
+        # Deduplicate by address: keep the best symbol per address.
+        # Prefer named symbols (function/variable) over comments,
+        # and higher confidence over lower.
+        best_by_address: Dict[int, Symbol] = {}
         for remote_sym in remote_symbols:
-            # Skip remote symbols with default/auto-generated names
-            if is_default_name(remote_sym.name):
+            display_name = remote_sym.display_name
+            is_comment = remote_sym.symbol_type == 'comment'
+
+            # Skip symbols with no useful display name
+            if not display_name:
+                skipped_default += 1
+                continue
+
+            # Skip non-comment symbols with default/auto-generated names
+            if not is_comment and is_default_name(remote_sym.name):
                 skipped_default += 1
                 continue
 
@@ -578,21 +617,38 @@ class SymGraphService:
                 continue
 
             addr = remote_sym.address
+            existing = best_by_address.get(addr)
+            if existing is None:
+                best_by_address[addr] = remote_sym
+            else:
+                existing_is_comment = existing.symbol_type == 'comment'
+                if existing_is_comment and not is_comment:
+                    best_by_address[addr] = remote_sym
+                    skipped_duplicate += 1
+                elif not existing_is_comment and is_comment:
+                    skipped_duplicate += 1
+                elif remote_sym.confidence > existing.confidence:
+                    best_by_address[addr] = remote_sym
+                    skipped_duplicate += 1
+                else:
+                    skipped_duplicate += 1
+
+        for addr, remote_sym in best_by_address.items():
             local_name = local_symbols.get(addr)
             local_is_default = is_default_name(local_name) if local_name else True
 
             if local_name is None or local_is_default:
                 # Remote only OR local has default name - NEW (safe to apply)
                 conflicts.append(ConflictEntry.create_new(addr, remote_sym))
-            elif local_name == remote_sym.name:
+            elif local_name == remote_sym.display_name:
                 # Same value - SAME
                 conflicts.append(ConflictEntry.create_same(addr, local_name, remote_sym))
             else:
                 # Different values (both user-defined) - CONFLICT
                 conflicts.append(ConflictEntry.create_conflict(addr, local_name, remote_sym))
 
-        if skipped_default > 0 or skipped_confidence > 0:
-            log.log_info(f"Filtered out {skipped_default} default names, {skipped_confidence} low confidence symbols")
+        if skipped_default > 0 or skipped_confidence > 0 or skipped_duplicate > 0:
+            log.log_info(f"Filtered out {skipped_default} default names, {skipped_confidence} low confidence, {skipped_duplicate} duplicates")
 
         return conflicts
 

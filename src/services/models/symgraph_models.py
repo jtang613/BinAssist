@@ -120,6 +120,15 @@ class Symbol:
             metadata=data.get('metadata')
         )
 
+    @property
+    def display_name(self) -> Optional[str]:
+        """Get display name: name for symbols, content for comments."""
+        if self.name:
+            return self.name
+        if self.content:
+            return self.content
+        return None
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert symbol to dictionary."""
         result = {
@@ -267,7 +276,7 @@ class ConflictEntry:
         return cls(
             address=address,
             local_name=None,
-            remote_name=remote_symbol.name,
+            remote_name=remote_symbol.display_name,
             action=ConflictAction.NEW,
             selected=True,  # New items checked by default
             remote_symbol=remote_symbol
@@ -279,7 +288,7 @@ class ConflictEntry:
         return cls(
             address=address,
             local_name=local_name,
-            remote_name=remote_symbol.name,
+            remote_name=remote_symbol.display_name,
             action=ConflictAction.CONFLICT,
             selected=False,  # Conflicts unchecked by default
             remote_symbol=remote_symbol
