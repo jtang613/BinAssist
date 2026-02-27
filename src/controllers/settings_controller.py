@@ -1191,6 +1191,7 @@ class SettingsController(QObject):
         # LLM Provider signals
         self.view.llm_provider_add_requested.connect(self.add_llm_provider)
         self.view.llm_provider_edit_requested.connect(self.edit_llm_provider)
+        self.view.llm_provider_duplicate_requested.connect(self.duplicate_llm_provider)
         self.view.llm_provider_delete_requested.connect(self.delete_llm_provider)
         self.view.llm_provider_test_requested.connect(self.test_llm_provider)
         self.view.llm_active_provider_changed.connect(self.set_active_llm_provider)
@@ -1199,6 +1200,7 @@ class SettingsController(QObject):
         # MCP Provider signals
         self.view.mcp_provider_add_requested.connect(self.add_mcp_provider)
         self.view.mcp_provider_edit_requested.connect(self.edit_mcp_provider)
+        self.view.mcp_provider_duplicate_requested.connect(self.duplicate_mcp_provider)
         self.view.mcp_provider_delete_requested.connect(self.delete_mcp_provider)
         self.view.mcp_provider_test_requested.connect(self.test_mcp_provider)
         
@@ -1364,18 +1366,38 @@ class SettingsController(QObject):
         except Exception as e:
             self.show_error("Failed to Update Provider", str(e))
     
-    def delete_llm_provider(self, row):
-        """Handle deleting an LLM provider"""
+    def duplicate_llm_provider(self, row):
+        """Handle duplicating an LLM provider"""
         if row < 0 or row >= self.view.llm_table.rowCount():
             return
-        
         try:
             providers = self.service.get_llm_providers()
             if row >= len(providers):
                 return
-            
             provider = providers[row]
-            
+            new_name = provider['name'] + " - Copy"
+            self.service.add_llm_provider(
+                new_name, provider['model'], provider['url'],
+                provider['max_tokens'], provider['api_key'],
+                provider['disable_tls'], provider.get('provider_type', 'openai_platform')
+            )
+            self.load_initial_data()
+            self.show_info("Success", f"Duplicated LLM provider as '{new_name}'")
+        except Exception as e:
+            self.show_error("Failed to Duplicate Provider", str(e))
+
+    def delete_llm_provider(self, row):
+        """Handle deleting an LLM provider"""
+        if row < 0 or row >= self.view.llm_table.rowCount():
+            return
+
+        try:
+            providers = self.service.get_llm_providers()
+            if row >= len(providers):
+                return
+
+            provider = providers[row]
+
             # Confirm deletion
             reply = QMessageBox.question(
                 self.view, "Confirm Deletion",
@@ -1383,17 +1405,17 @@ class SettingsController(QObject):
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No
             )
-            
+
             if reply == QMessageBox.Yes:
                 # Delete from service
                 self.service.delete_llm_provider(provider['id'])
-                
+
                 # Remove from view
                 self.view.llm_table.removeRow(row)
                 self.view.active_provider_combo.removeItem(row)
-                
+
                 self.show_info("Success", f"Deleted LLM provider '{provider['name']}'")
-                
+
         except Exception as e:
             self.show_error("Failed to Delete Provider", str(e))
     
@@ -1560,18 +1582,37 @@ class SettingsController(QObject):
         except Exception as e:
             self.show_error("Failed to Update Provider", str(e))
     
-    def delete_mcp_provider(self, row):
-        """Handle deleting an MCP provider"""
+    def duplicate_mcp_provider(self, row):
+        """Handle duplicating an MCP provider"""
         if row < 0 or row >= self.view.mcp_table.rowCount():
             return
-        
         try:
             providers = self.service.get_mcp_providers()
             if row >= len(providers):
                 return
-            
             provider = providers[row]
-            
+            new_name = provider['name'] + " - Copy"
+            self.service.add_mcp_provider(
+                new_name, provider['url'],
+                provider.get('enabled', True), provider.get('transport', 'sse')
+            )
+            self.load_initial_data()
+            self.show_info("Success", f"Duplicated MCP provider as '{new_name}'")
+        except Exception as e:
+            self.show_error("Failed to Duplicate Provider", str(e))
+
+    def delete_mcp_provider(self, row):
+        """Handle deleting an MCP provider"""
+        if row < 0 or row >= self.view.mcp_table.rowCount():
+            return
+
+        try:
+            providers = self.service.get_mcp_providers()
+            if row >= len(providers):
+                return
+
+            provider = providers[row]
+
             # Confirm deletion
             reply = QMessageBox.question(
                 self.view, "Confirm Deletion",
@@ -1579,19 +1620,19 @@ class SettingsController(QObject):
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No
             )
-            
+
             if reply == QMessageBox.Yes:
                 # Delete from service
                 self.service.delete_mcp_provider(provider['id'])
-                
+
                 # Remove from view
                 self.view.mcp_table.removeRow(row)
-                
+
                 self.show_info("Success", f"Deleted MCP provider '{provider['name']}'")
-                
+
         except Exception as e:
             self.show_error("Failed to Delete Provider", str(e))
-    
+
     def test_mcp_provider(self, row):
         """Handle testing an MCP provider"""
         try:

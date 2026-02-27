@@ -100,28 +100,26 @@ class ExplainTabView(QWidget):
         # Line explanation panel (initially hidden)
         self.create_line_explanation_panel()
 
+        # Security analysis panel (created before adding to splitter)
+        self.create_security_panel()
+
         # Add widgets to splitter
         self.main_splitter.addWidget(self.explain_browser)
         self.main_splitter.addWidget(self.explain_editor)
         self.main_splitter.addWidget(self.line_explanation_group)
+        self.main_splitter.addWidget(self.security_group)
 
         # Set initial splitter sizes (function panel takes most space)
-        self.main_splitter.setSizes([400, 0, 150])
+        self.main_splitter.setSizes([400, 0, 0, 160])
         self.main_splitter.setStretchFactor(0, 3)  # Function browser
         self.main_splitter.setStretchFactor(1, 3)  # Function editor (same stretch as browser)
         self.main_splitter.setStretchFactor(2, 1)  # Line explanation
+        self.main_splitter.setStretchFactor(3, 0)  # Security panel — doesn't compete for extra space
 
         layout.addWidget(self.main_splitter)
 
-        # Security analysis panel
-        self.create_security_panel(layout)
-
         # Bottom row - Action buttons
         self.create_bottom_row(layout)
-
-        # Security panel stays compact
-        layout.setStretchFactor(self.main_splitter, 1)
-        layout.setStretchFactor(self.security_group, 0)
 
         self.setLayout(layout)
     
@@ -222,13 +220,10 @@ class ExplainTabView(QWidget):
         
         parent_layout.addLayout(bottom_row)
 
-    def create_security_panel(self, parent_layout):
-        """Create the security analysis panel below the explanation content."""
+    def create_security_panel(self):
+        """Create the security analysis panel (added to splitter by setup_ui)."""
         self.security_group = QGroupBox("Security Analysis")
         self.security_group.setVisible(False)
-        # Keep compact: don't let this panel absorb spare vertical space.
-        self.security_group.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
-        self.security_group.setMaximumHeight(140)
 
         grid = QGridLayout()
         grid.setContentsMargins(8, 6, 8, 6)
@@ -238,23 +233,20 @@ class ExplainTabView(QWidget):
         self.risk_label = QLabel("Risk: —")
         self.activity_label = QLabel("Activity: —")
         self.flags_label = QLabel("Flags: None")
+        self.flags_label.setWordWrap(True)
         self.network_label = QLabel("Network APIs")
         self.file_label = QLabel("File I/O APIs")
 
         self.network_text = QTextEdit()
         self.network_text.setReadOnly(True)
-        self.network_text.setFixedHeight(36)
+        self.network_text.setMinimumHeight(36)
         self.network_text.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
-        self.network_text.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.network_text.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.network_text.setLineWrapMode(QTextEdit.NoWrap)
 
         self.file_text = QTextEdit()
         self.file_text.setReadOnly(True)
-        self.file_text.setFixedHeight(36)
+        self.file_text.setMinimumHeight(36)
         self.file_text.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
-        self.file_text.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.file_text.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.file_text.setLineWrapMode(QTextEdit.NoWrap)
 
         grid.addWidget(self.risk_label, 0, 0)
@@ -265,14 +257,14 @@ class ExplainTabView(QWidget):
         grid.addWidget(self.network_text, 3, 0)
         grid.addWidget(self.file_text, 3, 1)
 
-        # Prevent the grid from distributing extra height into row gaps.
-        for r in range(0, 4):
+        # Let API text area row grow when the panel is resized
+        for r in range(0, 3):
             grid.setRowStretch(r, 0)
+        grid.setRowStretch(3, 1)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
 
         self.security_group.setLayout(grid)
-        parent_layout.addWidget(self.security_group)
     
     def toggle_edit_mode(self):
         # Prevent edit mode changes during query execution
@@ -394,13 +386,14 @@ class ExplainTabView(QWidget):
 
         # Adjust splitter to show line panel if hidden
         sizes = self.main_splitter.sizes()
-        if len(sizes) >= 3 and sizes[2] < 50:
-            # Give line panel reasonable space
-            total = sum(sizes)
-            new_sizes = [int(total * 0.6), 0, int(total * 0.4)]
+        if len(sizes) >= 4 and sizes[2] < 50:
+            # Give line panel reasonable space, preserve security panel size
+            security_size = sizes[3]
+            remaining = sum(sizes) - security_size
+            new_sizes = [int(remaining * 0.6), 0, int(remaining * 0.4), security_size]
             if self.is_edit_mode:
                 new_sizes[0] = 0
-                new_sizes[1] = int(total * 0.6)
+                new_sizes[1] = int(remaining * 0.6)
             self.main_splitter.setSizes(new_sizes)
 
     def clear_line_explanation(self):
