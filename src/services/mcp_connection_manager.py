@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 from .mcp_client_service import MCPClientService
 from .models.mcp_models import MCPTool
+from .graphrag.graphrag_tools import get_graphrag_tools_for_llm
 
 try:
     import binaryninja
@@ -78,37 +79,50 @@ class MCPConnectionManager:
     def get_available_tools_for_llm(self) -> List[Dict[str, Any]]:
         """
         Get MCP tools formatted for LLM consumption.
-        
+
+        Combines external tools from connected MCP servers with internal
+        graphrag tools. Graphrag tools are always available even without
+        an MCP connection.
+
         Returns:
             List of tool definitions in OpenAI tool calling format.
-            Returns empty list if not connected or no tools available.
         """
         with self._lock:
             # Check if we have cached tools that are still fresh
             current_time = time.time()
             cache_age = current_time - self._state.tools_cached_at
-            
-            if self._state.connected and cache_age < self._tools_cache_ttl:
+
+            if self._state.tools and cache_age < self._tools_cache_ttl:
                 return self._state.tools.copy()
-            
-            # Cache is stale or we're not connected
-            if not self._state.connected:
-                return []
-            
-            # Refresh tools cache
-            try:
-                # Get raw MCP tools and convert to LLM format
-                raw_tools = self._mcp_service.get_available_tools()
-                tools = self._convert_tools_for_llm(raw_tools)
-                self._state.tools = tools
-                self._state.tools_cached_at = current_time
-                log.log_info(f"Refreshed MCP tools cache: {len(tools)} tools available")
-                return tools.copy()
-                
-            except Exception as e:
-                log.log_error(f"Failed to refresh MCP tools cache: {e}")
-                self._state.error_message = str(e)
-                return []
+
+            # Collect external tools from connected MCP servers
+            external_tools = []
+            if self._state.connected:
+                try:
+                    raw_tools = self._mcp_service.get_available_tools()
+                    external_tools = self._convert_tools_for_llm(raw_tools)
+                except Exception as e:
+                    log.log_error(f"Failed to get external MCP tools: {e}")
+                    self._state.error_message = str(e)
+
+            # Names already covered by external servers
+            external_names = {
+                t["function"]["name"]
+                for t in external_tools
+                if "function" in t and "name" in t["function"]
+            }
+
+            # Add graphrag tools (always available, even without MCP connection)
+            graphrag_tools = get_graphrag_tools_for_llm(exclude_names=external_names)
+
+            tools = external_tools + graphrag_tools
+            self._state.tools = tools
+            self._state.tools_cached_at = current_time
+            log.log_info(
+                f"Refreshed MCP tools cache: {len(external_tools)} external + "
+                f"{len(graphrag_tools)} graphrag = {len(tools)} total"
+            )
+            return tools.copy()
     
     def ensure_connections(self) -> bool:
         """

@@ -16,6 +16,7 @@ from .models.llm_models import ToolCall, ToolResult
 from .mcp_client_service import MCPClientService
 from .models.mcp_models import MCPToolExecutionRequest
 from .binary_context_service import BinaryContextService
+from .graphrag.graphrag_tools import GRAPHRAG_TOOL_NAMES, execute_graphrag_tool
 
 try:
     import binaryninja
@@ -199,13 +200,38 @@ class MCPToolOrchestrator:
         start_time = time.time()
         
         try:
+            # Check if this is a graphrag tool (handled internally)
+            if (tool_call.name in GRAPHRAG_TOOL_NAMES
+                    and tool_call.name not in self._tool_server_map):
+                log.log_info(f"Executing graphrag tool: {tool_call.name}")
+                binary_hash = self.binary_context_service.get_binary_hash() if self.binary_context_service else None
+                if not binary_hash:
+                    return ToolResult(
+                        tool_call_id=tool_call.id,
+                        content="No binary loaded — cannot execute graph tool.",
+                        execution_time=time.time() - start_time,
+                        server_name="__graphrag__"
+                    )
+                from .analysis_db_service import AnalysisDBService
+                result_text = execute_graphrag_tool(
+                    tool_call.name, tool_call.arguments,
+                    binary_hash, AnalysisDBService()
+                )
+                execution_time = time.time() - start_time
+                return ToolResult(
+                    tool_call_id=tool_call.id,
+                    content=result_text,
+                    execution_time=execution_time,
+                    server_name="__graphrag__"
+                )
+
             # Find which server handles this tool
             server_name = self._tool_server_map.get(tool_call.name)
             if not server_name:
                 # Tool mapping might be stale, refresh it
                 self._refresh_tool_cache()
                 server_name = self._tool_server_map.get(tool_call.name)
-                
+
             if not server_name:
                 error_msg = f"No server found for tool '{tool_call.name}'"
                 log.log_error(error_msg)
