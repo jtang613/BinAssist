@@ -17,6 +17,11 @@ from .mcp_client_service import MCPClientService
 from .models.mcp_models import MCPToolExecutionRequest
 from .binary_context_service import BinaryContextService
 from .graphrag.graphrag_tools import GRAPHRAG_TOOL_NAMES, execute_graphrag_tool
+from .document_chat_tool import (
+    DOCUMENT_CHAT_TOOL_NAME,
+    DOCUMENT_CHAT_TOOL_DEFINITION,
+    execute_document_chat_tool,
+)
 
 try:
     import binaryninja
@@ -89,8 +94,11 @@ class MCPToolOrchestrator:
                     log.log_error(f"Error converting MCP tool {tool.name}: {e}")
                     continue
             
+            # Always include the document chat tool (not gated by MCP)
+            llm_tools.append(DOCUMENT_CHAT_TOOL_DEFINITION)
+
             return llm_tools
-            
+
         except Exception as e:
             log.log_error(f"Error getting available tools for LLM: {e}")
             return []
@@ -200,6 +208,17 @@ class MCPToolOrchestrator:
         start_time = time.time()
         
         try:
+            # Check if this is the document chat tool (handled internally)
+            if tool_call.name == DOCUMENT_CHAT_TOOL_NAME:
+                log.log_info(f"Executing document chat tool")
+                result_text = execute_document_chat_tool(tool_call.arguments)
+                return ToolResult(
+                    tool_call_id=tool_call.id,
+                    content=result_text,
+                    execution_time=time.time() - start_time,
+                    server_name="__internal__"
+                )
+
             # Check if this is a graphrag tool (handled internally)
             if (tool_call.name in GRAPHRAG_TOOL_NAMES
                     and tool_call.name not in self._tool_server_map):

@@ -263,6 +263,11 @@ class QueryTabView(QWidget):
 
         self.is_edit_mode = not self.is_edit_mode
 
+        # Save history and input panel sizes before the swap
+        old_sizes = self.splitter.sizes()
+        history_size = old_sizes[2] if len(old_sizes) >= 3 else 80
+        input_size = old_sizes[3] if len(old_sizes) >= 4 else 100
+
         if self.is_edit_mode:
             # Switch to edit mode
             self.query_browser.hide()
@@ -280,6 +285,18 @@ class QueryTabView(QWidget):
             self.query_browser.setHtml(self.markdown_to_html(self.markdown_content))
             # Also update the markdown source for copy operations
             self.query_browser.set_markdown_source(self.markdown_content)
+
+        # Restore: give all remaining space to the active text widget
+        from PySide6.QtCore import QTimer
+        is_edit = self.is_edit_mode
+        def _restore_sizes():
+            total = sum(self.splitter.sizes())
+            active_size = total - history_size - input_size
+            if is_edit:
+                self.splitter.setSizes([0, active_size, history_size, input_size])
+            else:
+                self.splitter.setSizes([active_size, 0, history_size, input_size])
+        QTimer.singleShot(0, _restore_sizes)
 
         self.edit_mode_changed.emit(self.is_edit_mode)
     

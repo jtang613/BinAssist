@@ -273,6 +273,11 @@ class ExplainTabView(QWidget):
 
         self.is_edit_mode = not self.is_edit_mode
 
+        # Save security and line-explanation panel sizes before the swap
+        old_sizes = self.main_splitter.sizes()
+        security_size = old_sizes[3] if len(old_sizes) >= 4 else 0
+        line_size = old_sizes[2] if len(old_sizes) >= 3 else 0
+
         if self.is_edit_mode:
             # Switch to edit mode
             self.explain_browser.hide()
@@ -290,6 +295,18 @@ class ExplainTabView(QWidget):
             self.explain_browser.setHtml(self.markdown_to_html(self.markdown_content))
             # Also update the markdown source for copy operations
             self.explain_browser.set_markdown_source(self.markdown_content)
+
+        # Restore panel sizes — give all remaining space to the active text widget
+        from PySide6.QtCore import QTimer
+        is_edit = self.is_edit_mode
+        def _restore_sizes():
+            total = sum(self.main_splitter.sizes())
+            active_size = total - line_size - security_size
+            if is_edit:
+                self.main_splitter.setSizes([0, active_size, line_size, security_size])
+            else:
+                self.main_splitter.setSizes([active_size, 0, line_size, security_size])
+        QTimer.singleShot(0, _restore_sizes)
 
         self.edit_mode_changed.emit(self.is_edit_mode)
     

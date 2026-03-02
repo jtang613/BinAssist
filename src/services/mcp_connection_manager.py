@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from .mcp_client_service import MCPClientService
 from .models.mcp_models import MCPTool
 from .graphrag.graphrag_tools import get_graphrag_tools_for_llm
+from .document_chat_tool import DOCUMENT_CHAT_TOOL_DEFINITION
 
 try:
     import binaryninja
@@ -115,12 +116,15 @@ class MCPConnectionManager:
             # Add graphrag tools (always available, even without MCP connection)
             graphrag_tools = get_graphrag_tools_for_llm(exclude_names=external_names)
 
-            tools = external_tools + graphrag_tools
+            # Add internal tools (always available)
+            internal_tools = [DOCUMENT_CHAT_TOOL_DEFINITION]
+
+            tools = external_tools + graphrag_tools + internal_tools
             self._state.tools = tools
             self._state.tools_cached_at = current_time
             log.log_info(
                 f"Refreshed MCP tools cache: {len(external_tools)} external + "
-                f"{len(graphrag_tools)} graphrag = {len(tools)} total"
+                f"{len(graphrag_tools)} graphrag + {len(internal_tools)} internal = {len(tools)} total"
             )
             return tools.copy()
     
