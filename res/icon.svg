@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   viewBox="0 0 128 128"
+   role="img"
+   aria-label="SymGraph favicon"
+   version="1.1"
+   id="svg6"
+   sodipodi:docname="icon.svg"
+   inkscape:export-filename="/home/jtang613/ml/symgraph/icon.png"
+   inkscape:export-xdpi="384"
+   inkscape:export-ydpi="384"
+   inkscape:version="1.4.3 (0d15f75042, 2025-12-25)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns:xlink="http://www.w3.org/1999/xlink"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview6"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:zoom="14.53125"
+     inkscape:cx="63.965591"
+     inkscape:cy="64"
+     inkscape:window-width="3840"
+     inkscape:window-height="2086"
+     inkscape:window-x="0"
+     inkscape:window-y="0"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="g5" />
+  <defs
+     id="defs4">
+    <linearGradient
+       id="linearGradient1"
+       inkscape:collect="always">
+      <stop
+         style="stop-color:#182e5b;stop-opacity:0.41120026;"
+         offset="0"
+         id="stop4" />
+      <stop
+         style="stop-color:#000000;stop-opacity:0;"
+         offset="1"
+         id="stop5" />
+    </linearGradient>
+    <linearGradient
+       id="h"
+       x1="0%"
+       y1="100%"
+       x2="100%"
+       y2="0%">
+      <stop
+         offset="0%"
+         stop-color="#22d3ee"
+         id="stop1" />
+      <stop
+         offset="55%"
+         stop-color="#3b82f6"
+         id="stop2" />
+      <stop
+         offset="100%"
+         stop-color="#a78bfa"
+         id="stop3" />
+    </linearGradient>
+    <filter
+       id="g"
+       x="-0.18478261"
+       y="-0.34170476"
+       width="1.3695652"
+       height="1.6452762">
+      <feGaussianBlur
+         stdDeviation="2.5"
+         result="b"
+         id="feGaussianBlur3" />
+      <feMerge
+         id="feMerge4">
+        <feMergeNode
+           in="b"
+           id="feMergeNode3" />
+        <feMergeNode
+           in="SourceGraphic"
+           id="feMergeNode4" />
+      </feMerge>
+    </filter>
+    <linearGradient
+       inkscape:collect="always"
+       xlink:href="#linearGradient1"
+       id="linearGradient5"
+       x1="37.5"
+       y1="57.466133"
+       x2="88.5"
+       y2="57.466133"
+       gradientUnits="userSpaceOnUse" />
+  </defs>
+  <path
+     d="M64 10 L108 36 L108 92 L64 118 L20 92 L20 36 Z"
+     fill="none"
+     stroke="url(#h)"
+     stroke-width="8"
+     filter="url(#g)"
+     id="path4" />
+  <g
+     stroke="#60a5fa"
+     stroke-width="5"
+     stroke-linecap="round"
+     opacity="0.9"
+     filter="url(#g)"
+     id="g5">
+    <path
+       d="M40 72 L62 44 L86 64"
+       id="path5"
+       style="fill:url(#linearGradient5)" />
+  </g>
+  <g
+     filter="url(#g)"
+     id="g6">
+    <circle
+       cx="40"
+       cy="72"
+       r="7"
+       fill="#22d3ee"
+       id="circle5" />
+    <circle
+       cx="62"
+       cy="44"
+       r="6"
+       fill="#a78bfa"
+       id="circle6" />
+    <rect
+       x="82"
+       y="58"
+       width="16"
+       height="16"
+       rx="5"
+       fill="#ffffff"
+       id="rect6" />
+  </g>
+</svg>

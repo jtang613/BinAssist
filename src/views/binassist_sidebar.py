@@ -161,21 +161,21 @@ class BinAssistSidebarWidget(SidebarWidget):
             self.frame = view_frame
         
         # Update controllers with new binary view and view frame
-        if hasattr(self, 'explain_controller'):
-            self.explain_controller.set_binary_view(self.data)
-            self.explain_controller.set_view_frame(self.frame)
-        if hasattr(self, 'query_controller'):
-            self.query_controller.set_binary_view(self.data)
-            self.query_controller.set_view_frame(self.frame)
-        if hasattr(self, 'actions_controller'):
-            if self.data is not None:
+        if self.data is not None:
+            if hasattr(self, 'explain_controller'):
+                self.explain_controller.set_binary_view(self.data)
+                self.explain_controller.set_view_frame(self.frame)
+            if hasattr(self, 'query_controller'):
+                self.query_controller.set_binary_view(self.data)
+                self.query_controller.set_view_frame(self.frame)
+            if hasattr(self, 'actions_controller'):
                 self.actions_controller.set_binary_view(self.data)
-            self.actions_controller.set_view_frame(self.frame)
-        if hasattr(self, 'semantic_graph_controller'):
-            self.semantic_graph_controller.set_binary_view(self.data)
-            self.semantic_graph_controller.set_view_frame(self.frame)
-        if hasattr(self, 'symgraph_controller'):
-            self.symgraph_controller.set_binary_view(self.data)
+                self.actions_controller.set_view_frame(self.frame)
+            if hasattr(self, 'semantic_graph_controller'):
+                self.semantic_graph_controller.set_binary_view(self.data)
+                self.semantic_graph_controller.set_view_frame(self.frame)
+            if hasattr(self, 'symgraph_controller'):
+                self.symgraph_controller.set_binary_view(self.data)
 
     def contextMenuEvent(self, event):
         self.m_contextMenuManager.show(self.m_menu, self.actionHandler)
@@ -208,7 +208,7 @@ class BinAssistSidebarWidgetType(SidebarWidgetType):
         
         # Get the path to the SVG file
         plugin_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-        svg_path = os.path.join(plugin_dir, "res", "robot.svg")
+        svg_path = os.path.join(plugin_dir, "res", "icon.svg")
         
         if os.path.exists(svg_path):
             # Render SVG to the icon with transparent background
