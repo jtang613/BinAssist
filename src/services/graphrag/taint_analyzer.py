@@ -144,6 +144,8 @@ class TaintAnalyzer:
 
     def _create_taint_edges(self, path: List[int]) -> None:
         for idx in range(len(path) - 1):
+            if self.graph_store.has_edge(path[idx], path[idx + 1], EdgeType.TAINT_FLOWS_TO.value):
+                continue
             self.graph_store.add_edge(GraphEdge(
                 binary_hash=self.binary_hash,
                 source_id=path[idx],
@@ -174,6 +176,23 @@ class TaintAnalyzer:
             if self._has_any_api(node.file_io_apis, self.TAINT_SOURCES):
                 results.append(node)
                 continue
+            # Tier 3: Function name check against TAINT_SOURCES (with normalization)
+            if node.name and (node.name in self.TAINT_SOURCES or
+                              self._normalize_function_name(node.name) in self.TAINT_SOURCES):
+                results.append(node)
+                continue
+            # Tier 4: Callees fallback - check callee names against TAINT_SOURCES
+            callee_ids = self._get_callees(node.id)
+            callee_match = False
+            for callee_id in callee_ids:
+                callee = self.graph_store.get_node_by_id(callee_id)
+                if callee and callee.name and (callee.name in self.TAINT_SOURCES or
+                                                self._normalize_function_name(callee.name) in self.TAINT_SOURCES):
+                    callee_match = True
+                    break
+            if callee_match:
+                results.append(node)
+                continue
         return results
 
     def _find_sink_nodes(self) -> List[GraphNode]:
@@ -189,7 +208,152 @@ class TaintAnalyzer:
             if self._has_any_api(node.file_io_apis, self.TAINT_SINKS):
                 results.append(node)
                 continue
+            # Tier 3: Function name check against TAINT_SINKS (with normalization)
+            if node.name and (node.name in self.TAINT_SINKS or
+                              self._normalize_function_name(node.name) in self.TAINT_SINKS):
+                results.append(node)
+                continue
+            # Tier 4: Callees fallback - check callee names against TAINT_SINKS
+            callee_ids = self._get_callees(node.id)
+            callee_match = False
+            for callee_id in callee_ids:
+                callee = self.graph_store.get_node_by_id(callee_id)
+                if callee and callee.name and (callee.name in self.TAINT_SINKS or
+                                                self._normalize_function_name(callee.name) in self.TAINT_SINKS):
+                    callee_match = True
+                    break
+            if callee_match:
+                results.append(node)
+                continue
         return results
+
+    # -- Entry-point-based VULNERABLE_VIA edges --
+
+    ENTRY_POINT_NAMES = {
+        "main", "_main", "wmain", "_wmain",
+        "WinMain", "wWinMain", "_WinMain@16", "_wWinMain@16",
+        "DllMain", "_DllMain@12", "DllEntryPoint",
+        "start", "_start", "entry", "_entry",
+        "mainCRTStartup", "wmainCRTStartup",
+        "WinMainCRTStartup", "wWinMainCRTStartup",
+    }
+
+    def create_vulnerable_via_edges(self) -> int:
+        """Create VULNERABLE_VIA edges from entry points to vulnerable nodes.
+
+        Entry points are functions with ENTRY_POINT/EXPORTED flags or known entry names.
+        Vulnerable nodes have *_RISK or VULN_* security flags.
+        Uses BFS to check reachability within MAX_PATH_LENGTH hops.
+        """
+        entry_points = self._find_entry_points()
+        vulnerable_nodes = self._find_vulnerable_nodes()
+
+        if not entry_points or not vulnerable_nodes:
+            return 0
+
+        edges_created = 0
+        for entry in entry_points:
+            if self.cancelled:
+                break
+            for vuln_node in vulnerable_nodes:
+                if entry.id == vuln_node.id:
+                    continue
+                if self.graph_store.has_edge(entry.id, vuln_node.id, EdgeType.VULNERABLE_VIA.value):
+                    continue
+                path_length = self._bfs_path_length(entry.id, vuln_node.id)
+                if path_length is not None:
+                    vuln_type = self._get_vulnerability_type(vuln_node)
+                    metadata = f'{{"path_length":{path_length},"vuln_type":"{vuln_type}"}}'
+                    self.graph_store.add_edge(GraphEdge(
+                        binary_hash=self.binary_hash,
+                        source_id=entry.id,
+                        target_id=vuln_node.id,
+                        edge_type=EdgeType.VULNERABLE_VIA,
+                        weight=1.0,
+                        metadata=metadata,
+                    ))
+                    edges_created += 1
+        return edges_created
+
+    def _find_entry_points(self) -> List[GraphNode]:
+        nodes = self.graph_store.get_nodes_by_type(self.binary_hash, "FUNCTION")
+        entry_points = []
+        seen_ids: Set = set()
+        for node in nodes:
+            is_entry = False
+            flags = node.security_flags or []
+            if "ENTRY_POINT" in flags or "EXPORTED" in flags:
+                is_entry = True
+            if node.name and node.name in self.ENTRY_POINT_NAMES:
+                is_entry = True
+            if is_entry and node.id not in seen_ids:
+                seen_ids.add(node.id)
+                entry_points.append(node)
+        return entry_points
+
+    def _find_vulnerable_nodes(self) -> List[GraphNode]:
+        nodes = self.graph_store.get_nodes_by_type(self.binary_hash, "FUNCTION")
+        vulnerable = []
+        for node in nodes:
+            flags = node.security_flags or []
+            for flag in flags:
+                if flag.endswith("_RISK") or flag.startswith("VULN_"):
+                    vulnerable.append(node)
+                    break
+        return vulnerable
+
+    def _get_vulnerability_type(self, node: GraphNode) -> str:
+        flags = node.security_flags or []
+        for flag in flags:
+            if flag.startswith("VULN_"):
+                return flag[5:]
+        for flag in flags:
+            if flag.endswith("_RISK"):
+                return flag.replace("_RISK", "")
+        return "UNKNOWN"
+
+    def _bfs_path_length(self, source_id, target_id) -> Optional[int]:
+        if source_id == target_id:
+            return 0
+        visited = {source_id}
+        queue = [(source_id, 0)]
+        while queue:
+            current_id, depth = queue.pop(0)
+            if depth >= self.MAX_PATH_LENGTH:
+                continue
+            for neighbor_id in self._get_callees(current_id):
+                if neighbor_id == target_id:
+                    return depth + 1
+                if neighbor_id not in visited:
+                    visited.add(neighbor_id)
+                    queue.append((neighbor_id, depth + 1))
+        return None
+
+    # -- Static helpers --
+
+    @staticmethod
+    def _normalize_function_name(name: str) -> str:
+        if not name:
+            return name
+        normalized = name
+        if "::" in normalized:
+            normalized = normalized.split("::")[-1]
+        if ".DLL_" in normalized.upper():
+            idx = normalized.upper().find(".DLL_")
+            if idx > 0:
+                normalized = normalized[idx + 5:]
+        if normalized.startswith("<EXTERNAL>::"):
+            normalized = normalized[12:]
+        if normalized.startswith("__imp_"):
+            normalized = normalized[6:]
+        while normalized.startswith("_") and len(normalized) > 1:
+            normalized = normalized[1:]
+        at_idx = normalized.rfind("@")
+        if at_idx > 0:
+            suffix = normalized[at_idx + 1:]
+            if suffix.isdigit():
+                normalized = normalized[:at_idx]
+        return normalized
 
     @staticmethod
     def _has_any_flag(flags: Iterable[str], targets: Set[str]) -> bool:
