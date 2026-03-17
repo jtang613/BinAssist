@@ -116,20 +116,20 @@ class PushWorker(QThread):
             try:
                 total_result = PushResult(success=True)
 
-                # Push symbols if provided
+                # Push symbols in chunks if provided
                 if self.symbols:
                     result = loop.run_until_complete(
-                        symgraph_service.push_symbols_bulk(self.sha256, self.symbols)
+                        symgraph_service.push_symbols_chunked(self.sha256, self.symbols)
                     )
                     total_result.symbols_pushed = result.symbols_pushed
                     if not result.success:
                         total_result.success = False
                         total_result.error = result.error
 
-                # Push graph if provided
+                # Push graph in chunks if provided
                 if self.graph_data and total_result.success:
                     result = loop.run_until_complete(
-                        symgraph_service.import_graph(self.sha256, self.graph_data)
+                        symgraph_service.import_graph_chunked(self.sha256, self.graph_data)
                     )
                     total_result.nodes_pushed = result.nodes_pushed
                     total_result.edges_pushed = result.edges_pushed

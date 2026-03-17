@@ -364,6 +364,37 @@ class SymGraphService:
         except httpx.RequestError as e:
             raise SymGraphNetworkError(f"Network error: {str(e)}")
 
+    async def push_symbols_chunked(self, sha256: str, symbols: List[Dict[str, Any]],
+                                    chunk_size: int = 500) -> PushResult:
+        """
+        Push symbols in chunks to avoid timeouts on large payloads.
+
+        Args:
+            sha256: SHA256 hash of the binary
+            symbols: List of symbol dictionaries
+            chunk_size: Number of symbols per chunk (default 500)
+
+        Returns:
+            PushResult with aggregated counts
+        """
+        if not symbols:
+            return PushResult.success_result()
+
+        total_pushed = 0
+        total = len(symbols)
+        log.log_info(f"Pushing {total} symbols in chunks of {chunk_size}")
+
+        for i in range(0, total, chunk_size):
+            chunk = symbols[i:i + chunk_size]
+            log.log_debug(f"Pushing symbol chunk {i // chunk_size + 1} ({len(chunk)} symbols)")
+            result = await self.push_symbols_bulk(sha256, chunk)
+            if not result.success:
+                return result
+            total_pushed += result.symbols_pushed
+
+        log.log_info(f"Successfully pushed {total_pushed} symbols")
+        return PushResult.success_result(symbols=total_pushed)
+
     async def export_symbols(self, sha256: str) -> Optional[SymbolExport]:
         """
         Export all symbols for a binary (authenticated).
@@ -522,6 +553,51 @@ class SymGraphService:
             raise SymGraphNetworkError(f"Timeout connecting to {self.base_url}")
         except httpx.RequestError as e:
             raise SymGraphNetworkError(f"Network error: {str(e)}")
+
+    async def import_graph_chunked(self, sha256: str, export_data: Dict[str, Any],
+                                    chunk_size: int = 500) -> PushResult:
+        """
+        Import graph data in chunks (nodes first, then edges) to avoid timeouts.
+
+        Args:
+            sha256: SHA256 hash of the binary
+            export_data: Graph export data with 'nodes' and 'edges' lists
+            chunk_size: Number of nodes/edges per chunk (default 500)
+
+        Returns:
+            PushResult with aggregated counts
+        """
+        nodes = export_data.get('nodes', [])
+        edges = export_data.get('edges', [])
+
+        if not nodes and not edges:
+            return PushResult.success_result()
+
+        total_nodes_pushed = 0
+        total_edges_pushed = 0
+
+        log.log_info(f"Pushing {len(nodes)} nodes and {len(edges)} edges in chunks of {chunk_size}")
+
+        # Push nodes in chunks
+        for i in range(0, len(nodes), chunk_size):
+            chunk = nodes[i:i + chunk_size]
+            log.log_debug(f"Pushing node chunk {i // chunk_size + 1} ({len(chunk)} nodes)")
+            result = await self.import_graph(sha256, {'nodes': chunk, 'edges': []})
+            if not result.success:
+                return result
+            total_nodes_pushed += result.nodes_pushed
+
+        # Push edges in chunks
+        for i in range(0, len(edges), chunk_size):
+            chunk = edges[i:i + chunk_size]
+            log.log_debug(f"Pushing edge chunk {i // chunk_size + 1} ({len(chunk)} edges)")
+            result = await self.import_graph(sha256, {'nodes': [], 'edges': chunk})
+            if not result.success:
+                return result
+            total_edges_pushed += result.edges_pushed
+
+        log.log_info(f"Successfully pushed {total_nodes_pushed} nodes, {total_edges_pushed} edges")
+        return PushResult.success_result(nodes=total_nodes_pushed, edges=total_edges_pushed)
 
     # === Fingerprint Operations ===
 
