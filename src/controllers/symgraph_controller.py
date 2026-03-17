@@ -1483,6 +1483,9 @@ class SymGraphController(QObject):
             else:
                 # Full binary scope
                 local_nodes = graph_store.get_nodes_by_type(binary_hash, "FUNCTION")
+                local_externals = graph_store.get_nodes_by_type(binary_hash, "EXTERNAL")
+                if local_externals:
+                    local_nodes = (local_nodes or []) + local_externals
 
                 if local_nodes:
                     # Build node ID to address mapping for edge resolution
@@ -1562,9 +1565,21 @@ class SymGraphController(QObject):
 
     def _function_to_node_dict(self, func) -> Dict[str, Any]:
         """Convert a Binary Ninja function to a minimal graph node dictionary (fallback)."""
+        # Classify external/imported functions using symbol type
+        is_external = False
+        try:
+            from binaryninja.enums import SymbolType
+            if func.symbol and func.symbol.type in (
+                SymbolType.ImportedFunctionSymbol,
+                SymbolType.ImportAddressSymbol,
+                SymbolType.ExternalSymbol,
+            ):
+                is_external = True
+        except (ImportError, AttributeError):
+            pass
         return {
             'address': f"0x{func.start:x}",
-            'node_type': 'function',
+            'node_type': 'external' if is_external else 'function',
             'name': func.name,
             'raw_content': None,
             'llm_summary': None,
