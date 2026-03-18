@@ -176,7 +176,7 @@ pip install -r requirements.txt
 ![Screenshots](/res/screenshots.gif)
 
 ## Homepage
-https://github.com/jtang613/BinAssist
+https://symgraph.ai
 
 
 ## Technical Architecture
