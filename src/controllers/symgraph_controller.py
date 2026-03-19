@@ -1159,14 +1159,27 @@ class SymGraphController(QObject):
         except Exception:
             pass
 
+        # Classify external/imported functions using Binary Ninja symbol type
+        symbol_type = 'function'
+        try:
+            from binaryninja.enums import SymbolType
+            if func.symbol and func.symbol.type in (
+                SymbolType.ImportedFunctionSymbol,
+                SymbolType.ImportAddressSymbol,
+                SymbolType.ExternalSymbol,
+            ):
+                symbol_type = 'external'
+        except (ImportError, AttributeError):
+            pass
+
         is_auto = is_default_name(func.name)
         return {
             'address': f"0x{func.start:x}",
-            'symbol_type': 'function',
+            'symbol_type': symbol_type,
             'name': func.name,
             'data_type': data_type,
             'confidence': 0.5 if is_auto else 0.9,
-            'provenance': self._get_symbol_provenance(is_auto, func.start, 'function')
+            'provenance': self._get_symbol_provenance(is_auto, func.start, symbol_type)
         }
 
     def _collect_data_variables(self) -> List[Dict[str, Any]]:
