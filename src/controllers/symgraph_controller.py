@@ -617,6 +617,21 @@ class SymGraphController(QObject):
         else:
             self.view.set_binary_info("<no binary loaded>", None)
 
+    def _get_symbol_provenance(self, is_auto: bool, address: int, symbol_type: str) -> str:
+        """Determine symbol provenance: decompiler, llm, or user."""
+        if is_auto:
+            return 'decompiler'
+        try:
+            from src.services.analysis_db_service import AnalysisDBService
+            binary_hash = self._get_sha256()
+            if binary_hash:
+                db = AnalysisDBService()
+                if db.is_llm_renamed(binary_hash, address, symbol_type):
+                    return 'llm'
+        except Exception:
+            pass
+        return 'user'
+
     def _get_sha256(self) -> Optional[str]:
         """Get SHA256 hash of the original binary (not the bndb file)."""
         if not self.bv:
@@ -1151,7 +1166,7 @@ class SymGraphController(QObject):
             'name': func.name,
             'data_type': data_type,
             'confidence': 0.5 if is_auto else 0.9,
-            'provenance': 'decompiler' if is_auto else 'user'
+            'provenance': self._get_symbol_provenance(is_auto, func.start, 'function')
         }
 
     def _collect_data_variables(self) -> List[Dict[str, Any]]:
@@ -1174,7 +1189,7 @@ class SymGraphController(QObject):
                     provenance = 'decompiler'
                 else:
                     confidence = 0.85
-                    provenance = 'user'
+                    provenance = self._get_symbol_provenance(False, addr, 'variable')
 
                 symbols.append({
                     'address': f"0x{addr:x}",
@@ -1223,7 +1238,7 @@ class SymGraphController(QObject):
                         'name': param.name,
                         'data_type': str(param.type) if param.type else None,
                         'confidence': 0.3 if is_auto else 0.8,
-                        'provenance': 'decompiler' if is_auto else 'user',
+                        'provenance': self._get_symbol_provenance(is_auto, func.start, 'variable'),
                         'metadata': metadata
                     })
 
@@ -1258,7 +1273,7 @@ class SymGraphController(QObject):
                         'name': var.name,
                         'data_type': str(var.type) if var.type else None,
                         'confidence': 0.3 if is_auto else 0.75,
-                        'provenance': 'decompiler' if is_auto else 'user',
+                        'provenance': self._get_symbol_provenance(is_auto, func.start, 'variable'),
                         'metadata': metadata
                     })
         except Exception as e:
@@ -1606,7 +1621,7 @@ class SymGraphController(QObject):
             'raw_content': node.raw_code,
             'llm_summary': node.llm_summary,
             'confidence': confidence,
-            'provenance': 'user' if node.user_edited else 'decompiler',
+            'provenance': 'user' if node.user_edited else ('llm' if node.llm_summary else 'decompiler'),
         }
 
         # Add security-related fields if present

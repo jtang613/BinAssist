@@ -98,6 +98,7 @@ class DatabaseMigrations:
                 (4, DatabaseMigrations._migration_004_graphrag_tables),
                 (5, DatabaseMigrations._migration_005_graphrag_communities),
                 (6, DatabaseMigrations._migration_006_graphrag_fts),
+                (7, DatabaseMigrations._migration_007_llm_renames),
             ]
             
             for version, migration_func in migrations:
@@ -557,6 +558,33 @@ class DatabaseMigrations:
         except Exception as e:
             log.log_warn(f"Migration 006 issue: {e}. FTS5 may be unavailable.")
             return True  # Always return True - FTS5 is optional
+
+    @staticmethod
+    def _migration_007_llm_renames(db_path: str) -> bool:
+        """Migration 007: LLM renames tracking table"""
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS llm_renames (
+                    binary_id TEXT NOT NULL,
+                    address INTEGER NOT NULL,
+                    symbol_type TEXT NOT NULL DEFAULT 'function',
+                    new_name TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    PRIMARY KEY (binary_id, address, symbol_type)
+                )
+            ''')
+
+            conn.commit()
+            conn.close()
+            log.log_info("Migration 007: llm_renames table created successfully")
+            return True
+
+        except Exception as e:
+            log.log_error(f"Migration 007 failed: {e}")
+            return False
 
 
 class DatabaseCleanup:

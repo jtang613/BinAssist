@@ -36,7 +36,23 @@ class ActionsService:
         self.context_service = context_service
         self._available_actions = self._create_available_actions()
         log.log_info("ActionsService initialized")
-    
+
+    @staticmethod
+    def _get_binary_hash(binary_view) -> Optional[str]:
+        """Get SHA256 hash of the binary for LLM rename tracking."""
+        try:
+            import hashlib
+            raw_view = None
+            if binary_view.file and hasattr(binary_view.file, 'raw') and binary_view.file.raw:
+                raw_view = binary_view.file.raw
+            if raw_view:
+                size = raw_view.end
+                data = raw_view.read(0, size)
+                return hashlib.sha256(data).hexdigest()
+        except Exception:
+            pass
+        return None
+
     def _create_available_actions(self) -> List[Dict[str, Any]]:
         """Create the list of available actions"""
         return [
@@ -203,10 +219,20 @@ class ActionsService:
             
             # Apply the change directly without transactions to avoid analysis conflicts
             function.name = new_name
-            
+
             # Force completion of any pending analysis
             binary_view.update_analysis_and_wait()
-            
+
+            # Record LLM rename for provenance tracking
+            try:
+                from .analysis_db_service import AnalysisDBService
+                db = AnalysisDBService()
+                binary_hash = self._get_binary_hash(binary_view)
+                if binary_hash:
+                    db.record_llm_rename(binary_hash, function_address, 'function', new_name)
+            except Exception as e:
+                log.log_warn(f"Failed to record LLM rename (non-fatal): {e}")
+
             return ActionResult(
                 success=True,
                 message=f"Renamed function from '{old_name}' to '{new_name}'",
@@ -259,13 +285,23 @@ class ActionsService:
                 )
             
             old_name = target_var.name
-            
+
             # Apply the change directly without transactions to avoid analysis conflicts
             target_var.name = new_name
-            
+
             # Force completion of any pending analysis
             binary_view.update_analysis_and_wait()
-            
+
+            # Record LLM rename for provenance tracking
+            try:
+                from .analysis_db_service import AnalysisDBService
+                db = AnalysisDBService()
+                binary_hash = self._get_binary_hash(binary_view)
+                if binary_hash:
+                    db.record_llm_rename(binary_hash, function_address, 'variable', new_name)
+            except Exception as e:
+                log.log_warn(f"Failed to record LLM rename (non-fatal): {e}")
+
             return ActionResult(
                 success=True,
                 message=f"Renamed variable from '{old_name}' to '{new_name}'",

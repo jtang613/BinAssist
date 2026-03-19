@@ -2045,6 +2045,37 @@ class AnalysisDBService:
             log.log_error(f"Database cleanup failed: {e}")
             return {"expired_contexts": 0, "old_chat_messages": 0}
     
+    def record_llm_rename(self, binary_id: str, address: int, symbol_type: str, new_name: str):
+        """Record that a symbol was renamed by an LLM suggestion."""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR REPLACE INTO llm_renames (binary_id, address, symbol_type, new_name, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (binary_id, address, symbol_type, new_name, int(__import__('time').time()))
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.log_error(f"Failed to record LLM rename: {e}")
+
+    def is_llm_renamed(self, binary_id: str, address: int, symbol_type: str) -> bool:
+        """Check if a symbol at the given address was renamed by an LLM."""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) FROM llm_renames WHERE binary_id = ? AND address = ? AND symbol_type = ?",
+                (binary_id, address, symbol_type)
+            )
+            result = cursor.fetchone()[0] > 0
+            conn.close()
+            return result
+        except Exception as e:
+            log.log_error(f"Failed to check LLM rename: {e}")
+            return False
+
     def vacuum_database(self) -> bool:
         """Optimize database by running VACUUM"""
         try:
@@ -2053,7 +2084,7 @@ class AnalysisDBService:
         except Exception as e:
             log.log_error(f"Database vacuum failed: {e}")
             return False
-    
+
     def get_database_info(self) -> Dict[str, Any]:
         """Get comprehensive database information"""
         try:
