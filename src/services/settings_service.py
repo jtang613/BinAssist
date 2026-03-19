@@ -714,7 +714,7 @@ class SettingsService:
         Store OAuth credentials for a provider.
         
         Args:
-            provider_name: Unique identifier for the provider (e.g., 'anthropic_oauth')
+            provider_name: Unique identifier for the provider (e.g., 'openai_oauth')
             access_token: OAuth access token
             refresh_token: OAuth refresh token
             expires_at: Unix timestamp when access token expires
