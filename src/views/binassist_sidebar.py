@@ -113,7 +113,8 @@ class BinAssistSidebarWidget(SidebarWidget):
             self.symgraph_tab,
             binary_view=self.data,
             data=self.data,
-            frame=self.frame
+            frame=self.frame,
+            query_controller=self.query_controller,
         )
 
         self.tab_widget.addTab(self.symgraph_tab, "SymGraph")

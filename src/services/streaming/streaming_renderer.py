@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 
 from typing import Callable
+import re
 
 import markdown
 
 from .block_boundary import BlockBoundaryDetector
 from .render_update import RenderUpdate
 
-_EXTENSIONS = ["codehilite", "fenced_code", "tables", "sane_lists"]
+_EXTENSIONS = ["codehilite", "fenced_code", "tables", "sane_lists", "nl2br"]
 _EXTENSION_CONFIGS = {
     "codehilite": {"css_class": "highlight", "guess_lang": False},
 }
+_LIST_ITEM_RE = re.compile(r"^(?:[-+*]|\d+[.)])\s+")
 
 # Shared CSS for markdown rendering - used by both streaming and final render
 MARKDOWN_CSS = """
@@ -80,6 +82,83 @@ def preprocess_markdown_hrs(text: str) -> str:
     return '\n'.join(result)
 
 
+def preprocess_markdown_lists(text: str) -> str:
+    """
+    Ensure markdown lists have a blank line before them when emitted directly
+    after prose, which Python-Markdown otherwise treats as paragraph text.
+    """
+    lines = text.split('\n')
+    result = []
+    in_fenced_code = False
+    prev_was_blank = True
+    prev_was_list = False
+
+    for line in lines:
+        stripped = line.strip()
+
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fenced_code = not in_fenced_code
+            result.append(line)
+            prev_was_blank = (stripped == '')
+            prev_was_list = False
+            continue
+
+        is_list_line = False
+        if not in_fenced_code:
+            candidate = line.lstrip()
+            is_list_line = bool(_LIST_ITEM_RE.match(candidate))
+
+            if is_list_line and result and not prev_was_blank and not prev_was_list:
+                previous = result[-1].strip()
+                if previous and not previous.startswith(("```", "~~~")):
+                    result.append('')
+                    prev_was_blank = True
+
+        result.append(line)
+        prev_was_blank = (stripped == '')
+        prev_was_list = is_list_line
+
+    return '\n'.join(result)
+
+
+def preprocess_soft_breaks(text: str) -> str:
+    """
+    Match GhidrAssist's rendering behavior by preserving single newlines as
+    visible line breaks outside fenced code blocks.
+    """
+    lines = text.split('\n')
+    result = []
+    in_fenced_code = False
+
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fenced_code = not in_fenced_code
+            result.append(line)
+            continue
+
+        if in_fenced_code or index == len(lines) - 1:
+            result.append(line)
+            continue
+
+        next_line = lines[index + 1]
+        if stripped and next_line.strip() and not line.rstrip().endswith(("  ", "\\", "<br>", "<br />")):
+            result.append(f"{line}  ")
+        else:
+            result.append(line)
+
+    return '\n'.join(result)
+
+
+def preprocess_markdown_for_display(text: str) -> str:
+    preprocessed = preprocess_markdown_tables(text)
+    preprocessed = preprocess_markdown_hrs(preprocessed)
+    preprocessed = preprocess_markdown_lists(preprocessed)
+    preprocessed = preprocess_soft_breaks(preprocessed)
+    return preprocessed
+
+
 def render_markdown_to_html(markdown_text: str, include_css: bool = True) -> str:
     """
     Render markdown text to HTML with preprocessing and extensions.
@@ -92,8 +171,7 @@ def render_markdown_to_html(markdown_text: str, include_css: bool = True) -> str
         include_css: Whether to wrap output with MARKDOWN_CSS (default True)
     """
     try:
-        preprocessed = preprocess_markdown_tables(markdown_text)
-        preprocessed = preprocess_markdown_hrs(preprocessed)
+        preprocessed = preprocess_markdown_for_display(markdown_text)
 
         md = markdown.Markdown(
             extensions=_EXTENSIONS,
@@ -130,12 +208,12 @@ class StreamingMarkdownRenderer:
             self._pending_markdown = self._pending_markdown[boundary:]
 
             self._md.reset()
-            committed_html = self._md.convert(stable_text)
+            committed_html = self._md.convert(preprocess_markdown_for_display(stable_text))
 
         pending_html = ""
         if self._pending_markdown:
             self._md.reset()
-            pending_html = self._md.convert(self._pending_markdown)
+            pending_html = self._md.convert(preprocess_markdown_for_display(self._pending_markdown))
 
         self._update_callback(RenderUpdate.incremental(committed_html, pending_html))
 

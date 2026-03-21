@@ -99,6 +99,7 @@ class DatabaseMigrations:
                 (5, DatabaseMigrations._migration_005_graphrag_communities),
                 (6, DatabaseMigrations._migration_006_graphrag_fts),
                 (7, DatabaseMigrations._migration_007_llm_renames),
+                (8, DatabaseMigrations._migration_008_chat_document_metadata),
             ]
             
             for version, migration_func in migrations:
@@ -584,6 +585,24 @@ class DatabaseMigrations:
 
         except Exception as e:
             log.log_error(f"Migration 007 failed: {e}")
+            return False
+
+    @staticmethod
+    def _migration_008_chat_document_metadata(db_path: str) -> bool:
+        """Migration 008: Add JSON metadata column for chat-level document sync state."""
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            try:
+                cursor.execute('ALTER TABLE BNChatMetadata ADD COLUMN metadata TEXT')
+            except sqlite3.OperationalError as e:
+                if 'duplicate column name' not in str(e).lower():
+                    raise
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            log.log_error(f"Migration 008 failed: {e}")
             return False
 
 

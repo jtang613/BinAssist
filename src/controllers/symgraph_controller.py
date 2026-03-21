@@ -108,6 +108,7 @@ class PushWorker(QThread):
         self,
         sha256: str,
         symbols: List[Dict],
+        documents: Optional[List[Dict]] = None,
         graph_data: Optional[Dict] = None,
         visibility: str = "public",
         fingerprints: Optional[List[Dict[str, str]]] = None
@@ -115,6 +116,7 @@ class PushWorker(QThread):
         super().__init__()
         self.sha256 = sha256
         self.symbols = symbols
+        self.documents = documents or []
         self.graph_data = graph_data
         self.visibility = visibility
         self.fingerprints = fingerprints or []  # List of {'type': str, 'value': str}
@@ -161,6 +163,17 @@ class PushWorker(QThread):
                     total_result.edges_pushed = result.edges_pushed
                     total_result.binary_revision = result.binary_revision or total_result.binary_revision
 
+                if self.documents and total_result.success:
+                    result = loop.run_until_complete(
+                        symgraph_service.push_documents_bulk(
+                            self.sha256,
+                            self.documents,
+                            base_version=target_revision
+                        )
+                    )
+                    total_result.documents_pushed = result.documents_pushed
+                    total_result.document_results = list(result.document_results)
+
                 # Add fingerprints (for BuildID/PDB GUID matching)
                 if self.fingerprints and total_result.success:
                     for fp in self.fingerprints:
@@ -199,7 +212,7 @@ class PullPreviewWorker(QThread):
     """Worker thread for pulling symbols from SymGraph and building conflicts."""
 
     progress = Signal(str)  # status message
-    preview_complete = Signal(list, object, object)  # conflicts, graph_export, graph_stats
+    preview_complete = Signal(list, object, object, list)  # conflicts, graph_export, graph_stats, documents
     preview_error = Signal(str)
 
     def __init__(self, sha256: str, bv, pull_config: dict = None):
@@ -225,6 +238,7 @@ class PullPreviewWorker(QThread):
 
             # Step 1: Fetch remote symbols from API for each selected type
             all_remote_symbols = []
+            remote_documents = []
             include_graph = bool(self.pull_config.get('include_graph', False))
             graph_export = None
             graph_stats = None
@@ -252,6 +266,16 @@ class PullPreviewWorker(QThread):
                     else:
                         log.log_info(f"No {sym_type} symbols returned from API")
 
+                self.progress.emit("Fetching documents...")
+                remote_documents = loop.run_until_complete(
+                    symgraph_service.list_documents(self.sha256, version=version)
+                )
+                if name_filter:
+                    remote_documents = [
+                        document for document in remote_documents
+                        if name_filter in (document.title or "").lower()
+                    ]
+
                 if include_graph:
                     try:
                         self.progress.emit("Fetching graph data...")
@@ -274,7 +298,18 @@ class PullPreviewWorker(QThread):
             log.log_info(f"Total fetched: {len(all_remote_symbols)} symbols from API")
 
             if not all_remote_symbols:
-                self.preview_complete.emit([], graph_export, graph_stats)
+                document_payloads = [
+                    {
+                        'document_identity_id': document.document_identity_id,
+                        'title': document.title,
+                        'size_bytes': document.content_size_bytes,
+                        'updated_at': document.created_at,
+                        'version': document.version,
+                        'doc_type': document.doc_type,
+                    }
+                    for document in remote_documents
+                ]
+                self.preview_complete.emit([], graph_export, graph_stats, document_payloads)
                 return
 
             # Step 2: Get local symbols from Binary Ninja
@@ -296,7 +331,18 @@ class PullPreviewWorker(QThread):
                 return
 
             log.log_info(f"Built {len(conflicts)} conflict entries")
-            self.preview_complete.emit(conflicts, graph_export, graph_stats)
+            document_payloads = [
+                {
+                    'document_identity_id': document.document_identity_id,
+                    'title': document.title,
+                    'size_bytes': document.content_size_bytes,
+                    'updated_at': document.created_at,
+                    'version': document.version,
+                    'doc_type': document.doc_type,
+                }
+                for document in remote_documents
+            ]
+            self.preview_complete.emit(conflicts, graph_export, graph_stats, document_payloads)
 
         except SymGraphAuthError as e:
             self.preview_error.emit(f"Authentication required: {e}")
@@ -597,25 +643,31 @@ class ApplySymbolsWorker(QThread):
 class SymGraphController(QObject):
     """Controller for the SymGraph tab functionality."""
 
-    def __init__(self, view: SymGraphTabView, binary_view=None, data=None, frame=None):
+    def __init__(self, view: SymGraphTabView, binary_view=None, data=None, frame=None, query_controller=None):
         super().__init__()
         self.view = view
         self.bv = binary_view  # Binary Ninja binary view
         self.data = data       # BinAssist data object
         self.frame = frame     # BinAssist frame
+        self.query_controller = query_controller
 
         # Worker threads
         self.query_worker = None
         self.push_worker = None
         self.pull_worker = None
         self.apply_worker = None
+        self.document_apply_worker = None
 
         self._graph_export = None
         self._graph_stats = None
         self._pending_push_request = None
         self._push_preview_symbols: List[Dict[str, Any]] = []
+        self._push_preview_documents: List[Dict[str, Any]] = []
         self._push_preview_graph_data: Optional[Dict[str, Any]] = None
         self._push_preview_graph_stats: Dict[str, int] = {}
+        self._pending_push_documents: List[Dict[str, Any]] = []
+        self._pending_apply_documents: List[Dict[str, Any]] = []
+        self._pending_apply_summary: Dict[str, int] = {}
 
         # Connect view signals
         self._connect_signals()
@@ -822,13 +874,22 @@ class SymGraphController(QObject):
             'nodes': len(graph_data.get('nodes', [])) if graph_data else 0,
             'edges': len(graph_data.get('edges', [])) if graph_data else 0,
         }
+        documents = self.query_controller.list_document_push_candidates() if self.query_controller else []
 
         self._push_preview_symbols = symbols_data
+        self._push_preview_documents = documents
         self._push_preview_graph_data = graph_data
         self._push_preview_graph_stats = graph_stats
-        self.view.set_push_preview(symbols_data, graph_data=graph_data, graph_stats=graph_stats)
+        self.view.set_push_preview(
+            symbols_data,
+            graph_data=graph_data,
+            graph_stats=graph_stats,
+            documents=documents,
+        )
 
         summary_parts = [f"{len(symbols_data)} symbols ready"]
+        if documents:
+            summary_parts.append(f"{len(documents)} documents")
         if graph_data:
             summary_parts.append(f"{graph_stats['nodes']} nodes")
             summary_parts.append(f"{graph_stats['edges']} edges")
@@ -857,16 +918,27 @@ class SymGraphController(QObject):
         scope = scope or push_config.get('scope', PushScope.CURRENT_FUNCTION.value)
         visibility = visibility or push_config.get('visibility', 'public')
         selected_symbols = self.view.get_selected_push_symbols()
+        selected_documents = self.view.get_selected_push_documents()
+        document_payloads = []
+        for document in selected_documents:
+            payload = {
+                'title': document['title'],
+                'doc_type': document.get('doc_type') or 'notes',
+                'content': document['content'],
+            }
+            if document.get('document_identity_id'):
+                payload['document_identity_id'] = document['document_identity_id']
+            document_payloads.append(payload)
         use_graph = push_graph if push_graph is not None else bool(push_config.get('push_graph'))
         graph_data = self._push_preview_graph_data if use_graph else None
 
-        if not selected_symbols and not graph_data:
+        if not selected_symbols and not selected_documents and not graph_data:
             self.view.set_push_status("Preview the push and select at least one row first", success=False)
             return
 
         log.log_info(
             f"Pushing to SymGraph: scope={scope}, symbols={len(selected_symbols)}, "
-            f"graph={graph_data is not None}, visibility={visibility}"
+            f"documents={len(selected_documents)}, graph={graph_data is not None}, visibility={visibility}"
         )
         self.view.show_push_progress("Creating revision...")
         self.view.set_push_status("Pushing...", success=None)
@@ -881,11 +953,13 @@ class SymGraphController(QObject):
             'push_graph': graph_data is not None,
             'visibility': visibility
         }
+        self._pending_push_documents = list(selected_documents)
 
         # Start push worker
         self.push_worker = PushWorker(
             sha256,
             selected_symbols,
+            document_payloads,
             graph_data,
             visibility=visibility,
             fingerprints=fingerprints
@@ -908,6 +982,20 @@ class SymGraphController(QObject):
                 msg_parts.append(f"{result.nodes_pushed} nodes")
             if result.edges_pushed > 0:
                 msg_parts.append(f"{result.edges_pushed} edges")
+            if result.documents_pushed > 0:
+                msg_parts.append(f"{result.documents_pushed} documents")
+
+            if self.query_controller and self._pending_push_documents and result.document_results:
+                for document_request, result_item in zip(self._pending_push_documents, result.document_results):
+                    document_identity_id = result_item.get('document_identity_id')
+                    if not document_identity_id:
+                        continue
+                    self.query_controller.update_document_sync_metadata(
+                        document_request.get('chat_id'),
+                        document_identity_id=document_identity_id,
+                        version=result_item.get('version'),
+                        doc_type=document_request.get('doc_type'),
+                    )
 
             msg = "Pushed: " + ", ".join(msg_parts) if msg_parts else "Push complete"
             if result.binary_revision:
@@ -922,12 +1010,14 @@ class SymGraphController(QObject):
                 self._handle_visibility_denial(result)
                 return
             self.view.set_push_status(f"Failed: {result.error or 'Unknown error'}", success=False)
+        self._pending_push_documents = []
 
     def _on_push_error(self, error_msg: str):
         """Handle push error."""
         self.view.set_buttons_enabled(True)
         self.view.hide_push_progress()
         self.view.set_push_status(f"Error: {error_msg}", success=False)
+        self._pending_push_documents = []
         log.log_error(f"Push error: {error_msg}")
 
     def _handle_visibility_denial(self, result: PushResult):
@@ -988,10 +1078,6 @@ class SymGraphController(QObject):
         pull_config = self.view.get_pull_config()
         symbol_types = pull_config.get('symbol_types', [])
 
-        if not symbol_types:
-            self._show_error("No Types Selected", "Select at least one symbol type to pull.")
-            return
-
         log.log_info(f"Fetching symbols from SymGraph: {sha256} (types: {symbol_types})")
         self._graph_export = None
         self._graph_stats = None
@@ -1013,15 +1099,22 @@ class SymGraphController(QObject):
         """Handle pull preview progress update."""
         self.view.set_pull_status(status, success=None)
 
-    def _on_pull_preview_complete(self, conflicts: List[ConflictEntry], graph_export=None, graph_stats=None):
+    def _on_pull_preview_complete(
+        self,
+        conflicts: List[ConflictEntry],
+        graph_export=None,
+        graph_stats=None,
+        documents: Optional[List[Dict[str, Any]]] = None,
+    ):
         """Handle pull preview completion."""
         if graph_export is not None and not graph_stats:
             graph_stats = PullPreviewWorker._get_graph_stats(graph_export)
         self._graph_export = graph_export
         self._graph_stats = graph_stats
         self.view.set_graph_preview_data(graph_export, graph_stats)
+        self.view.populate_fetch_documents(documents or [])
 
-        if not conflicts and not graph_export:
+        if not conflicts and not graph_export and not documents:
             self.view.set_pull_status("No symbols found", success=False)
             return
 
@@ -1034,6 +1127,8 @@ class SymGraphController(QObject):
         same_count = sum(1 for c in conflicts if c.action == ConflictAction.SAME)
 
         status_msg = f"Found {len(conflicts)} symbols ({conflict_count} conflicts, {new_count} new, {same_count} same)"
+        if documents:
+            status_msg += f" | Documents: {len(documents)}"
         if graph_stats:
             status_msg += (
                 f" | Graph: {graph_stats.get('nodes', 0)} nodes, "
@@ -1042,6 +1137,10 @@ class SymGraphController(QObject):
 
         if not conflicts and graph_export:
             status_msg = "No symbols found (graph data available)"
+            if documents:
+                status_msg += f" | Documents: {len(documents)}"
+        elif not conflicts and documents:
+            status_msg = f"No symbols found | Documents: {len(documents)}"
 
         self.view.set_pull_status(status_msg, success=True)
 
@@ -1054,6 +1153,7 @@ class SymGraphController(QObject):
         """Handle pull preview error."""
         self._graph_export = None
         self._graph_stats = None
+        self.view.populate_fetch_documents([])
         self.view.clear_graph_preview_data()
         self.view.set_buttons_enabled(True)
         self.view.set_pull_status(f"Error: {error_msg}", success=False)
@@ -1061,13 +1161,15 @@ class SymGraphController(QObject):
 
     def handle_apply_selected(self, addresses: List[int]):
         """Handle applying selected symbols."""
+        selected_documents = self.view.get_selected_fetch_documents()
+
         # If worker is running, cancel it (check first to allow Stop button)
         if self.apply_worker and self.apply_worker.isRunning():
             self.apply_worker.cancel()
             self.view.set_pull_status("Stopping...", success=None)
             return
 
-        if not addresses and not self._graph_export:
+        if not addresses and not self._graph_export and not selected_documents:
             self.view.set_pull_status("No items selected", success=False)
             return
 
@@ -1077,14 +1179,22 @@ class SymGraphController(QObject):
 
         # Get the selected items (Symbol or ConflictEntry objects)
         selected_items = self.view.get_selected_conflicts()
-        if not selected_items and not self._graph_export:
+        if not selected_items and not self._graph_export and not selected_documents:
             self.view.set_pull_status("No items selected", success=False)
+            return
+
+        if not selected_items and not self._graph_export and selected_documents:
+            self._pending_apply_documents = list(selected_documents)
+            self._pending_apply_summary = {'applied': 0, 'errors': 0}
+            self._start_document_apply()
             return
 
         log.log_info(f"Applying {len(selected_items)} selected symbols in background")
         self.view.set_pull_status(f"Applying 0/{len(selected_items)}...", success=None)
         self.view.set_buttons_enabled(False)
         self.view.set_apply_button_text("Stop")
+        self._pending_apply_documents = list(selected_documents)
+        self._pending_apply_summary = {}
 
         # Start apply worker
         merge_policy = self.view.get_graph_merge_policy() if self._graph_export else "upsert"
@@ -1159,6 +1269,11 @@ class SymGraphController(QObject):
 
     def _on_apply_complete(self, applied: int, errors: int):
         """Handle apply completion."""
+        self._pending_apply_summary = {'applied': applied, 'errors': errors}
+        if self._pending_apply_documents:
+            self.view.set_pull_status("Applying documents...", success=None)
+            self._start_document_apply()
+            return
         if errors > 0:
             self.view.set_pull_status(f"Applied {applied} symbols ({errors} errors)", success=True)
         else:
@@ -1167,18 +1282,93 @@ class SymGraphController(QObject):
 
     def _on_apply_cancelled(self, applied: int):
         """Handle apply cancellation."""
+        self._pending_apply_documents = []
         self.view.set_pull_status(f"Stopped ({applied} symbols applied)", success=None)
         log.log_info(f"Apply cancelled after {applied} symbols")
 
     def _on_apply_error(self, error_msg: str):
         """Handle apply error."""
+        self._pending_apply_documents = []
         self.view.set_pull_status(f"Error: {error_msg}", success=False)
         log.log_error(f"Apply error: {error_msg}")
 
     def _on_apply_finished(self):
         """Handle worker finished (cleanup)."""
+        if self.document_apply_worker and self.document_apply_worker.isRunning():
+            return
         self.view.set_buttons_enabled(True)
         self.view.set_apply_button_text("Apply Selected")
+
+    def _start_document_apply(self):
+        sha256 = self._get_sha256()
+        if not sha256:
+            self.view.set_pull_status("Unable to resolve binary hash for document import", success=False)
+            return
+
+        documents = list(self._pending_apply_documents)
+        if not documents:
+            summary = self._pending_apply_summary or {'applied': 0, 'errors': 0}
+            if summary['errors'] > 0:
+                self.view.set_pull_status(
+                    f"Applied {summary['applied']} symbols ({summary['errors']} errors)",
+                    success=True,
+                )
+            else:
+                self.view.set_pull_status(f"Applied {summary['applied']} symbols", success=True)
+            self.view.set_buttons_enabled(True)
+            self.view.set_apply_button_text("Apply Selected")
+            return
+
+        self.view.set_buttons_enabled(False)
+        self.view.set_apply_button_text("Apply Selected")
+        self.document_apply_worker = AsyncWorker(self._fetch_documents_for_apply, sha256, documents)
+        self.document_apply_worker.finished.connect(self._on_document_apply_complete)
+        self.document_apply_worker.error.connect(self._on_document_apply_error)
+        self.document_apply_worker.start()
+
+    async def _fetch_documents_for_apply(self, sha256: str, documents: List[Dict[str, Any]]):
+        fetched = []
+        for document in documents:
+            fetched_document = await symgraph_service.get_document(
+                sha256,
+                document['document_identity_id'],
+                version=document.get('version'),
+            )
+            if fetched_document is not None:
+                fetched.append(fetched_document)
+        return fetched
+
+    def _on_document_apply_complete(self, documents):
+        imported = 0
+        if self.query_controller:
+            for document in documents or []:
+                self.query_controller.upsert_symgraph_document_chat(document)
+                imported += 1
+
+        summary = self._pending_apply_summary or {'applied': 0, 'errors': 0}
+        parts = []
+        if summary.get('applied', 0) > 0:
+            if summary.get('errors', 0) > 0:
+                parts.append(f"{summary['applied']} symbols ({summary['errors']} errors)")
+            else:
+                parts.append(f"{summary['applied']} symbols")
+        if imported > 0:
+            parts.append(f"{imported} documents")
+        self.view.set_pull_status(
+            "Applied " + ", ".join(parts) if parts else "Applied documents",
+            success=True,
+        )
+        self._pending_apply_documents = []
+        self._pending_apply_summary = {}
+        self.view.set_buttons_enabled(True)
+        self.view.set_apply_button_text("Apply Selected")
+
+    def _on_document_apply_error(self, error_msg: str):
+        self._pending_apply_documents = []
+        self._pending_apply_summary = {}
+        self.view.set_buttons_enabled(True)
+        self.view.set_apply_button_text("Apply Selected")
+        self.view.set_pull_status(f"Error importing documents: {error_msg}", success=False)
 
     # === Helper methods for data collection ===
 

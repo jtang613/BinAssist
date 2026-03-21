@@ -54,6 +54,22 @@ def _parse_address(value: Any) -> int:
     return 0
 
 
+def _parse_int(value: Any, default: int = 0) -> int:
+    """Parse an integer from API responses safely."""
+    if value is None:
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return default
+    return default
+
+
 @dataclass
 class BinaryStats:
     """Statistics for a binary in SymGraph."""
@@ -171,6 +187,55 @@ class Symbol:
         if self.metadata:
             result['metadata'] = self.metadata
         return result
+
+
+@dataclass
+class DocumentSummary:
+    """Document summary metadata from SymGraph."""
+    id: str
+    document_identity_id: str
+    version: int
+    title: str
+    doc_type: str
+    content_size_bytes: int
+    created_at: Optional[str] = None
+    introduced_in_revision: Optional[int] = None
+    removed_in_revision: Optional[int] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'DocumentSummary':
+        return cls(
+            id=str(data.get('id', '')),
+            document_identity_id=str(data.get('document_identity_id', '')),
+            version=_parse_int(data.get('version'), 0),
+            title=data.get('title', 'Untitled Document'),
+            doc_type=data.get('doc_type', 'notes'),
+            content_size_bytes=_parse_int(data.get('content_size_bytes'), 0),
+            created_at=data.get('created_at'),
+            introduced_in_revision=data.get('introduced_in_revision'),
+            removed_in_revision=data.get('removed_in_revision'),
+        )
+
+
+@dataclass
+class Document(DocumentSummary):
+    """Full document payload including Markdown content."""
+    content: str = ""
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'Document':
+        return cls(
+            id=str(data.get('id', '')),
+            document_identity_id=str(data.get('document_identity_id', '')),
+            version=_parse_int(data.get('version'), 0),
+            title=data.get('title', 'Untitled Document'),
+            doc_type=data.get('doc_type', 'notes'),
+            content_size_bytes=_parse_int(data.get('content_size_bytes'), 0),
+            created_at=data.get('created_at'),
+            introduced_in_revision=data.get('introduced_in_revision'),
+            removed_in_revision=data.get('removed_in_revision'),
+            content=data.get('content', ''),
+        )
 
 
 @dataclass
@@ -462,6 +527,8 @@ class PushResult:
     symbols_pushed: int = 0
     nodes_pushed: int = 0
     edges_pushed: int = 0
+    documents_pushed: int = 0
+    document_results: List[Dict[str, Any]] = field(default_factory=list)
     binary_revision: Optional[int] = None
     error: Optional[str] = None
     error_code: Optional[str] = None
@@ -474,6 +541,8 @@ class PushResult:
         symbols: int = 0,
         nodes: int = 0,
         edges: int = 0,
+        documents: int = 0,
+        document_results: Optional[List[Dict[str, Any]]] = None,
         binary_revision: Optional[int] = None
     ) -> 'PushResult':
         """Create a successful push result."""
@@ -482,6 +551,8 @@ class PushResult:
             symbols_pushed=symbols,
             nodes_pushed=nodes,
             edges_pushed=edges,
+            documents_pushed=documents,
+            document_results=document_results or [],
             binary_revision=binary_revision
         )
 

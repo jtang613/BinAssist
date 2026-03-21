@@ -492,6 +492,12 @@ class ToolExecutorThread(QThread):
 
 
 class QueryController:
+    CHAT_TYPE_METADATA_KEY = "chat_type"
+    DOCUMENT_CHAT_METADATA_KEY = "is_document_chat"
+    DEFAULT_DOCUMENT_DOC_TYPE = "notes"
+    DEFAULT_CHAT_TYPE = "chat"
+    CHAT_TYPE_OPTIONS = {"chat", "general", "malware_report", "vuln_analysis", "api_doc", "notes"}
+
     """Controller for the Query tab functionality"""
     
     def __init__(self, view, binary_view: Optional[bn.BinaryView] = None, view_frame=None):
@@ -568,6 +574,7 @@ class QueryController:
         self.view.delete_chats_requested.connect(self.delete_chats)
         self.view.chat_selected.connect(self.chat_selected)
         self.view.chat_name_changed.connect(self.on_chat_name_changed)
+        self.view.chat_type_changed.connect(self.on_chat_type_changed)
         self.view.edit_mode_changed.connect(self.on_edit_mode_changed)
         self.view.rag_enabled_changed.connect(self.on_rag_enabled_changed)
         self.view.mcp_enabled_changed.connect(self.on_mcp_enabled_changed)
@@ -662,7 +669,7 @@ class QueryController:
             try:
                 all_metadata = self.analysis_db.get_all_chat_metadata(binary_hash)
                 for metadata in all_metadata:
-                    chat_metadata[metadata['chat_id']] = metadata['name']
+                    chat_metadata[metadata['chat_id']] = metadata
             except Exception as e:
                 log.log_warn(f"Failed to load chat metadata: {e}")
             
@@ -674,21 +681,29 @@ class QueryController:
                 last_message = chat_data['last_message']
                 
                 # Get chat name from metadata, or use default
-                chat_name = chat_metadata.get(str(chat_id), f"Chat {chat_id}")
+                metadata_record = chat_metadata.get(str(chat_id), {})
+                chat_name = metadata_record.get('name', f"Chat {chat_id}")
+                chat_metadata_payload = self._normalize_chat_metadata(metadata_record.get('metadata'))
                 
                 # Add chat entry to in-memory storage (messages will be loaded lazily)
                 self.chats[chat_id] = {
                     "name": chat_name,
                     "messages": [],  # Will be loaded when chat is selected
                     "created": first_message,
-                    "updated": last_message
+                    "updated": last_message,
+                    "metadata": chat_metadata_payload,
                 }
                 
                 # Convert UTC timestamp to local time for display consistency
                 display_timestamp = self._convert_utc_to_local_display(last_message)
                 
                 # Add to view's history table directly (without triggering signals)
-                self._add_chat_to_history_direct(chat_id, chat_name, display_timestamp)
+                self._add_chat_to_history_direct(
+                    chat_id,
+                    chat_name,
+                    display_timestamp,
+                    chat_metadata_payload.get(self.CHAT_TYPE_METADATA_KEY, self.DEFAULT_CHAT_TYPE),
+                )
                 
                 # Update next chat ID to avoid conflicts
                 if chat_id >= self.next_chat_id:
@@ -735,7 +750,7 @@ class QueryController:
             # Fallback: return original timestamp
             return utc_timestamp
     
-    def _add_chat_to_history_direct(self, chat_id: int, description: str, timestamp: str):
+    def _add_chat_to_history_direct(self, chat_id: int, description: str, timestamp: str, chat_type: str):
         """Add chat to history table directly without triggering signals (for bulk loading)"""
         from PySide6.QtWidgets import QTableWidgetItem
         from PySide6.QtCore import Qt
@@ -750,6 +765,7 @@ class QueryController:
         
         self.view.history_table.setItem(row_count, 0, desc_item)
         self.view.history_table.setItem(row_count, 1, timestamp_item)
+        self.view.set_chat_type_cell(row_count, chat_id, chat_type)
     
     def _expand_macros(self, query_text: str) -> str:
         """Expand macros in the query text using current Binary Ninja context"""
@@ -1015,19 +1031,30 @@ class QueryController:
             "name": chat_name,
             "messages": [],
             "created": timestamp,
-            "updated": timestamp
+            "updated": timestamp,
+            "metadata": self._default_chat_metadata(),
         }
         
         # Save chat metadata to database
         binary_hash = self._get_current_binary_hash()
         if binary_hash:
             try:
-                self.analysis_db.save_chat_metadata(binary_hash, str(chat_id), chat_name)
+                self.analysis_db.save_chat_metadata(
+                    binary_hash,
+                    str(chat_id),
+                    chat_name,
+                    metadata=self.chats[chat_id]["metadata"],
+                )
             except Exception as e:
                 log.log_warn(f"Failed to save initial chat metadata: {e}")
         
         # Add to view
-        self.view.add_chat_to_history(chat_id, chat_name, timestamp)
+        self.view.add_chat_to_history(
+            chat_id,
+            chat_name,
+            timestamp,
+            self.DEFAULT_CHAT_TYPE,
+        )
         
         # Set as current chat
         self.current_chat_id = chat_id
@@ -1041,7 +1068,7 @@ class QueryController:
     def _create_document_chat(self, title: str, content: str) -> int:
         """Create a new chat populated with document content (called from tool thread).
 
-        This is invoked by the add_document_to_chat tool. The chat appears in
+        This is invoked by the ga_add_document tool. The chat appears in
         the sidebar without disrupting the current conversation.
         """
         chat_id = self.next_chat_id
@@ -1058,23 +1085,40 @@ class QueryController:
                 "timestamp": timestamp
             }],
             "created": timestamp,
-            "updated": timestamp
+            "updated": timestamp,
+            "metadata": self._normalize_chat_metadata({
+                self.CHAT_TYPE_METADATA_KEY: self.DEFAULT_DOCUMENT_DOC_TYPE,
+                self.DOCUMENT_CHAT_METADATA_KEY: True,
+            }),
         }
 
         # Persist to database
         binary_hash = self._current_query_binary_hash or self._get_current_binary_hash()
         if binary_hash:
             try:
-                self.analysis_db.save_chat_metadata(binary_hash, str(chat_id), title)
-                self.analysis_db.save_chat_message(
-                    binary_hash, str(chat_id), "assistant", content,
-                    metadata={"message_order": 0}
+                self._save_chat_metadata(chat_id, binary_hash=binary_hash)
+                self.analysis_db.delete_native_chat(binary_hash, str(chat_id))
+                self.analysis_db.save_edited_message(
+                    binary_hash,
+                    str(chat_id),
+                    message_order=0,
+                    role="assistant",
+                    content=content,
+                    provider_type="symgraph_document",
                 )
             except Exception as e:
                 log.log_error(f"Failed to persist document chat: {e}")
 
         # Update UI on the main thread (this may be called from a worker thread)
-        QTimer.singleShot(0, lambda: self.view.add_chat_to_history(chat_id, title, timestamp))
+        QTimer.singleShot(
+            0,
+            lambda: self.view.add_chat_to_history(
+                chat_id,
+                title,
+                timestamp,
+                self.DEFAULT_DOCUMENT_DOC_TYPE,
+            ),
+        )
 
         log.log_info(f"Document chat created: '{title}' (Chat {chat_id})")
         return chat_id
@@ -1221,7 +1265,7 @@ class QueryController:
         binary_hash = self._get_current_binary_hash()
         if binary_hash:
             try:
-                self.analysis_db.save_chat_metadata(binary_hash, str(chat_id), new_name)
+                self._save_chat_metadata(chat_id, binary_hash=binary_hash)
                 log.log_info(f"Saved chat name change to database: '{old_name}' -> '{new_name}'")
             except Exception as e:
                 log.log_error(f"Failed to save chat name change to database: {e}")
@@ -1233,6 +1277,20 @@ class QueryController:
         if chat_id == self.current_chat_id:
             self._update_chat_display()
             log.log_info(f"Updated chat display with new heading: '{new_name}'")
+
+    def on_chat_type_changed(self, chat_id: int, new_type: str):
+        """Handle chat type changes from the Query history dropdown."""
+        if chat_id not in self.chats:
+            return
+
+        metadata = self._get_chat_metadata(chat_id)
+        resolved_type = new_type if new_type in self.CHAT_TYPE_OPTIONS else self.DEFAULT_CHAT_TYPE
+        metadata[self.CHAT_TYPE_METADATA_KEY] = resolved_type
+        metadata[self.DOCUMENT_CHAT_METADATA_KEY] = resolved_type != self.DEFAULT_CHAT_TYPE
+        if metadata[self.DOCUMENT_CHAT_METADATA_KEY]:
+            metadata["symgraph_doc_type"] = resolved_type
+        self.chats[chat_id]["metadata"] = metadata
+        self._save_chat_metadata(chat_id)
     
     def on_edit_mode_changed(self, is_edit_mode: bool):
         """Handle edit mode change using ChatEditManager"""
@@ -1299,7 +1357,12 @@ class QueryController:
                 role="edited",
                 content=edited_content
             )
-            self.analysis_db.save_chat_metadata(binary_hash, chat_id_str, chat_name)
+            self.analysis_db.save_chat_metadata(
+                binary_hash,
+                chat_id_str,
+                chat_name,
+                metadata=self._get_chat_metadata(self.current_chat_id),
+            )
 
             # Update in-memory chat
             self.chats[self.current_chat_id]["messages"] = [{
@@ -1365,7 +1428,7 @@ class QueryController:
 
                 # Save updated title to database
                 try:
-                    self.analysis_db.save_chat_metadata(binary_hash, str(self.current_chat_id), new_title)
+                    self._save_chat_metadata(self.current_chat_id, binary_hash=binary_hash)
                 except Exception as e:
                     log.log_error(f"Failed to save updated chat title: {e}")
 
@@ -1551,7 +1614,220 @@ class QueryController:
 
         except Exception as e:
             log.log_error(f"Failed to reload current chat: {e}")
-    
+
+    def _default_chat_metadata(self) -> Dict[str, Any]:
+        return self._normalize_chat_metadata({})
+
+    def _normalize_chat_metadata(self, metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        normalized = dict(metadata or {})
+        chat_type = normalized.get(self.CHAT_TYPE_METADATA_KEY)
+        if chat_type == "protocol_spec":
+            chat_type = "api_doc"
+        if chat_type not in self.CHAT_TYPE_OPTIONS:
+            if normalized.get(self.DOCUMENT_CHAT_METADATA_KEY):
+                chat_type = normalized.get("symgraph_doc_type", self.DEFAULT_DOCUMENT_DOC_TYPE)
+                if chat_type == "protocol_spec":
+                    chat_type = "api_doc"
+            else:
+                chat_type = self.DEFAULT_CHAT_TYPE
+        normalized[self.CHAT_TYPE_METADATA_KEY] = chat_type
+        normalized[self.DOCUMENT_CHAT_METADATA_KEY] = chat_type != self.DEFAULT_CHAT_TYPE
+        if normalized[self.DOCUMENT_CHAT_METADATA_KEY]:
+            normalized["symgraph_doc_type"] = chat_type
+        return normalized
+
+    def _get_chat_metadata(self, chat_id: int) -> Dict[str, Any]:
+        chat = self.chats.get(chat_id, {})
+        metadata = chat.get("metadata")
+        normalized = self._normalize_chat_metadata(metadata)
+        if chat:
+            chat["metadata"] = normalized
+        return normalized
+
+    def _save_chat_metadata(self, chat_id: int, binary_hash: Optional[str] = None):
+        if chat_id not in self.chats:
+            return
+        binary_hash = binary_hash or self._current_query_binary_hash or self._get_current_binary_hash()
+        if not binary_hash:
+            return
+        chat = self.chats[chat_id]
+        self.analysis_db.save_chat_metadata(
+            binary_hash,
+            str(chat_id),
+            chat.get("name", f"Chat {chat_id}"),
+            metadata=self._get_chat_metadata(chat_id),
+        )
+
+    def _ensure_chat_messages_loaded(self, chat_id: int):
+        if chat_id not in self.chats or self.chats[chat_id]["messages"]:
+            return
+
+        self._load_chat_from_native_storage(chat_id)
+        if self.chats[chat_id]["messages"]:
+            return
+
+        try:
+            binary_hash = self._get_current_binary_hash()
+            if not binary_hash:
+                return
+            db_messages = self.analysis_db.get_chat_history(binary_hash, str(chat_id))
+            for db_msg in db_messages:
+                self.chats[chat_id]["messages"].append({
+                    "role": db_msg["role"],
+                    "content": db_msg["content"],
+                    "timestamp": db_msg["created_at"],
+                })
+        except Exception as e:
+            log.log_error(f"Failed to load chat history from database: {e}")
+
+    def _find_chat_id_by_document_identity(self, document_identity_id: str) -> Optional[int]:
+        if not document_identity_id:
+            return None
+        for chat_id, chat in self.chats.items():
+            metadata = self._normalize_chat_metadata(chat.get("metadata"))
+            if metadata.get("symgraph_document_identity_id") == document_identity_id:
+                return chat_id
+        return None
+
+    def upsert_symgraph_document_chat(self, document) -> int:
+        """Create or update a Query chat from a remote SymGraph document."""
+        binary_hash = self._current_query_binary_hash or self._get_current_binary_hash()
+        if not binary_hash:
+            raise RuntimeError("No binary hash available for document import")
+
+        existing_chat_id = self._find_chat_id_by_document_identity(document.document_identity_id)
+        chat_id = existing_chat_id if existing_chat_id is not None else self.next_chat_id
+        if existing_chat_id is None:
+            self.next_chat_id += 1
+
+        timestamp = QDateTime.currentDateTime().toString("yyyy-MM-dd hh:mm:ss")
+        metadata = self._normalize_chat_metadata({
+            self.CHAT_TYPE_METADATA_KEY: (document.doc_type or self.DEFAULT_DOCUMENT_DOC_TYPE),
+            self.DOCUMENT_CHAT_METADATA_KEY: True,
+            "symgraph_document_identity_id": document.document_identity_id,
+            "symgraph_document_version": document.version,
+            "symgraph_last_synced_at": timestamp,
+            "symgraph_source_sha256": binary_hash,
+        })
+        chat_payload = {
+            "name": document.title,
+            "messages": [{
+                "role": "assistant",
+                "content": document.content,
+                "timestamp": timestamp,
+            }],
+            "created": timestamp,
+            "updated": timestamp,
+            "metadata": metadata,
+        }
+        self.chats[chat_id] = chat_payload
+
+        self.analysis_db.delete_native_chat(binary_hash, str(chat_id))
+        self.analysis_db.save_edited_message(
+            binary_hash,
+            str(chat_id),
+            message_order=0,
+            role="assistant",
+            content=document.content,
+            provider_type="symgraph_document",
+        )
+        self._save_chat_metadata(chat_id, binary_hash=binary_hash)
+
+        def _update_ui():
+            display_timestamp = self._convert_utc_to_local_display(timestamp)
+            updated_row = False
+            for row in range(self.view.history_table.rowCount()):
+                item = self.view.history_table.item(row, 0)
+                if item and item.data(Qt.UserRole) == chat_id:
+                    item.setText(document.title)
+                    ts_item = self.view.history_table.item(row, 1)
+                    if ts_item:
+                        ts_item.setText(display_timestamp)
+                    self.view.set_chat_type_cell(
+                        row,
+                        chat_id,
+                        metadata.get(self.CHAT_TYPE_METADATA_KEY, self.DEFAULT_CHAT_TYPE),
+                    )
+                    updated_row = True
+                    break
+            if not updated_row:
+                self.view.add_chat_to_history(
+                    chat_id,
+                    document.title,
+                    display_timestamp,
+                    metadata.get(self.CHAT_TYPE_METADATA_KEY, self.DEFAULT_CHAT_TYPE),
+                )
+            if self.current_chat_id == chat_id:
+                self._update_chat_display()
+
+        QTimer.singleShot(0, _update_ui)
+        log.log_info(
+            f"{'Updated' if existing_chat_id is not None else 'Imported'} SymGraph document chat "
+            f"'{document.title}' (Chat {chat_id})"
+        )
+        return chat_id
+
+    def list_document_push_candidates(self) -> List[Dict[str, Any]]:
+        """Return marked document chats for SymGraph push preview."""
+        candidates: List[Dict[str, Any]] = []
+        for chat_id, chat in self.chats.items():
+            metadata = self._get_chat_metadata(chat_id)
+            chat_type = metadata.get(self.CHAT_TYPE_METADATA_KEY, self.DEFAULT_CHAT_TYPE)
+            if chat_type == self.DEFAULT_CHAT_TYPE:
+                continue
+
+            markdown = self.serialize_document_chat(chat_id)
+            title = chat.get("name", f"Chat {chat_id}")
+            updated_at = chat.get("updated") or chat.get("created")
+            candidates.append({
+                "chat_id": chat_id,
+                "title": title,
+                "content": markdown,
+                "size_bytes": len(markdown.encode("utf-8")),
+                "updated_at": updated_at,
+                "document_identity_id": metadata.get("symgraph_document_identity_id"),
+                "version": metadata.get("symgraph_document_version"),
+                "doc_type": chat_type,
+            })
+
+        candidates.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
+        return candidates
+
+    def update_document_sync_metadata(
+        self,
+        chat_id: int,
+        document_identity_id: str,
+        version: Optional[int],
+        doc_type: Optional[str],
+    ):
+        """Persist remote document linkage after a successful push."""
+        if chat_id not in self.chats:
+            return
+        metadata = self._get_chat_metadata(chat_id)
+        resolved_type = doc_type or metadata.get(
+            self.CHAT_TYPE_METADATA_KEY,
+            self.DEFAULT_DOCUMENT_DOC_TYPE,
+        )
+        metadata[self.CHAT_TYPE_METADATA_KEY] = resolved_type
+        metadata[self.DOCUMENT_CHAT_METADATA_KEY] = resolved_type != self.DEFAULT_CHAT_TYPE
+        metadata["symgraph_document_identity_id"] = document_identity_id
+        metadata["symgraph_document_version"] = version
+        metadata["symgraph_doc_type"] = resolved_type
+        metadata["symgraph_last_synced_at"] = QDateTime.currentDateTime().toString("yyyy-MM-dd hh:mm:ss")
+        self.chats[chat_id]["metadata"] = metadata
+        self._save_chat_metadata(chat_id)
+
+    def serialize_document_chat(self, chat_id: int) -> str:
+        """Serialize a document chat to Markdown for SymGraph push."""
+        if chat_id not in self.chats:
+            return ""
+        self._ensure_chat_messages_loaded(chat_id)
+        chat = self.chats[chat_id]
+        messages = chat.get("messages", [])
+        if len(messages) == 1 and messages[0].get("role") in ("assistant", "edited"):
+            return messages[0].get("content", "")
+        return self._format_chat_as_markdown(chat)
+
     def on_rag_enabled_changed(self, enabled: bool):
         """Handle RAG checkbox change"""
         log.log_info(f"RAG enabled changed to: {enabled}")

@@ -23,6 +23,7 @@ from .settings_service import settings_service
 from .models.symgraph_models import (
     BinaryStats, BinaryRevision, Symbol, GraphNode, GraphEdge,
     SymbolExport, GraphExport, QueryResult, PushResult,
+    DocumentSummary, Document,
     PullPreviewResult, ConflictEntry, ConflictAction
 )
 
@@ -465,6 +466,88 @@ class SymGraphService:
         except httpx.RequestError as e:
             raise SymGraphNetworkError(f"Network error: {str(e)}")
 
+    async def list_documents(
+        self,
+        sha256: str,
+        version: Optional[int] = None,
+        page_size: int = 200
+    ) -> List[DocumentSummary]:
+        """List remote document summaries for a binary."""
+        self._check_httpx()
+        self._check_auth()
+
+        url = f"{self.base_url}/api/v1/binaries/{sha256}/documents?page=1&page_size={page_size}"
+        if version is not None:
+            url += f"&version={version}"
+        log.log_debug(f"Listing documents: {url}")
+
+        try:
+            async with httpx.AsyncClient(**self._client_kwargs(60.0)) as client:
+                response = await client.get(
+                    url,
+                    headers=self._get_headers(authenticated=True)
+                )
+
+                if response.status_code == 200:
+                    data = response.json() or {}
+                    documents_data = data.get('documents', []) if isinstance(data, dict) else []
+                    if not isinstance(documents_data, list):
+                        return []
+                    return [DocumentSummary.from_dict(item) for item in documents_data]
+                elif response.status_code == 401:
+                    raise SymGraphAuthError("Invalid API key")
+                elif response.status_code == 404:
+                    return []
+                else:
+                    self._raise_api_error("listing documents", response)
+
+        except httpx.TimeoutException:
+            raise SymGraphNetworkError(f"Timeout connecting to {self.base_url}")
+        except httpx.RequestError as e:
+            raise SymGraphNetworkError(f"Network error: {str(e)}")
+
+    async def get_document(
+        self,
+        sha256: str,
+        document_identity_id: str,
+        version: Optional[int] = None,
+        binary_version: Optional[int] = None
+    ) -> Optional[Document]:
+        """Fetch a single document with full Markdown content."""
+        self._check_httpx()
+        self._check_auth()
+
+        url = f"{self.base_url}/api/v1/binaries/{sha256}/documents/{document_identity_id}"
+        params = []
+        if version is not None:
+            params.append(f"version={version}")
+        if binary_version is not None:
+            params.append(f"binary_version={binary_version}")
+        if params:
+            url += "?" + "&".join(params)
+        log.log_debug(f"Fetching document: {url}")
+
+        try:
+            async with httpx.AsyncClient(**self._client_kwargs(60.0)) as client:
+                response = await client.get(
+                    url,
+                    headers=self._get_headers(authenticated=True)
+                )
+
+                if response.status_code == 200:
+                    return Document.from_dict(response.json() or {})
+                elif response.status_code == 401:
+                    raise SymGraphAuthError("Invalid API key")
+                elif response.status_code == 404:
+                    return None
+                else:
+                    self._raise_api_error("fetching document", response)
+
+        except httpx.TimeoutException:
+            raise SymGraphNetworkError(f"Timeout connecting to {self.base_url}")
+        except httpx.RequestError as e:
+            raise SymGraphNetworkError(f"Network error: {str(e)}")
+
     async def create_binary_revision(
         self,
         sha256: str,
@@ -592,6 +675,62 @@ class SymGraphService:
 
         log.log_info(f"Successfully pushed {total_pushed} symbols")
         return PushResult.success_result(symbols=total_pushed, binary_revision=target_revision)
+
+    async def push_documents_bulk(
+        self,
+        sha256: str,
+        documents: List[Dict[str, Any]],
+        base_version: Optional[int] = None
+    ) -> PushResult:
+        """Push document chats to SymGraph using the bulk documents API."""
+        self._check_httpx()
+        self._check_auth()
+
+        if not documents:
+            return PushResult.success_result()
+
+        url = f"{self.base_url}/api/v1/binaries/{sha256}/documents/bulk"
+        if base_version is not None:
+            url += f"?base_version={base_version}"
+        payload = {'documents': documents}
+        log.log_debug(f"Pushing {len(documents)} documents to: {url}")
+
+        try:
+            async with httpx.AsyncClient(**self._client_kwargs(120.0)) as client:
+                response = await client.post(
+                    url,
+                    headers=self._get_headers(authenticated=True),
+                    json=payload
+                )
+
+                if response.status_code in (200, 201):
+                    data = response.json() or {}
+                    summary = data.get('summary', {}) if isinstance(data, dict) else {}
+                    pushed_count = (
+                        int(summary.get('created', 0) or 0)
+                        + int(summary.get('versioned', 0) or 0)
+                    )
+                    if pushed_count == 0 and isinstance(data, dict):
+                        results = data.get('results', [])
+                        if isinstance(results, list):
+                            pushed_count = len([
+                                item for item in results
+                                if item.get('status') in ('created', 'versioned')
+                            ])
+                    results = data.get('results', []) if isinstance(data, dict) else []
+                    return PushResult.success_result(
+                        documents=pushed_count,
+                        document_results=results if isinstance(results, list) else [],
+                    )
+                elif response.status_code == 401:
+                    raise SymGraphAuthError("Invalid API key")
+                else:
+                    self._raise_api_error("pushing documents", response)
+
+        except httpx.TimeoutException:
+            raise SymGraphNetworkError(f"Timeout connecting to {self.base_url}")
+        except httpx.RequestError as e:
+            raise SymGraphNetworkError(f"Network error: {str(e)}")
 
     async def export_symbols(self, sha256: str) -> Optional[SymbolExport]:
         """

@@ -3,15 +3,13 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                               QTextBrowser, QTextEdit, QLineEdit, QTableWidget, QTableWidgetItem,
                               QSplitter, QPlainTextEdit, QHeaderView, QAbstractItemView, QSizePolicy, QCheckBox,
-                              QApplication)
+                              QApplication, QComboBox)
 from PySide6.QtCore import Signal, Qt, QDateTime
 from PySide6.QtGui import QKeySequence, QFontDatabase
-import markdown
-import re
 
 from .streaming_markdown_browser import StreamingMarkdownBrowser
 from ..services.streaming.render_update import RenderUpdate
-from ..services.streaming.streaming_renderer import MARKDOWN_CSS
+from ..services.streaming.streaming_renderer import MARKDOWN_CSS, render_markdown_to_html
 
 
 class MarkdownCopyBrowser(QTextBrowser):
@@ -62,6 +60,15 @@ class MarkdownCopyBrowser(QTextBrowser):
 
 
 class QueryTabView(QWidget):
+    CHAT_TYPE_OPTIONS = [
+        ("Chat", "chat"),
+        ("General", "general"),
+        ("Malware Report", "malware_report"),
+        ("Vulnerability Analysis", "vuln_analysis"),
+        ("API Documentation", "api_doc"),
+        ("Notes", "notes"),
+    ]
+
     # Signals for controller communication
     submit_query_requested = Signal(str)  # query text
     stop_query_requested = Signal()
@@ -69,6 +76,7 @@ class QueryTabView(QWidget):
     delete_chats_requested = Signal(list)  # list of chat IDs
     chat_selected = Signal(int)  # chat ID
     chat_name_changed = Signal(int, str)  # chat ID, new name
+    chat_type_changed = Signal(int, str)  # chat ID, new type
     edit_mode_changed = Signal(bool)
     rag_enabled_changed = Signal(bool)
     mcp_enabled_changed = Signal(bool)
@@ -194,8 +202,8 @@ class QueryTabView(QWidget):
     
     def create_history_table(self):
         self.history_table = QTableWidget()
-        self.history_table.setColumnCount(2)
-        self.history_table.setHorizontalHeaderLabels(["Description", "Timestamp"])
+        self.history_table.setColumnCount(3)
+        self.history_table.setHorizontalHeaderLabels(["Description", "Timestamp", "Type"])
         
         # Configure table behavior
         self.history_table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -210,18 +218,16 @@ class QueryTabView(QWidget):
         
         # Make table columns resizable
         header = self.history_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Interactive)  # Description column
-        header.setSectionResizeMode(1, QHeaderView.Interactive)  # Timestamp column
-        header.setStretchLastSection(True)  # Stretch last column to fill
-        
-        # Set initial column widths - wider description, narrower timestamp
-        self.history_table.setColumnWidth(0, 300)  # Description column - wider for descriptive text
-        self.history_table.setColumnWidth(1, 10)  # Timestamp column - just wide enough for YYYY-MM-DD HH:mm:ss
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         
         # Set default height to show 3 rows
         row_height = self.history_table.verticalHeader().defaultSectionSize()
         header_height = self.history_table.horizontalHeader().height()
         self.history_table.setMinimumHeight(header_height + (row_height * 3))  # +10 for margins
+        self._update_history_table_layout()
     
     def create_input_widget(self):
         self.input_widget = QPlainTextEdit()
@@ -336,18 +342,15 @@ class QueryTabView(QWidget):
                 self.input_widget.clear()  # Clear input after submit
     
     def on_delete_clicked(self):
-        selected_rows = []
-        for item in self.history_table.selectedItems():
-            if item.column() == 0:  # Only get one item per row
-                selected_rows.append(item.row())
+        selected_rows = sorted({item.row() for item in self.history_table.selectedItems()})
         
         if selected_rows:
             self.delete_chats_requested.emit(selected_rows)
     
     def on_history_selection_changed(self):
-        selected_items = self.history_table.selectedItems()
-        if len(selected_items) == 2:  # Single row selected (2 columns)
-            row = selected_items[0].row()
+        selected_rows = {item.row() for item in self.history_table.selectedItems()}
+        if len(selected_rows) == 1:
+            row = next(iter(selected_rows))
             chat_id = self.history_table.item(row, 0).data(Qt.UserRole)  # Store chat ID in user data
             if chat_id is not None:
                 self.current_chat_id = chat_id
@@ -369,7 +372,7 @@ class QueryTabView(QWidget):
                 # Emit signal to notify controller of the name change
                 self.chat_name_changed.emit(chat_id, new_name)
     
-    def add_chat_to_history(self, chat_id, description, timestamp=None):
+    def add_chat_to_history(self, chat_id, description, timestamp=None, chat_type="chat"):
         """Add a new chat entry to the history table"""
         if timestamp is None:
             timestamp = QDateTime.currentDateTime().toString("yyyy-MM-dd hh:mm:ss")
@@ -391,6 +394,7 @@ class QueryTabView(QWidget):
         
         self.history_table.setItem(row_count, 0, desc_item)
         self.history_table.setItem(row_count, 1, timestamp_item)
+        self.set_chat_type_cell(row_count, chat_id, chat_type)
         
         # Reconnect the itemChanged signal
         self.history_table.itemChanged.connect(self.on_history_item_changed)
@@ -404,6 +408,7 @@ class QueryTabView(QWidget):
         # Find and select the new chat (it may have moved due to sorting)
         self._select_chat_by_id(chat_id)
         self.current_chat_id = chat_id
+        self._update_history_table_layout()
     
     def _select_chat_by_id(self, chat_id):
         """Find and select a chat by its ID in the history table"""
@@ -418,14 +423,12 @@ class QueryTabView(QWidget):
     
     def remove_selected_chats(self):
         """Remove selected chats from history table"""
-        selected_rows = []
-        for item in self.history_table.selectedItems():
-            if item.column() == 0:  # Only get one item per row
-                selected_rows.append(item.row())
+        selected_rows = sorted({item.row() for item in self.history_table.selectedItems()})
         
         # Remove rows in reverse order to maintain indices
         for row in sorted(selected_rows, reverse=True):
             self.history_table.removeRow(row)
+        self._update_history_table_layout()
         
         # Clear current chat if it was deleted
         if not self.history_table.rowCount():
@@ -520,6 +523,36 @@ class QueryTabView(QWidget):
         if self.is_edit_mode:
             return self.query_editor.toPlainText()
         return self.markdown_content
+
+    def create_chat_type_combo(self, chat_id: int, chat_type: str) -> QComboBox:
+        combo = QComboBox()
+        for label, value in self.CHAT_TYPE_OPTIONS:
+            combo.addItem(label, value)
+        combo_index = combo.findData(chat_type)
+        combo.setCurrentIndex(combo_index if combo_index >= 0 else 0)
+        combo.currentIndexChanged.connect(
+            lambda _index, widget=combo, cid=chat_id: self.chat_type_changed.emit(
+                cid, widget.currentData() or "chat"
+            )
+        )
+        return combo
+
+    def set_chat_type_cell(self, row: int, chat_id: int, chat_type: str):
+        self.history_table.setCellWidget(row, 2, self.create_chat_type_combo(chat_id, chat_type))
+        self._update_history_table_layout()
+
+    def _update_history_table_layout(self):
+        if not hasattr(self, "history_table"):
+            return
+
+        self.history_table.resizeColumnToContents(1)
+        self.history_table.resizeColumnToContents(2)
+        self.history_table.setColumnWidth(1, max(150, self.history_table.columnWidth(1)))
+        self.history_table.setColumnWidth(2, max(160, self.history_table.columnWidth(2)))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_history_table_layout()
     
     def get_next_chat_name(self):
         """Generate next chat name (Chat 1, Chat 2, etc.)"""
@@ -591,10 +624,7 @@ class QueryTabView(QWidget):
     def markdown_to_html(self, markdown_text):
         """Convert Markdown text to HTML for display"""
         try:
-            preprocessed = self._preprocess_markdown_tables(markdown_text)
-            preprocessed = self._preprocess_markdown_hrs(preprocessed)
-            html = markdown.markdown(preprocessed, extensions=['codehilite', 'fenced_code', 'tables', 'sane_lists'])
-
+            html = render_markdown_to_html(markdown_text, include_css=False)
             feedback_html = self._get_feedback_html()
 
             return f"""
@@ -606,63 +636,6 @@ class QueryTabView(QWidget):
             """
         except:
             return f"<pre>{markdown_text}</pre>"
-
-    def _preprocess_markdown_tables(self, text):
-        """
-        Ensure markdown tables have a blank line before them.
-
-        The markdown 'tables' extension requires a blank line before the table
-        for proper parsing. LLMs often output tables immediately after text.
-        This preprocessor detects table starts and ensures proper spacing.
-        """
-        lines = text.split('\n')
-        result = []
-        prev_was_blank = True  # Start as if there was a blank line
-
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-
-            # Detect if this line starts a table (starts with | and contains |)
-            is_table_line = stripped.startswith('|') and '|' in stripped[1:]
-
-            # If this is a table line and previous wasn't blank or a table line,
-            # insert a blank line before it
-            if is_table_line and not prev_was_blank:
-                # Check if previous line was also a table line
-                if result and not (result[-1].strip().startswith('|') and '|' in result[-1].strip()[1:]):
-                    result.append('')
-
-            result.append(line)
-            prev_was_blank = (stripped == '')
-
-        return '\n'.join(result)
-
-    def _preprocess_markdown_hrs(self, text):
-        """
-        Ensure horizontal rules (---) have a blank line before them.
-
-        In markdown, '---' directly below text turns that text into a heading.
-        For '---' to render as a horizontal rule <hr>, it needs a blank line above.
-        """
-        lines = text.split('\n')
-        result = []
-
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-
-            # Check if this line is a horizontal rule (---, ***, ___)
-            is_hr = stripped in ('---', '***', '___') or \
-                    (len(stripped) >= 3 and set(stripped) <= {'-', ' '} and stripped.count('-') >= 3) or \
-                    (len(stripped) >= 3 and set(stripped) <= {'*', ' '} and stripped.count('*') >= 3) or \
-                    (len(stripped) >= 3 and set(stripped) <= {'_', ' '} and stripped.count('_') >= 3)
-
-            # If this is an HR and previous line wasn't blank, insert blank line
-            if is_hr and result and result[-1].strip() != '':
-                result.append('')
-
-            result.append(line)
-
-        return '\n'.join(result)
 
     def _get_feedback_html(self):
         """Generate HTML for RLHF feedback thumbs up/down links"""

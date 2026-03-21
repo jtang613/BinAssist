@@ -410,11 +410,16 @@ class AnalysisDBService:
                         binary_hash TEXT NOT NULL,
                         chat_id TEXT NOT NULL,
                         name TEXT NOT NULL,
+                        metadata TEXT,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         UNIQUE(binary_hash, chat_id)
                     )
                 ''')
+                try:
+                    cursor.execute('ALTER TABLE BNChatMetadata ADD COLUMN metadata TEXT')
+                except Exception:
+                    pass
                 
                 # System prompts versioning
                 cursor.execute('''
@@ -1805,17 +1810,24 @@ class AnalysisDBService:
     
     # Chat Metadata Operations
     
-    def save_chat_metadata(self, binary_hash: str, chat_id: str, name: str) -> int:
+    def save_chat_metadata(
+        self,
+        binary_hash: str,
+        chat_id: str,
+        name: str,
+        metadata: Dict[str, Any] = None
+    ) -> int:
         """Save or update chat metadata (name, etc.)"""
         with self._db_lock:
             conn = self._get_connection()
             try:
                 cursor = conn.cursor()
+                metadata_json = json.dumps(metadata) if metadata else None
                 cursor.execute('''
                     INSERT OR REPLACE INTO BNChatMetadata 
-                    (binary_hash, chat_id, name, updated_at)
-                    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-                ''', (binary_hash, chat_id, name))
+                    (binary_hash, chat_id, name, metadata, updated_at)
+                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ''', (binary_hash, chat_id, name, metadata_json))
                 
                 metadata_id = cursor.lastrowid
                 conn.commit()
@@ -1836,20 +1848,22 @@ class AnalysisDBService:
             try:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    SELECT id, name, created_at, updated_at
+                    SELECT id, name, metadata, created_at, updated_at
                     FROM BNChatMetadata 
                     WHERE binary_hash = ? AND chat_id = ?
                 ''', (binary_hash, chat_id))
                 
                 row = cursor.fetchone()
                 if row:
+                    metadata = json.loads(row[2]) if row[2] else {}
                     return {
                         'id': row[0],
                         'binary_hash': binary_hash,
                         'chat_id': chat_id,
                         'name': row[1],
-                        'created_at': row[2],
-                        'updated_at': row[3]
+                        'metadata': metadata,
+                        'created_at': row[3],
+                        'updated_at': row[4]
                     }
                 return None
                 
@@ -1865,7 +1879,7 @@ class AnalysisDBService:
             try:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    SELECT chat_id, name, created_at, updated_at
+                    SELECT chat_id, name, metadata, created_at, updated_at
                     FROM BNChatMetadata 
                     WHERE binary_hash = ?
                     ORDER BY updated_at DESC
@@ -1873,12 +1887,14 @@ class AnalysisDBService:
                 
                 metadata_list = []
                 for row in cursor.fetchall():
+                    metadata = json.loads(row[2]) if row[2] else {}
                     metadata_list.append({
                         'binary_hash': binary_hash,
                         'chat_id': row[0],
                         'name': row[1],
-                        'created_at': row[2],
-                        'updated_at': row[3]
+                        'metadata': metadata,
+                        'created_at': row[3],
+                        'updated_at': row[4]
                     })
                 
                 return metadata_list

@@ -5,11 +5,9 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                               QApplication, QGroupBox, QGridLayout, QSplitter, QFrame)
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QKeySequence, QFontDatabase
-import markdown
-import re
 
 from .streaming_markdown_browser import StreamingMarkdownBrowser
-from ..services.streaming.streaming_renderer import MARKDOWN_CSS
+from ..services.streaming.streaming_renderer import MARKDOWN_CSS, render_markdown_to_html
 
 
 class MarkdownCopyBrowser(QTextBrowser):
@@ -483,10 +481,7 @@ class ExplainTabView(QWidget):
     def markdown_to_html(self, markdown_text):
         """Convert Markdown text to HTML for display"""
         try:
-            preprocessed = self._preprocess_markdown_tables(markdown_text)
-            preprocessed = self._preprocess_markdown_hrs(preprocessed)
-            html = markdown.markdown(preprocessed, extensions=['codehilite', 'fenced_code', 'tables', 'sane_lists'])
-
+            html = render_markdown_to_html(markdown_text, include_css=False)
             feedback_html = self._get_feedback_html()
 
             return f"""
@@ -498,57 +493,6 @@ class ExplainTabView(QWidget):
             """
         except:
             return f"<pre>{markdown_text}</pre>"
-
-    def _preprocess_markdown_tables(self, text):
-        """
-        Ensure markdown tables have a blank line before them.
-
-        The markdown 'tables' extension requires a blank line before the table
-        for proper parsing. LLMs often output tables immediately after text.
-        """
-        lines = text.split('\n')
-        result = []
-        prev_was_blank = True
-
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            is_table_line = stripped.startswith('|') and '|' in stripped[1:]
-
-            if is_table_line and not prev_was_blank:
-                if result and not (result[-1].strip().startswith('|') and '|' in result[-1].strip()[1:]):
-                    result.append('')
-
-            result.append(line)
-            prev_was_blank = (stripped == '')
-
-        return '\n'.join(result)
-
-    def _preprocess_markdown_hrs(self, text):
-        """
-        Ensure horizontal rules (---) have a blank line before them.
-
-        In markdown, '---' directly below text turns that text into a heading.
-        For '---' to render as a horizontal rule <hr>, it needs a blank line above.
-        """
-        lines = text.split('\n')
-        result = []
-
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-
-            # Check if this line is a horizontal rule (---, ***, ___)
-            is_hr = stripped in ('---', '***', '___') or \
-                    (len(stripped) >= 3 and set(stripped) <= {'-', ' '} and stripped.count('-') >= 3) or \
-                    (len(stripped) >= 3 and set(stripped) <= {'*', ' '} and stripped.count('*') >= 3) or \
-                    (len(stripped) >= 3 and set(stripped) <= {'_', ' '} and stripped.count('_') >= 3)
-
-            # If this is an HR and previous line wasn't blank, insert blank line
-            if is_hr and result and result[-1].strip() != '':
-                result.append('')
-
-            result.append(line)
-
-        return '\n'.join(result)
 
     def _get_feedback_html(self):
         """Generate HTML for RLHF feedback thumbs up/down links"""

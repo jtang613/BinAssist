@@ -8,12 +8,12 @@ custom markdown content. Used by the ReAct agent to output clean reports and
 as groundwork for SymGraph document sync.
 """
 
-DOCUMENT_CHAT_TOOL_NAME = "add_document_to_chat"
+DOCUMENT_CHAT_TOOL_NAME = "ga_add_document"
 
 DOCUMENT_CHAT_TOOL_DEFINITION = {
     "type": "function",
     "function": {
-        "name": "add_document_to_chat",
+        "name": "ga_add_document",
         "description": "Create a new chat document with custom markdown content. Use this to produce standalone analysis reports, summaries, or findings separate from the current conversation.",
         "parameters": {
             "type": "object",
@@ -41,7 +41,7 @@ def set_document_chat_handler(handler):
 
 
 def execute_document_chat_tool(arguments):
-    """Execute the add_document_to_chat tool.
+    """Execute the ga_add_document tool.
 
     Args:
         arguments: dict with 'title' and 'content' keys

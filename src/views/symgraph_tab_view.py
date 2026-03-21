@@ -38,6 +38,14 @@ from ..services.models.symgraph_models import BinaryRevision, ConflictAction, Co
 class SymGraphTabView(QWidget):
     """SymGraph tab with Status, Fetch, and Push subtabs."""
 
+    DOCUMENT_TYPE_OPTIONS = (
+        ("General", "general"),
+        ("Malware Report", "malware_report"),
+        ("Vulnerability Analysis", "vuln_analysis"),
+        ("API Documentation", "api_doc"),
+        ("Notes", "notes"),
+    )
+
     query_requested = Signal()
     open_binary_requested = Signal()
     pull_preview_requested = Signal()
@@ -57,6 +65,8 @@ class SymGraphTabView(QWidget):
         self._push_graph_data = None
         self._push_graph_stats = None
         self._push_preview_symbols: List[Dict[str, Any]] = []
+        self._pull_preview_documents: List[Dict[str, Any]] = []
+        self._push_preview_documents: List[Dict[str, Any]] = []
         self._open_binary_url: Optional[str] = None
         self._merge_policy = self.MERGE_POLICY_UPSERT
         self._build_ui()
@@ -242,6 +252,7 @@ class SymGraphTabView(QWidget):
         self.summary_conflict_count = QLabel("Conflicts: 0")
         self.summary_same_count = QLabel("Same: 0")
         self.summary_selected_count = QLabel("Selected: 0")
+        self.summary_document_count = QLabel("Documents: 0")
         self.summary_graph_nodes_label = QLabel("Graph Nodes: 0")
         self.summary_graph_edges_label = QLabel("Graph Edges: 0")
         self.summary_graph_version_label = QLabel("Version: -")
@@ -250,6 +261,7 @@ class SymGraphTabView(QWidget):
             self.summary_conflict_count,
             self.summary_same_count,
             self.summary_selected_count,
+            self.summary_document_count,
             self.summary_graph_nodes_label,
             self.summary_graph_edges_label,
             self.summary_graph_version_label,
@@ -276,6 +288,7 @@ class SymGraphTabView(QWidget):
         self.conflict_table.setColumnWidth(1, 110)
         self.conflict_table.setColumnWidth(2, 130)
         self.conflict_table.setColumnWidth(5, 90)
+        self.conflict_table.setMinimumHeight(250)
         layout.addWidget(self.conflict_table)
 
         select_row = QHBoxLayout()
@@ -306,6 +319,27 @@ class SymGraphTabView(QWidget):
         apply_row.addWidget(self.apply_button)
         apply_row.addStretch()
         layout.addLayout(apply_row)
+
+        self.fetch_documents_table = QTableWidget()
+        self.fetch_documents_table.setColumnCount(5)
+        self.fetch_documents_table.setHorizontalHeaderLabels(
+            ["Select", "Title", "Size", "Date", "Version"]
+        )
+        self.fetch_documents_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.fetch_documents_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        fetch_docs_header = self.fetch_documents_table.horizontalHeader()
+        fetch_docs_header.setSectionResizeMode(0, QHeaderView.Fixed)
+        fetch_docs_header.setSectionResizeMode(1, QHeaderView.Stretch)
+        fetch_docs_header.setSectionResizeMode(2, QHeaderView.Fixed)
+        fetch_docs_header.setSectionResizeMode(3, QHeaderView.Fixed)
+        fetch_docs_header.setSectionResizeMode(4, QHeaderView.Fixed)
+        self.fetch_documents_table.setColumnWidth(0, 54)
+        self.fetch_documents_table.setColumnWidth(2, 90)
+        self.fetch_documents_table.setColumnWidth(3, 140)
+        self.fetch_documents_table.setColumnWidth(4, 80)
+        self.fetch_documents_table.setMaximumHeight(150)
+        layout.addWidget(QLabel("Documents"))
+        layout.addWidget(self.fetch_documents_table)
 
         self.fetch_progress_bar = QProgressBar()
         self.fetch_progress_bar.setVisible(False)
@@ -398,11 +432,13 @@ class SymGraphTabView(QWidget):
         push_summary_layout = QHBoxLayout(self.push_summary_frame)
         self.push_matching_count = QLabel("Matching: 0")
         self.push_selected_count = QLabel("Selected: 0")
+        self.push_documents_count = QLabel("Documents: 0")
         self.push_graph_nodes_label = QLabel("Graph Nodes: 0")
         self.push_graph_edges_label = QLabel("Graph Edges: 0")
         for label in (
             self.push_matching_count,
             self.push_selected_count,
+            self.push_documents_count,
             self.push_graph_nodes_label,
             self.push_graph_edges_label,
         ):
@@ -429,6 +465,7 @@ class SymGraphTabView(QWidget):
         self.push_preview_table.setColumnWidth(2, 100)
         self.push_preview_table.setColumnWidth(4, 90)
         self.push_preview_table.setColumnWidth(5, 100)
+        self.push_preview_table.setMinimumHeight(250)
         layout.addWidget(self.push_preview_table)
 
         push_select_row = QHBoxLayout()
@@ -443,6 +480,29 @@ class SymGraphTabView(QWidget):
         push_select_row.addWidget(self.push_invert_selection_button)
         push_select_row.addStretch()
         layout.addLayout(push_select_row)
+
+        self.push_documents_table = QTableWidget()
+        self.push_documents_table.setColumnCount(6)
+        self.push_documents_table.setHorizontalHeaderLabels(
+            ["Select", "Title", "Size", "Date", "Version", "Doc Type"]
+        )
+        self.push_documents_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.push_documents_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        push_docs_header = self.push_documents_table.horizontalHeader()
+        push_docs_header.setSectionResizeMode(0, QHeaderView.Fixed)
+        push_docs_header.setSectionResizeMode(1, QHeaderView.Stretch)
+        push_docs_header.setSectionResizeMode(2, QHeaderView.Fixed)
+        push_docs_header.setSectionResizeMode(3, QHeaderView.Fixed)
+        push_docs_header.setSectionResizeMode(4, QHeaderView.Fixed)
+        push_docs_header.setSectionResizeMode(5, QHeaderView.Fixed)
+        self.push_documents_table.setColumnWidth(0, 54)
+        self.push_documents_table.setColumnWidth(2, 90)
+        self.push_documents_table.setColumnWidth(3, 140)
+        self.push_documents_table.setColumnWidth(4, 80)
+        self.push_documents_table.setColumnWidth(5, 110)
+        self.push_documents_table.setMaximumHeight(150)
+        layout.addWidget(QLabel("Documents"))
+        layout.addWidget(self.push_documents_table)
 
         self.push_progress_bar = QProgressBar()
         self.push_progress_bar.setVisible(False)
@@ -517,6 +577,18 @@ class SymGraphTabView(QWidget):
             return "local"
         return "global"
 
+    @staticmethod
+    def _format_size(size_bytes: int) -> str:
+        if size_bytes >= 1024 * 1024:
+            return f"{size_bytes / (1024 * 1024):.1f} MB"
+        if size_bytes >= 1024:
+            return f"{size_bytes / 1024:.1f} KB"
+        return f"{size_bytes} B"
+
+    @staticmethod
+    def _format_version(version: Optional[int]) -> str:
+        return f"v{version}" if version else "New"
+
     def _set_checkbox_widget(self, table: QTableWidget, row: int, checked: bool):
         checkbox = QCheckBox()
         checkbox.setChecked(checked)
@@ -552,10 +624,16 @@ class SymGraphTabView(QWidget):
         self._update_selection_summaries()
 
     def _update_selection_summaries(self):
-        selected_fetch = sum(1 for _ in self._iter_checked_rows(self.conflict_table))
-        self.summary_selected_count.setText(f"Selected: {selected_fetch}")
-        selected_push = sum(1 for _ in self._iter_checked_rows(self.push_preview_table))
-        self.push_selected_count.setText(f"Selected: {selected_push}")
+        selected_fetch_symbols = sum(1 for _ in self._iter_checked_rows(self.conflict_table))
+        selected_fetch_documents = sum(1 for _ in self._iter_checked_rows(self.fetch_documents_table))
+        self.summary_selected_count.setText(
+            f"Selected: {selected_fetch_symbols} symbols / {selected_fetch_documents} docs"
+        )
+        selected_push_symbols = sum(1 for _ in self._iter_checked_rows(self.push_preview_table))
+        selected_push_documents = sum(1 for _ in self._iter_checked_rows(self.push_documents_table))
+        self.push_selected_count.setText(
+            f"Selected: {selected_push_symbols} symbols / {selected_push_documents} docs"
+        )
 
     def set_binary_info(self, name: str, sha256: str, local_metadata: Optional[Dict[str, Any]] = None):
         display_name = name or "<no binary loaded>"
@@ -708,6 +786,35 @@ class SymGraphTabView(QWidget):
         self.apply_button.setEnabled(bool(conflicts) or self._graph_preview is not None)
         self._update_selection_summaries()
 
+    def populate_fetch_documents(self, documents: List[Dict[str, Any]]):
+        self._pull_preview_documents = list(documents)
+        self.fetch_documents_table.setRowCount(0)
+        self.summary_document_count.setText(f"Documents: {len(documents)}")
+
+        for document in documents:
+            row = self.fetch_documents_table.rowCount()
+            self.fetch_documents_table.insertRow(row)
+            self._set_checkbox_widget(self.fetch_documents_table, row, True)
+
+            title_item = QTableWidgetItem(document.get("title", "Untitled Document"))
+            title_item.setData(Qt.UserRole + 1, document)
+            title_item.setFlags(title_item.flags() & ~Qt.ItemIsEditable)
+            self.fetch_documents_table.setItem(row, 1, title_item)
+
+            size_item = QTableWidgetItem(self._format_size(int(document.get("size_bytes", 0) or 0)))
+            size_item.setFlags(size_item.flags() & ~Qt.ItemIsEditable)
+            self.fetch_documents_table.setItem(row, 2, size_item)
+
+            date_item = QTableWidgetItem(document.get("updated_at") or document.get("created_at") or "-")
+            date_item.setFlags(date_item.flags() & ~Qt.ItemIsEditable)
+            self.fetch_documents_table.setItem(row, 3, date_item)
+
+            version_item = QTableWidgetItem(self._format_version(document.get("version")))
+            version_item.setFlags(version_item.flags() & ~Qt.ItemIsEditable)
+            self.fetch_documents_table.setItem(row, 4, version_item)
+
+        self._update_selection_summaries()
+
     def _add_conflict_row(self, conflict: ConflictEntry):
         row = self.conflict_table.rowCount()
         self.conflict_table.insertRow(row)
@@ -770,12 +877,15 @@ class SymGraphTabView(QWidget):
 
     def clear_conflicts(self):
         self.conflict_table.setRowCount(0)
+        self.fetch_documents_table.setRowCount(0)
         self._graph_preview = None
         self._graph_stats = None
+        self._pull_preview_documents = []
         self.summary_new_count.setText("New: 0")
         self.summary_conflict_count.setText("Conflicts: 0")
         self.summary_same_count.setText("Same: 0")
         self.summary_selected_count.setText("Selected: 0")
+        self.summary_document_count.setText("Documents: 0")
         self.clear_graph_preview_data()
         self.set_pull_status("", None)
         self.fetch_progress_bar.setVisible(False)
@@ -801,6 +911,15 @@ class SymGraphTabView(QWidget):
 
     def get_selected_addresses(self) -> List[int]:
         return [conflict.address for conflict in self.get_selected_conflicts()]
+
+    def get_selected_fetch_documents(self) -> List[Dict[str, Any]]:
+        selected = []
+        for row in self._iter_checked_rows(self.fetch_documents_table):
+            item = self.fetch_documents_table.item(row, 1)
+            document = item.data(Qt.UserRole + 1) if item else None
+            if document:
+                selected.append(document)
+        return selected
 
     def show_applying_page(self, message: str = "Applying symbols..."):
         self.fetch_progress_bar.setValue(0)
@@ -870,22 +989,33 @@ class SymGraphTabView(QWidget):
 
     def clear_push_preview(self):
         self._push_preview_symbols = []
+        self._push_preview_documents = []
         self._push_graph_data = None
         self._push_graph_stats = None
         self.push_preview_table.setRowCount(0)
+        self.push_documents_table.setRowCount(0)
         self.push_matching_count.setText("Matching: 0")
         self.push_selected_count.setText("Selected: 0")
+        self.push_documents_count.setText("Documents: 0")
         self.push_graph_nodes_label.setText("Graph Nodes: 0")
         self.push_graph_edges_label.setText("Graph Edges: 0")
 
-    def set_push_preview(self, symbols: List[Dict[str, Any]], graph_data=None, graph_stats=None):
+    def set_push_preview(
+        self,
+        symbols: List[Dict[str, Any]],
+        graph_data=None,
+        graph_stats=None,
+        documents: Optional[List[Dict[str, Any]]] = None,
+    ):
         self.clear_push_preview()
         self._push_preview_symbols = list(symbols)
+        self._push_preview_documents = list(documents or [])
         self._push_graph_data = graph_data
         self._push_graph_stats = graph_stats or {}
         selected_count = len(symbols)
 
         self.push_matching_count.setText(f"Matching: {len(symbols)}")
+        self.push_documents_count.setText(f"Documents: {len(self._push_preview_documents)}")
         self.push_graph_nodes_label.setText(f"Graph Nodes: {self._push_graph_stats.get('nodes', 0):,}")
         self.push_graph_edges_label.setText(f"Graph Edges: {self._push_graph_stats.get('edges', 0):,}")
 
@@ -922,6 +1052,39 @@ class SymGraphTabView(QWidget):
             self.push_preview_table.setItem(row, 5, provenance_item)
 
         self.push_selected_count.setText(f"Selected: {selected_count}")
+
+        for document in self._push_preview_documents:
+            row = self.push_documents_table.rowCount()
+            self.push_documents_table.insertRow(row)
+            self._set_checkbox_widget(self.push_documents_table, row, True)
+
+            title_item = QTableWidgetItem(document.get("title", "Untitled Document"))
+            title_item.setData(Qt.UserRole + 1, document)
+            title_item.setFlags(title_item.flags() & ~Qt.ItemIsEditable)
+            self.push_documents_table.setItem(row, 1, title_item)
+
+            size_item = QTableWidgetItem(self._format_size(int(document.get("size_bytes", 0) or 0)))
+            size_item.setFlags(size_item.flags() & ~Qt.ItemIsEditable)
+            self.push_documents_table.setItem(row, 2, size_item)
+
+            date_item = QTableWidgetItem(document.get("updated_at") or document.get("created_at") or "-")
+            date_item.setFlags(date_item.flags() & ~Qt.ItemIsEditable)
+            self.push_documents_table.setItem(row, 3, date_item)
+
+            version_item = QTableWidgetItem(self._format_version(document.get("version")))
+            version_item.setFlags(version_item.flags() & ~Qt.ItemIsEditable)
+            self.push_documents_table.setItem(row, 4, version_item)
+
+            type_combo = QComboBox()
+            for label, value in self.DOCUMENT_TYPE_OPTIONS:
+                type_combo.addItem(label, value)
+            current_type = document.get("doc_type") or "notes"
+            if current_type == "protocol_spec":
+                current_type = "api_doc"
+            combo_index = type_combo.findData(current_type)
+            type_combo.setCurrentIndex(combo_index if combo_index >= 0 else 0)
+            self.push_documents_table.setCellWidget(row, 5, type_combo)
+
         self._update_selection_summaries()
 
     def get_selected_push_symbols(self) -> List[Dict[str, Any]]:
@@ -931,6 +1094,19 @@ class SymGraphTabView(QWidget):
             symbol = item.data(Qt.UserRole + 1) if item else None
             if symbol:
                 selected.append(symbol)
+        return selected
+
+    def get_selected_push_documents(self) -> List[Dict[str, Any]]:
+        selected = []
+        for row in self._iter_checked_rows(self.push_documents_table):
+            item = self.push_documents_table.item(row, 1)
+            document = dict(item.data(Qt.UserRole + 1)) if item else None
+            if not document:
+                continue
+            widget = self.push_documents_table.cellWidget(row, 5)
+            if isinstance(widget, QComboBox):
+                document["doc_type"] = widget.currentData() or widget.currentText()
+            selected.append(document)
         return selected
 
     def get_push_graph_data(self):
@@ -956,7 +1132,8 @@ class SymGraphTabView(QWidget):
 
     def on_apply_clicked(self):
         selected = self.get_selected_addresses()
-        if selected or self._graph_preview:
+        selected_documents = self.get_selected_fetch_documents()
+        if selected or selected_documents or self._graph_preview:
             self.apply_selected_requested.emit(selected)
         else:
             self.set_pull_status("No items selected", success=False)
@@ -985,13 +1162,20 @@ class SymGraphTabView(QWidget):
 
     def on_push_select_all(self):
         self._set_all_rows(self.push_preview_table, True)
+        self._set_all_rows(self.push_documents_table, True)
 
     def on_push_deselect_all(self):
         self._set_all_rows(self.push_preview_table, False)
+        self._set_all_rows(self.push_documents_table, False)
 
     def on_push_invert_selection(self):
         for row in range(self.push_preview_table.rowCount()):
             widget = self.push_preview_table.cellWidget(row, 0)
+            checkbox = widget.findChild(QCheckBox) if widget else None
+            if checkbox:
+                checkbox.setChecked(not checkbox.isChecked())
+        for row in range(self.push_documents_table.rowCount()):
+            widget = self.push_documents_table.cellWidget(row, 0)
             checkbox = widget.findChild(QCheckBox) if widget else None
             if checkbox:
                 checkbox.setChecked(not checkbox.isChecked())
