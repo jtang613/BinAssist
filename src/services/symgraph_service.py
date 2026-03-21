@@ -11,7 +11,7 @@ import re
 import threading
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Tuple
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 try:
     import httpx
@@ -21,7 +21,7 @@ except ImportError:
 
 from .settings_service import settings_service
 from .models.symgraph_models import (
-    BinaryStats, Symbol, GraphNode, GraphEdge,
+    BinaryStats, BinaryRevision, Symbol, GraphNode, GraphEdge,
     SymbolExport, GraphExport, QueryResult, PushResult,
     PullPreviewResult, ConflictEntry, ConflictAction
 )
@@ -134,6 +134,26 @@ class SymGraphService:
     def base_url(self) -> str:
         """Get the configured API base URL."""
         return settings_service.get_symgraph_api_url().rstrip('/')
+
+    @property
+    def web_url(self) -> str:
+        """Get the configured web base URL derived from the SymGraph setting."""
+        parsed = urlparse(self.base_url)
+        netloc = parsed.netloc
+        if netloc.startswith("api.") and parsed.path in ("", "/"):
+            netloc = netloc[4:]
+
+        path = (parsed.path or "").rstrip("/")
+        if path.endswith("/api/v1"):
+            path = path[:-7]
+        elif path.endswith("/api"):
+            path = path[:-4]
+
+        return urlunparse((parsed.scheme, netloc, path or "", "", "", "")).rstrip("/")
+
+    def get_binary_url(self, sha256: str) -> str:
+        """Get the browser URL for a binary in the configured SymGraph instance."""
+        return f"{self.web_url}/binaries/{sha256}"
 
     @property
     def api_key(self) -> Optional[str]:
@@ -277,7 +297,7 @@ class SymGraphService:
         except httpx.RequestError as e:
             raise SymGraphNetworkError(f"Network error: {str(e)}")
 
-    async def get_binary_stats(self, sha256: str) -> Optional[BinaryStats]:
+    async def get_binary_stats(self, sha256: str, version: Optional[int] = None) -> Optional[BinaryStats]:
         """
         Get binary statistics from SymGraph (unauthenticated).
 
@@ -290,6 +310,8 @@ class SymGraphService:
         self._check_httpx()
 
         url = f"{self.base_url}/api/v1/binaries/{sha256}/stats"
+        if version is not None:
+            url += f"?version={version}"
         log.log_debug(f"Getting binary stats: {url}")
 
         try:
@@ -310,7 +332,45 @@ class SymGraphService:
         except httpx.RequestError as e:
             raise SymGraphNetworkError(f"Network error: {str(e)}")
 
-    async def query_binary(self, sha256: str) -> QueryResult:
+    async def list_binary_versions(self, sha256: str) -> List[BinaryRevision]:
+        """List accessible binary revisions for a binary."""
+        self._check_httpx()
+        self._check_auth()
+
+        url = f"{self.base_url}/api/v1/binaries/{sha256}/versions"
+        log.log_debug(f"Listing binary versions: {url}")
+
+        try:
+            async with httpx.AsyncClient(**self._client_kwargs(30.0)) as client:
+                response = await client.get(
+                    url,
+                    headers=self._get_headers(authenticated=True)
+                )
+
+                if response.status_code == 200:
+                    data = response.json() or {}
+                    revisions = data.get('revisions') if isinstance(data, dict) else []
+                    if not isinstance(revisions, list):
+                        return []
+                    return [BinaryRevision.from_dict(item) for item in revisions]
+                elif response.status_code in (401, 403):
+                    raise SymGraphAuthError("Invalid API key")
+                elif response.status_code == 404:
+                    return []
+                else:
+                    raise SymGraphAPIError(f"Error listing binary versions: {response.status_code}", response.status_code)
+
+        except httpx.TimeoutException:
+            raise SymGraphNetworkError(f"Timeout connecting to {self.base_url}")
+        except httpx.RequestError as e:
+            raise SymGraphNetworkError(f"Network error: {str(e)}")
+
+    async def query_binary(
+        self,
+        sha256: str,
+        version: Optional[int] = None,
+        include_versions: bool = False
+    ) -> QueryResult:
         """
         Query SymGraph for binary info (unauthenticated).
 
@@ -325,18 +385,35 @@ class SymGraphService:
             if not exists:
                 return QueryResult.not_found()
 
-            stats = await self.get_binary_stats(sha256)
-            if stats:
-                return QueryResult.found(stats)
-            else:
-                return QueryResult(exists=True)  # Exists but no stats available
+            revisions: List[BinaryRevision] = []
+            latest_revision: Optional[int] = None
+            if include_versions and self.has_api_key:
+                try:
+                    revisions = await self.list_binary_versions(sha256)
+                    latest_revision = revisions[0].version if revisions else None
+                except SymGraphServiceError as e:
+                    log.log_warn(f"Unable to list versions for {sha256[:16]}...: {e}")
+
+            effective_version = version if version is not None else latest_revision
+            stats = await self.get_binary_stats(sha256, version=effective_version)
+            return QueryResult.found(
+                stats=stats,
+                revisions=revisions,
+                latest_revision=latest_revision,
+                selected_revision=effective_version
+            )
 
         except SymGraphServiceError as e:
             return QueryResult.error_result(str(e))
 
     # === Authenticated Operations ===
 
-    async def get_symbols(self, sha256: str, symbol_type: Optional[str] = None) -> List[Symbol]:
+    async def get_symbols(
+        self,
+        sha256: str,
+        symbol_type: Optional[str] = None,
+        version: Optional[int] = None
+    ) -> List[Symbol]:
         """
         Get symbols for a binary (authenticated).
 
@@ -351,8 +428,13 @@ class SymGraphService:
         self._check_auth()
 
         url = f"{self.base_url}/api/v1/binaries/{sha256}/symbols"
+        params = []
         if symbol_type:
-            url += f"?type={symbol_type}"
+            params.append(f"type={symbol_type}")
+        if version is not None:
+            params.append(f"version={version}")
+        if params:
+            url += "?" + "&".join(params)
         log.log_debug(f"Getting symbols: {url}")
 
         try:
@@ -590,7 +672,7 @@ class SymGraphService:
         except httpx.RequestError as e:
             raise SymGraphNetworkError(f"Network error: {str(e)}")
 
-    async def export_graph(self, sha256: str) -> Optional[GraphExport]:
+    async def export_graph(self, sha256: str, version: Optional[int] = None) -> Optional[GraphExport]:
         """
         Export graph data for a binary (authenticated).
 
@@ -604,6 +686,8 @@ class SymGraphService:
         self._check_auth()
 
         url = f"{self.base_url}/api/v1/binaries/{sha256}/graph/export"
+        if version is not None:
+            url += f"?version={version}"
         log.log_debug(f"Exporting graph: {url}")
 
         try:

@@ -95,6 +95,31 @@ class BinaryStats:
 
 
 @dataclass
+class BinaryRevision:
+    """Accessible binary revision metadata."""
+    version: int
+    created_at: Optional[str] = None
+    visibility: Optional[str] = None
+    is_latest: bool = False
+    owner_username: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'BinaryRevision':
+        return cls(
+            version=int(data.get('version', 0) or 0),
+            created_at=data.get('created_at'),
+            visibility=data.get('visibility'),
+            is_latest=bool(data.get('is_latest', False)),
+            owner_username=data.get('owner_username')
+        )
+
+    @property
+    def display_label(self) -> str:
+        suffix = " (Latest)" if self.is_latest else ""
+        return f"v{self.version}{suffix}"
+
+
+@dataclass
 class Symbol:
     """A symbol from SymGraph."""
     address: int
@@ -302,7 +327,7 @@ class ConflictEntry:
             local_name=name,
             remote_name=name,
             action=ConflictAction.SAME,
-            selected=True,  # Same items checked by default
+            selected=False,  # Same items are visible but skipped by default
             remote_symbol=remote_symbol
         )
 
@@ -397,12 +422,27 @@ class QueryResult:
     """Result of a SymGraph query operation."""
     exists: bool
     stats: Optional[BinaryStats] = None
+    revisions: List[BinaryRevision] = field(default_factory=list)
+    latest_revision: Optional[int] = None
+    selected_revision: Optional[int] = None
     error: Optional[str] = None
 
     @classmethod
-    def found(cls, stats: BinaryStats) -> 'QueryResult':
+    def found(
+        cls,
+        stats: Optional[BinaryStats] = None,
+        revisions: Optional[List[BinaryRevision]] = None,
+        latest_revision: Optional[int] = None,
+        selected_revision: Optional[int] = None
+    ) -> 'QueryResult':
         """Create a successful query result."""
-        return cls(exists=True, stats=stats)
+        return cls(
+            exists=True,
+            stats=stats,
+            revisions=revisions or [],
+            latest_revision=latest_revision,
+            selected_revision=selected_revision
+        )
 
     @classmethod
     def not_found(cls) -> 'QueryResult':

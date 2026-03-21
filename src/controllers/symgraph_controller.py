@@ -10,7 +10,8 @@ import asyncio
 import json
 from typing import Dict, List, Optional, Any, Callable
 from PySide6.QtWidgets import QMessageBox
-from PySide6.QtCore import QThread, Signal, QObject
+from PySide6.QtCore import QThread, Signal, QObject, QUrl
+from PySide6.QtGui import QDesktopServices
 
 from ..services.analysis_db_service import analysis_db_service
 from ..services.graphrag.graph_store import GraphStore
@@ -86,7 +87,9 @@ class QueryWorker(QThread):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                result = loop.run_until_complete(symgraph_service.query_binary(self.sha256))
+                result = loop.run_until_complete(
+                    symgraph_service.query_binary(self.sha256, include_versions=True)
+                )
                 self.query_complete.emit(result)
             finally:
                 loop.close()
@@ -217,6 +220,8 @@ class PullPreviewWorker(QThread):
         try:
             symbol_types = self.pull_config.get('symbol_types', ['function'])
             min_confidence = self.pull_config.get('min_confidence', 0.0)
+            version = self.pull_config.get('version')
+            name_filter = (self.pull_config.get('name_filter') or '').strip().lower()
 
             # Step 1: Fetch remote symbols from API for each selected type
             all_remote_symbols = []
@@ -233,8 +238,13 @@ class PullPreviewWorker(QThread):
 
                     self.progress.emit(f"Fetching {sym_type} symbols...")
                     remote_symbols = loop.run_until_complete(
-                        symgraph_service.get_symbols(self.sha256, symbol_type=sym_type)
+                        symgraph_service.get_symbols(self.sha256, symbol_type=sym_type, version=version)
                     )
+                    if name_filter:
+                        remote_symbols = [
+                            symbol for symbol in remote_symbols
+                            if name_filter in (symbol.display_name or '').lower()
+                        ]
                     # Handle None or empty results safely
                     if remote_symbols:
                         all_remote_symbols.extend(remote_symbols)
@@ -246,7 +256,7 @@ class PullPreviewWorker(QThread):
                     try:
                         self.progress.emit("Fetching graph data...")
                         graph_export = loop.run_until_complete(
-                            symgraph_service.export_graph(self.sha256)
+                            symgraph_service.export_graph(self.sha256, version=version)
                         )
                         if graph_export:
                             graph_stats = self._get_graph_stats(graph_export)
@@ -603,6 +613,9 @@ class SymGraphController(QObject):
         self._graph_export = None
         self._graph_stats = None
         self._pending_push_request = None
+        self._push_preview_symbols: List[Dict[str, Any]] = []
+        self._push_preview_graph_data: Optional[Dict[str, Any]] = None
+        self._push_preview_graph_stats: Dict[str, int] = {}
 
         # Connect view signals
         self._connect_signals()
@@ -613,7 +626,9 @@ class SymGraphController(QObject):
     def _connect_signals(self):
         """Connect view signals to controller methods."""
         self.view.query_requested.connect(self.handle_query)
-        self.view.push_requested.connect(self.handle_push)
+        self.view.open_binary_requested.connect(self.handle_open_binary)
+        self.view.push_preview_requested.connect(self.handle_push_preview)
+        self.view.push_execute_requested.connect(self.handle_push)
         self.view.pull_preview_requested.connect(self.handle_pull_preview)
         self.view.apply_selected_requested.connect(self.handle_apply_selected)
         self.view.apply_all_new_requested.connect(self.handle_apply_all_new)
@@ -641,12 +656,30 @@ class SymGraphController(QObject):
                         name = name[:-5]
 
                 sha256 = self._get_sha256()
-                self.view.set_binary_info(name, sha256)
+                local_metadata: Dict[str, Any] = {}
+                try:
+                    local_metadata['functions'] = len(list(self.bv.functions))
+                except Exception:
+                    pass
+                try:
+                    if sha256:
+                        graph_stats = GraphStore().get_graph_stats(sha256)
+                        if graph_stats.get('node_count') is not None:
+                            local_metadata['graph_nodes'] = graph_stats.get('node_count')
+                        elif graph_stats.get('nodes') is not None:
+                            local_metadata['graph_nodes'] = graph_stats.get('nodes')
+                        if graph_stats.get('edge_count') is not None:
+                            local_metadata['graph_edges'] = graph_stats.get('edge_count')
+                        elif graph_stats.get('edges') is not None:
+                            local_metadata['graph_edges'] = graph_stats.get('edges')
+                except Exception:
+                    pass
+                self.view.set_binary_info(name, sha256, local_metadata=local_metadata or None)
             except Exception as e:
                 log.log_error(f"Error getting binary info: {e}")
-                self.view.set_binary_info("<error>", None)
+                self.view.set_binary_info("<error>", None, local_metadata=None)
         else:
-            self.view.set_binary_info("<no binary loaded>", None)
+            self.view.set_binary_info("<no binary loaded>", None, local_metadata=None)
 
     def _get_symbol_provenance(self, is_auto: bool, address: int, symbol_type: str) -> str:
         """Determine symbol provenance: decompiler, llm, or user."""
@@ -707,6 +740,7 @@ class SymGraphController(QObject):
         log.log_info(f"Querying SymGraph for: {sha256}")
         self.view.set_query_status("Checking...")
         self.view.hide_stats()
+        self.view.set_open_binary_url(None)
         self.view.set_buttons_enabled(False)
 
         # Start query worker
@@ -722,29 +756,92 @@ class SymGraphController(QObject):
 
         if result.error:
             self.view.set_query_status(f"Error: {result.error}", found=False)
+            self.view.set_open_binary_url(None)
             return
 
         if result.exists:
             self.view.set_query_status("Found in SymGraph", found=True)
+            self.view.set_open_binary_url(symgraph_service.get_binary_url(self._get_sha256()))
             if result.stats:
                 self.view.set_stats(
                     symbols=result.stats.symbol_count,
                     functions=result.stats.function_count,
                     nodes=result.stats.graph_node_count,
-                    last_updated=result.stats.last_queried_at
+                    last_updated=result.stats.last_queried_at,
+                    revisions=result.revisions,
+                    latest_revision=result.latest_revision,
+                    selected_revision=result.selected_revision
                 )
         else:
             self.view.set_query_status("Not found in SymGraph", found=False)
+            self.view.set_open_binary_url(None)
             self.view.hide_stats()
 
     def _on_query_error(self, error_msg: str):
         """Handle query error."""
         self.view.set_buttons_enabled(True)
         self.view.set_query_status(f"Error: {error_msg}", found=False)
+        self.view.set_open_binary_url(None)
         log.log_error(f"Query error: {error_msg}")
 
-    def handle_push(self, scope: str, push_symbols: bool, push_graph: bool, visibility: str):
-        """Handle push request."""
+    def handle_open_binary(self):
+        """Open the current binary in the SymGraph web UI."""
+        url = self.view.get_open_binary_url()
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
+
+    def handle_push_preview(self):
+        """Build a filtered local preview for pushing to SymGraph."""
+        sha256 = self._get_sha256()
+        if not sha256:
+            self._show_error("No Binary", "No binary loaded or unable to compute hash.")
+            return
+
+        push_config = self.view.get_push_config()
+        scope = push_config.get('scope', PushScope.CURRENT_FUNCTION.value)
+        symbol_types = push_config.get('symbol_types', [])
+        name_filter = (push_config.get('name_filter') or '').strip().lower()
+        push_graph = bool(push_config.get('push_graph'))
+
+        symbols_data = self._collect_local_symbols(scope)
+        if not symbol_types:
+            symbols_data = []
+        else:
+            symbols_data = [
+                symbol for symbol in symbols_data
+                if self._matches_push_type_filter(symbol, symbol_types)
+            ]
+        if name_filter:
+            symbols_data = [
+                symbol for symbol in symbols_data
+                if name_filter in (symbol.get('name') or symbol.get('content') or '').lower()
+            ]
+
+        graph_data = self._collect_local_graph(scope) if push_graph else None
+        graph_stats = {
+            'nodes': len(graph_data.get('nodes', [])) if graph_data else 0,
+            'edges': len(graph_data.get('edges', [])) if graph_data else 0,
+        }
+
+        self._push_preview_symbols = symbols_data
+        self._push_preview_graph_data = graph_data
+        self._push_preview_graph_stats = graph_stats
+        self.view.set_push_preview(symbols_data, graph_data=graph_data, graph_stats=graph_stats)
+
+        summary_parts = [f"{len(symbols_data)} symbols ready"]
+        if graph_data:
+            summary_parts.append(f"{graph_stats['nodes']} nodes")
+            summary_parts.append(f"{graph_stats['edges']} edges")
+        self.view.set_push_status("Preview ready: " + ", ".join(summary_parts), success=True)
+
+    def handle_push(
+        self,
+        scope: Optional[str] = None,
+        push_symbols: Optional[bool] = None,
+        push_graph: Optional[bool] = None,
+        visibility: Optional[str] = None
+    ):
+        """Execute the selected push preview."""
         sha256 = self._get_sha256()
         if not sha256:
             self._show_error("No Binary", "No binary loaded or unable to compute hash.")
@@ -756,44 +853,39 @@ class SymGraphController(QObject):
                 "Add your API key in Settings > SymGraph")
             return
 
+        push_config = self.view.get_push_config()
+        scope = scope or push_config.get('scope', PushScope.CURRENT_FUNCTION.value)
+        visibility = visibility or push_config.get('visibility', 'public')
+        selected_symbols = self.view.get_selected_push_symbols()
+        use_graph = push_graph if push_graph is not None else bool(push_config.get('push_graph'))
+        graph_data = self._push_preview_graph_data if use_graph else None
+
+        if not selected_symbols and not graph_data:
+            self.view.set_push_status("Preview the push and select at least one row first", success=False)
+            return
+
         log.log_info(
-            f"Pushing to SymGraph: scope={scope}, symbols={push_symbols}, "
-            f"graph={push_graph}, visibility={visibility}"
+            f"Pushing to SymGraph: scope={scope}, symbols={len(selected_symbols)}, "
+            f"graph={graph_data is not None}, visibility={visibility}"
         )
+        self.view.show_push_progress("Creating revision...")
         self.view.set_push_status("Pushing...", success=None)
         self.view.set_buttons_enabled(False)
-
-        # Collect data to push
-        symbols_data = []
-        graph_data = None
-
-        if push_symbols:
-            symbols_data = self._collect_local_symbols(scope)
-            log.log_info(f"Collected {len(symbols_data)} symbols to push")
-
-        if push_graph:
-            graph_data = self._collect_local_graph(scope)
-            if graph_data:
-                log.log_info(f"Collected graph data: {len(graph_data.get('nodes', []))} nodes")
-
-        if not symbols_data and not graph_data:
-            self.view.set_push_status("No data to push", success=False)
-            self.view.set_buttons_enabled(True)
-            return
+        self.view.update_push_progress(5, 100, "Preparing selected items...")
 
         # Collect fingerprints for matching (BuildID for ELF, PDB GUID for PE)
         fingerprints = self._collect_fingerprints()
         self._pending_push_request = {
             'scope': scope,
-            'push_symbols': push_symbols,
-            'push_graph': push_graph,
+            'push_symbols': bool(selected_symbols),
+            'push_graph': graph_data is not None,
             'visibility': visibility
         }
 
         # Start push worker
         self.push_worker = PushWorker(
             sha256,
-            symbols_data,
+            selected_symbols,
             graph_data,
             visibility=visibility,
             fingerprints=fingerprints
@@ -806,6 +898,7 @@ class SymGraphController(QObject):
     def _on_push_complete(self, result: PushResult):
         """Handle push completion."""
         self.view.set_buttons_enabled(True)
+        self.view.hide_push_progress()
 
         if result.success:
             msg_parts = []
@@ -833,6 +926,7 @@ class SymGraphController(QObject):
     def _on_push_error(self, error_msg: str):
         """Handle push error."""
         self.view.set_buttons_enabled(True)
+        self.view.hide_push_progress()
         self.view.set_push_status(f"Error: {error_msg}", success=False)
         log.log_error(f"Push error: {error_msg}")
 
@@ -859,6 +953,13 @@ class SymGraphController(QObject):
             return
 
         self.view.set_push_status(f"Failed: {result.error or 'Visibility denied'}", success=False)
+
+    @staticmethod
+    def _matches_push_type_filter(symbol: Dict[str, Any], selected_types: List[str]) -> bool:
+        symbol_type = str(symbol.get('symbol_type') or '').lower()
+        if symbol_type in selected_types:
+            return True
+        return symbol_type in ('type', 'enum', 'struct') and 'type' in selected_types
 
     def handle_pull_preview(self):
         """Handle pull preview request."""
@@ -947,7 +1048,7 @@ class SymGraphController(QObject):
     def _on_pull_preview_finished(self):
         """Handle pull preview worker finished (cleanup)."""
         self.view.set_buttons_enabled(True)
-        self.view.set_pull_button_text("Pull & Preview")
+        self.view.set_pull_button_text("Preview Fetch")
 
     def _on_pull_preview_error(self, error_msg: str):
         """Handle pull preview error."""
