@@ -25,14 +25,18 @@ class GraphRAGQueryEngine:
         callers = [self._node_name(n) for n in self.graph_store.get_callers(self.binary_hash, node.id, "calls")]
         callees = [self._node_name(n) for n in self._get_callees(node.id)]
         has_semantic = bool(node.llm_summary)
-        has_structure = bool(node.raw_code or callers or callees)
+        decompiled_code = node.get_decompiled_code()
+        disassembly = node.disassembly
+        has_structure = bool(decompiled_code or disassembly or callers or callees)
 
         summary = node.llm_summary or "(LLM analysis pending - structure data available below)"
-        raw_code = self._truncate(node.raw_code, 2000) if node.raw_code else None
+        truncated_decompiled = self._truncate(decompiled_code, 2000) if decompiled_code else None
+        truncated_disassembly = self._truncate(disassembly, 2000) if disassembly else None
 
         return {
             "name": self._node_name(node),
             "address": f"0x{node.address:x}",
+            "signature": node.signature,
             "has_semantic_analysis": has_semantic,
             "has_structure_data": has_structure,
             "summary": summary,
@@ -42,7 +46,9 @@ class GraphRAGQueryEngine:
             "callers": callers,
             "callees": callees,
             "community": None,
-            "raw_code": raw_code,
+            "decompiled_code": truncated_decompiled,
+            "disassembly": truncated_disassembly,
+            "raw_code": truncated_decompiled,
         }
 
     def search_semantic(self, query: str, limit: int) -> List[Dict[str, object]]:

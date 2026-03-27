@@ -64,6 +64,50 @@ class GraphStore:
     def _now_ms() -> int:
         return int(time.time() * 1000)
 
+    @staticmethod
+    def _graph_node_select(prefix: str = "") -> str:
+        qualifier = f"{prefix}." if prefix else ""
+        return (
+            f"{qualifier}id, {qualifier}binary_id, {qualifier}type, {qualifier}address, {qualifier}name, "
+            f"{qualifier}signature, {qualifier}decompiled_code, {qualifier}disassembly, {qualifier}raw_content, "
+            f"{qualifier}llm_summary, {qualifier}confidence, {qualifier}embedding, {qualifier}security_flags, "
+            f"{qualifier}network_apis, {qualifier}file_io_apis, {qualifier}ip_addresses, {qualifier}urls, "
+            f"{qualifier}file_paths, {qualifier}domains, {qualifier}registry_keys, {qualifier}risk_level, "
+            f"{qualifier}activity_profile, {qualifier}analysis_depth, {qualifier}created_at, {qualifier}updated_at, "
+            f"{qualifier}is_stale, {qualifier}user_edited"
+        )
+
+    def _row_to_node(self, row: Tuple[Any, ...]) -> GraphNode:
+        return GraphNode(
+            id=row[0],
+            binary_hash=row[1],
+            node_type=row[2],
+            address=row[3],
+            name=row[4],
+            signature=row[5],
+            decompiled_code=row[6] or row[8],
+            disassembly=row[7],
+            raw_code=row[6] or row[8],
+            llm_summary=row[9],
+            confidence=row[10] if row[10] is not None else 0.0,
+            embedding=row[11],
+            security_flags=self._deserialize_list(row[12]),
+            network_apis=self._deserialize_list(row[13]),
+            file_io_apis=self._deserialize_list(row[14]),
+            ip_addresses=self._deserialize_list(row[15]),
+            urls=self._deserialize_list(row[16]),
+            file_paths=self._deserialize_list(row[17]),
+            domains=self._deserialize_list(row[18]),
+            registry_keys=self._deserialize_list(row[19]),
+            risk_level=row[20],
+            activity_profile=row[21],
+            analysis_depth=row[22] if row[22] is not None else 0,
+            created_at=row[23],
+            updated_at=row[24],
+            is_stale=bool(row[25]),
+            user_edited=bool(row[26]),
+        )
+
     def get_node_by_address(self, binary_hash: str, node_type: str, address: int) -> Optional[GraphNode]:
         if not binary_hash:
             return None
@@ -71,44 +115,18 @@ class GraphStore:
             conn = self.analysis_db.get_connection()
             try:
                 cursor = conn.cursor()
-                cursor.execute('''
-                    SELECT id, binary_id, type, address, name, raw_content, llm_summary,
-                           confidence, embedding, security_flags, network_apis, file_io_apis,
-                           ip_addresses, urls, file_paths, domains, registry_keys, risk_level,
-                           activity_profile, analysis_depth, created_at, updated_at,
-                           is_stale, user_edited
+                cursor.execute(
+                    f'''
+                    SELECT {self._graph_node_select()}
                     FROM graph_nodes
                     WHERE binary_id = ? AND type = ? AND address = ?
-                ''', (binary_hash, node_type, address))
+                    ''',
+                    (binary_hash, node_type, address),
+                )
                 row = cursor.fetchone()
                 if not row:
                     return None
-                return GraphNode(
-                    id=row[0],
-                    binary_hash=row[1],
-                    node_type=row[2],
-                    address=row[3],
-                    name=row[4],
-                    raw_code=row[5],
-                    llm_summary=row[6],
-                    confidence=row[7] if row[7] is not None else 0.0,
-                    embedding=row[8],
-                    security_flags=self._deserialize_list(row[9]),
-                    network_apis=self._deserialize_list(row[10]),
-                    file_io_apis=self._deserialize_list(row[11]),
-                    ip_addresses=self._deserialize_list(row[12]),
-                    urls=self._deserialize_list(row[13]),
-                    file_paths=self._deserialize_list(row[14]),
-                    domains=self._deserialize_list(row[15]),
-                    registry_keys=self._deserialize_list(row[16]),
-                    risk_level=row[17],
-                    activity_profile=row[18],
-                    analysis_depth=row[19] if row[19] is not None else 0,
-                    created_at=row[20],
-                    updated_at=row[21],
-                    is_stale=bool(row[22]),
-                    user_edited=bool(row[23]),
-                )
+                return self._row_to_node(row)
             finally:
                 conn.close()
 
@@ -119,44 +137,18 @@ class GraphStore:
             conn = self.analysis_db.get_connection()
             try:
                 cursor = conn.cursor()
-                cursor.execute('''
-                    SELECT id, binary_id, type, address, name, raw_content, llm_summary,
-                           confidence, embedding, security_flags, network_apis, file_io_apis,
-                           ip_addresses, urls, file_paths, domains, registry_keys, risk_level,
-                           activity_profile, analysis_depth, created_at, updated_at,
-                           is_stale, user_edited
+                cursor.execute(
+                    f'''
+                    SELECT {self._graph_node_select()}
                     FROM graph_nodes
                     WHERE id = ?
-                ''', (str(node_id),))
+                    ''',
+                    (str(node_id),),
+                )
                 row = cursor.fetchone()
                 if not row:
                     return None
-                return GraphNode(
-                    id=row[0],
-                    binary_hash=row[1],
-                    node_type=row[2],
-                    address=row[3],
-                    name=row[4],
-                    raw_code=row[5],
-                    llm_summary=row[6],
-                    confidence=row[7] if row[7] is not None else 0.0,
-                    embedding=row[8],
-                    security_flags=self._deserialize_list(row[9]),
-                    network_apis=self._deserialize_list(row[10]),
-                    file_io_apis=self._deserialize_list(row[11]),
-                    ip_addresses=self._deserialize_list(row[12]),
-                    urls=self._deserialize_list(row[13]),
-                    file_paths=self._deserialize_list(row[14]),
-                    domains=self._deserialize_list(row[15]),
-                    registry_keys=self._deserialize_list(row[16]),
-                    risk_level=row[17],
-                    activity_profile=row[18],
-                    analysis_depth=row[19] if row[19] is not None else 0,
-                    created_at=row[20],
-                    updated_at=row[21],
-                    is_stale=bool(row[22]),
-                    user_edited=bool(row[23]),
-                )
+                return self._row_to_node(row)
             finally:
                 conn.close()
 
@@ -186,18 +178,21 @@ class GraphStore:
                 cursor = conn.cursor()
                 cursor.execute('''
                     INSERT INTO graph_nodes (
-                        id, type, address, binary_id, name, raw_content, llm_summary,
+                        id, type, address, binary_id, name, signature, decompiled_code, disassembly, raw_content, llm_summary,
                         confidence, embedding, security_flags, network_apis, file_io_apis,
                         ip_addresses, urls, file_paths, domains, registry_keys, risk_level,
                         activity_profile, analysis_depth, created_at, updated_at, is_stale,
                         user_edited
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         -- STRUCTURAL DATA: Always update from fresh extraction
                         type = excluded.type,
                         address = excluded.address,
                         binary_id = excluded.binary_id,
                         name = excluded.name,
+                        signature = COALESCE(excluded.signature, graph_nodes.signature),
+                        decompiled_code = COALESCE(excluded.decompiled_code, graph_nodes.decompiled_code),
+                        disassembly = COALESCE(excluded.disassembly, graph_nodes.disassembly),
                         raw_content = COALESCE(excluded.raw_content, graph_nodes.raw_content),
                         security_flags = excluded.security_flags,
                         network_apis = excluded.network_apis,
@@ -224,7 +219,10 @@ class GraphStore:
                     node.address,
                     node.binary_hash,
                     node.name,
-                    node.raw_code,
+                    node.signature,
+                    node.get_decompiled_code(),
+                    node.disassembly,
+                    node.get_decompiled_code(),
                     node.llm_summary,
                     node.confidence,
                     node.embedding,
@@ -340,18 +338,16 @@ class GraphStore:
             try:
                 cursor = conn.cursor()
                 # Use DISTINCT to prevent duplicate nodes from duplicate edges
-                cursor.execute('''
-                    SELECT DISTINCT n.id, n.binary_id, n.type, n.address, n.name, n.raw_content,
-                           n.llm_summary, n.confidence, n.embedding, n.security_flags,
-                           n.network_apis, n.file_io_apis, n.ip_addresses, n.urls,
-                           n.file_paths, n.domains, n.registry_keys, n.risk_level,
-                           n.activity_profile, n.analysis_depth, n.created_at, n.updated_at,
-                           n.is_stale, n.user_edited
+                cursor.execute(
+                    f'''
+                    SELECT DISTINCT {self._graph_node_select("n")}
                     FROM graph_edges e
                     JOIN graph_nodes n ON n.id = e.source_id
                     JOIN graph_nodes t ON t.id = e.target_id
                     WHERE t.id = ? AND e.type = ? AND n.binary_id = ? AND t.binary_id = ?
-                ''', (str(node_id), edge_type, binary_hash, binary_hash))
+                    ''',
+                    (str(node_id), edge_type, binary_hash, binary_hash),
+                )
                 rows = cursor.fetchall()
                 callers = []
                 seen_ids = set()  # Additional deduplication by node ID
@@ -360,32 +356,7 @@ class GraphStore:
                     if caller_id in seen_ids:
                         continue
                     seen_ids.add(caller_id)
-                    callers.append(GraphNode(
-                        id=caller_id,
-                        binary_hash=row[1],
-                        node_type=row[2],
-                        address=row[3],
-                        name=row[4],
-                        raw_code=row[5],
-                        llm_summary=row[6],
-                        confidence=row[7] if row[7] is not None else 0.0,
-                        embedding=row[8],
-                        security_flags=self._deserialize_list(row[9]),
-                        network_apis=self._deserialize_list(row[10]),
-                        file_io_apis=self._deserialize_list(row[11]),
-                        ip_addresses=self._deserialize_list(row[12]),
-                        urls=self._deserialize_list(row[13]),
-                        file_paths=self._deserialize_list(row[14]),
-                        domains=self._deserialize_list(row[15]),
-                        registry_keys=self._deserialize_list(row[16]),
-                        risk_level=row[17],
-                        activity_profile=row[18],
-                        analysis_depth=row[19] if row[19] is not None else 0,
-                        created_at=row[20],
-                        updated_at=row[21],
-                        is_stale=bool(row[22]),
-                        user_edited=bool(row[23]),
-                    ))
+                    callers.append(self._row_to_node(row))
                 return callers
             finally:
                 conn.close()
@@ -685,7 +656,10 @@ class GraphStore:
                 node.address,
                 node.binary_hash,
                 node.name,
-                node.raw_code,
+                node.signature,
+                node.get_decompiled_code(),
+                node.disassembly,
+                node.get_decompiled_code(),
                 node.llm_summary,
                 node.confidence,
                 node.embedding,
@@ -712,18 +686,21 @@ class GraphStore:
                 cursor = conn.cursor()
                 cursor.executemany('''
                     INSERT INTO graph_nodes (
-                        id, type, address, binary_id, name, raw_content, llm_summary,
+                        id, type, address, binary_id, name, signature, decompiled_code, disassembly, raw_content, llm_summary,
                         confidence, embedding, security_flags, network_apis, file_io_apis,
                         ip_addresses, urls, file_paths, domains, registry_keys, risk_level,
                         activity_profile, analysis_depth, created_at, updated_at, is_stale,
                         user_edited
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         -- STRUCTURAL DATA: Always update from fresh extraction
                         type = excluded.type,
                         address = excluded.address,
                         binary_id = excluded.binary_id,
                         name = excluded.name,
+                        signature = COALESCE(excluded.signature, graph_nodes.signature),
+                        decompiled_code = COALESCE(excluded.decompiled_code, graph_nodes.decompiled_code),
+                        disassembly = COALESCE(excluded.disassembly, graph_nodes.disassembly),
                         raw_content = COALESCE(excluded.raw_content, graph_nodes.raw_content),
                         security_flags = excluded.security_flags,
                         network_apis = excluded.network_apis,
@@ -822,60 +799,28 @@ class GraphStore:
             try:
                 cursor = conn.cursor()
                 try:
-                    cursor.execute('''
-                        SELECT n.id, n.binary_id, n.type, n.address, n.name, n.raw_content,
-                               n.llm_summary, n.confidence, n.embedding, n.security_flags,
-                               n.network_apis, n.file_io_apis, n.ip_addresses, n.urls,
-                               n.file_paths, n.domains, n.registry_keys, n.risk_level,
-                               n.activity_profile, n.analysis_depth, n.created_at, n.updated_at,
-                               n.is_stale, n.user_edited
+                    cursor.execute(f'''
+                        SELECT {self._graph_node_select("n")}
                         FROM node_fts f
                         JOIN graph_nodes n ON n.id = f.id
                         WHERE n.binary_id = ? AND node_fts MATCH ?
                         LIMIT ?
                     ''', (binary_hash, query, limit))
                 except Exception:
-                    cursor.execute('''
-                        SELECT id, binary_id, type, address, name, raw_content,
-                               llm_summary, confidence, embedding, security_flags,
-                               network_apis, file_io_apis, ip_addresses, urls,
-                               file_paths, domains, registry_keys, risk_level,
-                               activity_profile, analysis_depth, created_at, updated_at,
-                               is_stale, user_edited
+                    cursor.execute(
+                        f'''
+                        SELECT {self._graph_node_select()}
                         FROM graph_nodes
-                        WHERE binary_id = ? AND (name LIKE ? OR llm_summary LIKE ?)
+                        WHERE binary_id = ? AND (name LIKE ? OR signature LIKE ? OR llm_summary LIKE ?)
                         LIMIT ?
-                    ''', (binary_hash, f"%{query}%", f"%{query}%", limit))
+                        ''',
+                        (binary_hash, f"%{query}%", f"%{query}%", f"%{query}%", limit),
+                    )
 
                 rows = cursor.fetchall()
                 results = []
                 for row in rows:
-                    results.append(GraphNode(
-                        id=row[0],
-                        binary_hash=row[1],
-                        node_type=row[2],
-                        address=row[3],
-                        name=row[4],
-                        raw_code=row[5],
-                        llm_summary=row[6],
-                        confidence=row[7] if row[7] is not None else 0.0,
-                        embedding=row[8],
-                        security_flags=self._deserialize_list(row[9]),
-                        network_apis=self._deserialize_list(row[10]),
-                        file_io_apis=self._deserialize_list(row[11]),
-                        ip_addresses=self._deserialize_list(row[12]),
-                        urls=self._deserialize_list(row[13]),
-                        file_paths=self._deserialize_list(row[14]),
-                        domains=self._deserialize_list(row[15]),
-                        registry_keys=self._deserialize_list(row[16]),
-                        risk_level=row[17],
-                        activity_profile=row[18],
-                        analysis_depth=row[19] if row[19] is not None else 0,
-                        created_at=row[20],
-                        updated_at=row[21],
-                        is_stale=bool(row[22]),
-                        user_edited=bool(row[23]),
-                    ))
+                    results.append(self._row_to_node(row))
                 return results
             finally:
                 conn.close()
@@ -888,47 +833,20 @@ class GraphStore:
             conn = self.analysis_db.get_connection()
             try:
                 cursor = conn.cursor()
-                cursor.execute('''
-                    SELECT id, binary_id, type, address, name, raw_content,
-                           llm_summary, confidence, embedding, security_flags,
-                           network_apis, file_io_apis, ip_addresses, urls,
-                           file_paths, domains, registry_keys, risk_level,
-                           activity_profile, analysis_depth, created_at, updated_at,
-                           is_stale, user_edited
+                cursor.execute(
+                    f'''
+                    SELECT {self._graph_node_select()}
                     FROM graph_nodes
                     WHERE binary_id = ?
                       AND (is_stale = 1 OR llm_summary IS NULL OR llm_summary = '')
                     LIMIT ?
-                ''', (binary_hash, limit_value))
+                    ''',
+                    (binary_hash, limit_value),
+                )
                 rows = cursor.fetchall()
                 results = []
                 for row in rows:
-                    results.append(GraphNode(
-                        id=row[0],
-                        binary_hash=row[1],
-                        node_type=row[2],
-                        address=row[3],
-                        name=row[4],
-                        raw_code=row[5],
-                        llm_summary=row[6],
-                        confidence=row[7] if row[7] is not None else 0.0,
-                        embedding=row[8],
-                        security_flags=self._deserialize_list(row[9]),
-                        network_apis=self._deserialize_list(row[10]),
-                        file_io_apis=self._deserialize_list(row[11]),
-                        ip_addresses=self._deserialize_list(row[12]),
-                        urls=self._deserialize_list(row[13]),
-                        file_paths=self._deserialize_list(row[14]),
-                        domains=self._deserialize_list(row[15]),
-                        registry_keys=self._deserialize_list(row[16]),
-                        risk_level=row[17],
-                        activity_profile=row[18],
-                        analysis_depth=row[19] if row[19] is not None else 0,
-                        created_at=row[20],
-                        updated_at=row[21],
-                        is_stale=bool(row[22]),
-                        user_edited=bool(row[23]),
-                    ))
+                    results.append(self._row_to_node(row))
                 return results
             finally:
                 conn.close()
@@ -940,45 +858,18 @@ class GraphStore:
             conn = self.analysis_db.get_connection()
             try:
                 cursor = conn.cursor()
-                cursor.execute('''
-                    SELECT id, binary_id, type, address, name, raw_content,
-                           llm_summary, confidence, embedding, security_flags,
-                           network_apis, file_io_apis, ip_addresses, urls,
-                           file_paths, domains, registry_keys, risk_level,
-                           activity_profile, analysis_depth, created_at, updated_at,
-                           is_stale, user_edited
+                cursor.execute(
+                    f'''
+                    SELECT {self._graph_node_select()}
                     FROM graph_nodes
                     WHERE binary_id = ? AND type = ?
-                ''', (binary_hash, node_type))
+                    ''',
+                    (binary_hash, node_type),
+                )
                 rows = cursor.fetchall()
                 results = []
                 for row in rows:
-                    results.append(GraphNode(
-                        id=row[0],
-                        binary_hash=row[1],
-                        node_type=row[2],
-                        address=row[3],
-                        name=row[4],
-                        raw_code=row[5],
-                        llm_summary=row[6],
-                        confidence=row[7] if row[7] is not None else 0.0,
-                        embedding=row[8],
-                        security_flags=self._deserialize_list(row[9]),
-                        network_apis=self._deserialize_list(row[10]),
-                        file_io_apis=self._deserialize_list(row[11]),
-                        ip_addresses=self._deserialize_list(row[12]),
-                        urls=self._deserialize_list(row[13]),
-                        file_paths=self._deserialize_list(row[14]),
-                        domains=self._deserialize_list(row[15]),
-                        registry_keys=self._deserialize_list(row[16]),
-                        risk_level=row[17],
-                        activity_profile=row[18],
-                        analysis_depth=row[19] if row[19] is not None else 0,
-                        created_at=row[20],
-                        updated_at=row[21],
-                        is_stale=bool(row[22]),
-                        user_edited=bool(row[23]),
-                    ))
+                    results.append(self._row_to_node(row))
                 return results
             finally:
                 conn.close()
@@ -1159,47 +1050,20 @@ class GraphStore:
             conn = self.analysis_db.get_connection()
             try:
                 cursor = conn.cursor()
-                cursor.execute('''
-                    SELECT n.id, n.binary_id, n.type, n.address, n.name, n.raw_content,
-                           n.llm_summary, n.confidence, n.embedding, n.security_flags,
-                           n.network_apis, n.file_io_apis, n.ip_addresses, n.urls,
-                           n.file_paths, n.domains, n.registry_keys, n.risk_level,
-                           n.activity_profile, n.analysis_depth, n.created_at, n.updated_at,
-                           n.is_stale, n.user_edited
+                cursor.execute(
+                    f'''
+                    SELECT {self._graph_node_select("n")}
                     FROM community_members cm
                     JOIN graph_nodes n ON n.id = cm.node_id
                     WHERE cm.community_id = ?
                     ORDER BY n.name
-                ''', (community_id,))
+                    ''',
+                    (community_id,),
+                )
                 rows = cursor.fetchall()
                 members = []
                 for row in rows:
-                    members.append(GraphNode(
-                        id=row[0],
-                        binary_hash=row[1],
-                        node_type=row[2],
-                        address=row[3],
-                        name=row[4],
-                        raw_code=row[5],
-                        llm_summary=row[6],
-                        confidence=row[7] if row[7] is not None else 0.0,
-                        embedding=row[8],
-                        security_flags=self._deserialize_list(row[9]),
-                        network_apis=self._deserialize_list(row[10]),
-                        file_io_apis=self._deserialize_list(row[11]),
-                        ip_addresses=self._deserialize_list(row[12]),
-                        urls=self._deserialize_list(row[13]),
-                        file_paths=self._deserialize_list(row[14]),
-                        domains=self._deserialize_list(row[15]),
-                        registry_keys=self._deserialize_list(row[16]),
-                        risk_level=row[17],
-                        activity_profile=row[18],
-                        analysis_depth=row[19] if row[19] is not None else 0,
-                        created_at=row[20],
-                        updated_at=row[21],
-                        is_stale=bool(row[22]),
-                        user_edited=bool(row[23]),
-                    ))
+                    members.append(self._row_to_node(row))
                 return members
             finally:
                 conn.close()

@@ -23,6 +23,9 @@ class NodeType(str, Enum):
     # External/imported function (PLT stub, thunk, or library import)
     EXTERNAL = "EXTERNAL"
 
+    # Thunk/trampoline function kept distinct for cross-tool round-tripping.
+    THUNK = "THUNK"
+
     # Community/module of related functions detected via Leiden algorithm
     # Represents subsystems and logical groupings
     MODULE = "MODULE"
@@ -47,7 +50,7 @@ class NodeType(str, Enum):
 
     def get_level(self) -> int:
         """Get the hierarchy level (0 = finest, 2 = coarsest)."""
-        if self in {NodeType.FUNCTION, NodeType.EXTERNAL}:
+        if self in {NodeType.FUNCTION, NodeType.EXTERNAL, NodeType.THUNK}:
             return 0
         elif self in {NodeType.MODULE, NodeType.COMMUNITY}:
             return 1
@@ -196,6 +199,9 @@ class GraphNode:
     node_type: Union[NodeType, str] = NodeType.FUNCTION
     address: Optional[int] = None
     name: Optional[str] = None
+    signature: Optional[str] = None
+    decompiled_code: Optional[str] = None
+    disassembly: Optional[str] = None
     raw_code: Optional[str] = None
     llm_summary: Optional[str] = None
     confidence: float = 0.0
@@ -215,6 +221,22 @@ class GraphNode:
     user_edited: bool = False
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.decompiled_code is None and self.raw_code is not None:
+            self.decompiled_code = self.raw_code
+        elif self.raw_code is None and self.decompiled_code is not None:
+            self.raw_code = self.decompiled_code
+
+    def set_decompiled_code(self, code: Optional[str]) -> None:
+        self.decompiled_code = code
+        self.raw_code = code
+
+    def get_decompiled_code(self) -> Optional[str]:
+        return self.decompiled_code or self.raw_code
+
+    def get_primary_code(self) -> Optional[str]:
+        return self.get_decompiled_code() or self.disassembly
 
     def get_node_type(self) -> Optional[NodeType]:
         """Get the node type as a NodeType enum."""

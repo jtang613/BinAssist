@@ -100,6 +100,7 @@ class DatabaseMigrations:
                 (6, DatabaseMigrations._migration_006_graphrag_fts),
                 (7, DatabaseMigrations._migration_007_llm_renames),
                 (8, DatabaseMigrations._migration_008_chat_document_metadata),
+                (9, DatabaseMigrations._migration_009_graph_node_code_fields),
             ]
             
             for version, migration_func in migrations:
@@ -296,7 +297,7 @@ class DatabaseMigrations:
 
             # Expected schema for graph_nodes
             expected_nodes = {
-                "id", "type", "address", "binary_id", "name", "raw_content",
+                "id", "type", "address", "binary_id", "name", "signature", "decompiled_code", "disassembly", "raw_content",
                 "llm_summary", "confidence", "embedding", "security_flags",
                 "network_apis", "file_io_apis", "ip_addresses", "urls",
                 "file_paths", "domains", "registry_keys", "risk_level",
@@ -329,6 +330,9 @@ class DatabaseMigrations:
                     address INTEGER,
                     binary_id TEXT NOT NULL,
                     name TEXT,
+                    signature TEXT,
+                    decompiled_code TEXT,
+                    disassembly TEXT,
                     raw_content TEXT,
                     llm_summary TEXT,
                     confidence REAL DEFAULT 0.0,
@@ -504,7 +508,7 @@ class DatabaseMigrations:
             if DatabaseMigrations._table_exists(cursor, "node_fts"):
                 cursor.execute("PRAGMA table_info(node_fts)")
                 existing_cols = [row[1] for row in cursor.fetchall()]
-                expected_cols = ["id", "name", "llm_summary", "security_flags"]
+                expected_cols = ["id", "name", "signature", "llm_summary", "security_flags"]
                 if set(existing_cols) != set(expected_cols):
                     cursor.execute("DROP TABLE IF EXISTS node_fts")
                     log.log_info("Dropped incompatible node_fts table for recreation")
@@ -515,6 +519,7 @@ class DatabaseMigrations:
                     CREATE VIRTUAL TABLE IF NOT EXISTS node_fts USING fts5(
                         id,
                         name,
+                        signature,
                         llm_summary,
                         security_flags,
                         content='graph_nodes',
@@ -525,24 +530,24 @@ class DatabaseMigrations:
                 # Create sync triggers
                 cursor.execute('''
                     CREATE TRIGGER IF NOT EXISTS graph_nodes_ai AFTER INSERT ON graph_nodes BEGIN
-                        INSERT INTO node_fts(rowid, id, name, llm_summary, security_flags)
-                        VALUES (new.rowid, new.id, new.name, new.llm_summary, new.security_flags);
+                        INSERT INTO node_fts(rowid, id, name, signature, llm_summary, security_flags)
+                        VALUES (new.rowid, new.id, new.name, new.signature, new.llm_summary, new.security_flags);
                     END
                 ''')
 
                 cursor.execute('''
                     CREATE TRIGGER IF NOT EXISTS graph_nodes_ad AFTER DELETE ON graph_nodes BEGIN
-                        INSERT INTO node_fts(node_fts, rowid, id, name, llm_summary, security_flags)
-                        VALUES ('delete', old.rowid, old.id, old.name, old.llm_summary, old.security_flags);
+                        INSERT INTO node_fts(node_fts, rowid, id, name, signature, llm_summary, security_flags)
+                        VALUES ('delete', old.rowid, old.id, old.name, old.signature, old.llm_summary, old.security_flags);
                     END
                 ''')
 
                 cursor.execute('''
                     CREATE TRIGGER IF NOT EXISTS graph_nodes_au AFTER UPDATE ON graph_nodes BEGIN
-                        INSERT INTO node_fts(node_fts, rowid, id, name, llm_summary, security_flags)
-                        VALUES ('delete', old.rowid, old.id, old.name, old.llm_summary, old.security_flags);
-                        INSERT INTO node_fts(rowid, id, name, llm_summary, security_flags)
-                        VALUES (new.rowid, new.id, new.name, new.llm_summary, new.security_flags);
+                        INSERT INTO node_fts(node_fts, rowid, id, name, signature, llm_summary, security_flags)
+                        VALUES ('delete', old.rowid, old.id, old.name, old.signature, old.llm_summary, old.security_flags);
+                        INSERT INTO node_fts(rowid, id, name, signature, llm_summary, security_flags)
+                        VALUES (new.rowid, new.id, new.name, new.signature, new.llm_summary, new.security_flags);
                     END
                 ''')
 
@@ -603,6 +608,90 @@ class DatabaseMigrations:
             return True
         except Exception as e:
             log.log_error(f"Migration 008 failed: {e}")
+            return False
+
+    @staticmethod
+    def _migration_009_graph_node_code_fields(db_path: str) -> bool:
+        """Migration 009: Add first-class signature, decompiled code, and disassembly fields."""
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            for statement in (
+                'ALTER TABLE graph_nodes ADD COLUMN signature TEXT',
+                'ALTER TABLE graph_nodes ADD COLUMN decompiled_code TEXT',
+                'ALTER TABLE graph_nodes ADD COLUMN disassembly TEXT',
+            ):
+                try:
+                    cursor.execute(statement)
+                except sqlite3.OperationalError as e:
+                    if 'duplicate column name' not in str(e).lower():
+                        raise
+
+            cursor.execute('''
+                UPDATE graph_nodes
+                SET decompiled_code = raw_content
+                WHERE decompiled_code IS NULL AND raw_content IS NOT NULL
+            ''')
+
+            cursor.execute('''
+                UPDATE graph_nodes
+                SET raw_content = decompiled_code
+                WHERE raw_content IS NULL AND decompiled_code IS NOT NULL
+            ''')
+
+            cursor.execute("DROP TRIGGER IF EXISTS graph_nodes_ai")
+            cursor.execute("DROP TRIGGER IF EXISTS graph_nodes_ad")
+            cursor.execute("DROP TRIGGER IF EXISTS graph_nodes_au")
+            cursor.execute("DROP TABLE IF EXISTS node_fts")
+
+            cursor.execute('''
+                CREATE VIRTUAL TABLE IF NOT EXISTS node_fts USING fts5(
+                    id,
+                    name,
+                    signature,
+                    llm_summary,
+                    security_flags,
+                    content='graph_nodes',
+                    content_rowid='rowid'
+                )
+            ''')
+
+            cursor.execute('''
+                CREATE TRIGGER IF NOT EXISTS graph_nodes_ai AFTER INSERT ON graph_nodes BEGIN
+                    INSERT INTO node_fts(rowid, id, name, signature, llm_summary, security_flags)
+                    VALUES (new.rowid, new.id, new.name, new.signature, new.llm_summary, new.security_flags);
+                END
+            ''')
+
+            cursor.execute('''
+                CREATE TRIGGER IF NOT EXISTS graph_nodes_ad AFTER DELETE ON graph_nodes BEGIN
+                    INSERT INTO node_fts(node_fts, rowid, id, name, signature, llm_summary, security_flags)
+                    VALUES ('delete', old.rowid, old.id, old.name, old.signature, old.llm_summary, old.security_flags);
+                END
+            ''')
+
+            cursor.execute('''
+                CREATE TRIGGER IF NOT EXISTS graph_nodes_au AFTER UPDATE ON graph_nodes BEGIN
+                    INSERT INTO node_fts(node_fts, rowid, id, name, signature, llm_summary, security_flags)
+                    VALUES ('delete', old.rowid, old.id, old.name, old.signature, old.llm_summary, old.security_flags);
+                    INSERT INTO node_fts(rowid, id, name, signature, llm_summary, security_flags)
+                    VALUES (new.rowid, new.id, new.name, new.signature, new.llm_summary, new.security_flags);
+                END
+            ''')
+
+            cursor.execute('''
+                INSERT INTO node_fts(rowid, id, name, signature, llm_summary, security_flags)
+                SELECT rowid, id, name, signature, llm_summary, security_flags
+                FROM graph_nodes
+            ''')
+
+            conn.commit()
+            conn.close()
+            log.log_info("Migration 009: Graph node code fields added successfully")
+            return True
+        except Exception as e:
+            log.log_error(f"Migration 009 failed: {e}")
             return False
 
 

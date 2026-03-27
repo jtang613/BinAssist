@@ -5,6 +5,7 @@ import threading
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
+from .function_signature_generator import BinaryNinjaFunctionSignatureGenerator
 from .graph_store import GraphStore
 from .models import GraphNode, GraphEdge, EdgeType
 from .security_feature_extractor import SecurityFeatureExtractor
@@ -43,6 +44,7 @@ class StructureExtractor:
         self.graph_store = graph_store
         self.security_extractor = SecurityFeatureExtractor(binary_view)
         self.context_service = BinaryContextService(binary_view)
+        self.signature_generator = BinaryNinjaFunctionSignatureGenerator(binary_view)
         self._cancelled = False
         self._progress_lock = threading.Lock()
 
@@ -66,8 +68,10 @@ class StructureExtractor:
         else:
             node.name = function.name
 
-        raw_code = self._get_raw_code(address)
-        features = self.security_extractor.extract_features(function, raw_code)
+        decompiled_code = self._get_decompiled_code(address)
+        disassembly = self._get_disassembly(address)
+        node.signature = self.signature_generator.generate(function)
+        features = self.security_extractor.extract_features(function, decompiled_code or disassembly)
         node.network_apis = sorted(features.network_apis)
         node.file_io_apis = sorted(features.file_io_apis)
         node.ip_addresses = sorted(features.ip_addresses)
@@ -78,8 +82,10 @@ class StructureExtractor:
         node.activity_profile = features.get_activity_profile()
         node.risk_level = features.get_risk_level()
         node.security_flags = features.generate_security_flags()
-        if raw_code:
-            node.raw_code = raw_code
+        if decompiled_code:
+            node.set_decompiled_code(decompiled_code)
+        if disassembly:
+            node.disassembly = disassembly
         node.is_stale = True
 
         node = self.graph_store.upsert_node(node)
@@ -216,6 +222,9 @@ class StructureExtractor:
                     node_type="FUNCTION",
                     address=address,
                     name=name,
+                    signature=None,
+                    decompiled_code=None,
+                    disassembly=None,
                     raw_code=None,  # Populated in Phase 2
                     is_stale=True,
                 )
@@ -305,12 +314,16 @@ class StructureExtractor:
                     continue
 
                 # Decompile (expensive but necessary)
-                raw_code = self._get_raw_code(node.address)
-                if raw_code:
-                    node.raw_code = raw_code
+                decompiled_code = self._get_decompiled_code(node.address)
+                disassembly = self._get_disassembly(node.address)
+                if decompiled_code:
+                    node.set_decompiled_code(decompiled_code)
+                if disassembly:
+                    node.disassembly = disassembly
+                node.signature = self.signature_generator.generate(func)
 
                 # Extract security features
-                features = self.security_extractor.extract_features(func, raw_code)
+                features = self.security_extractor.extract_features(func, decompiled_code or disassembly)
                 node.network_apis = sorted(features.network_apis)
                 node.file_io_apis = sorted(features.file_io_apis)
                 node.ip_addresses = sorted(features.ip_addresses)
@@ -414,10 +427,10 @@ class StructureExtractor:
 
         return result
 
-    def _get_raw_code(self, address: int) -> Optional[str]:
+    def _get_decompiled_code(self, address: int) -> Optional[str]:
         if not address:
             return None
-        for level in (ViewLevel.HLIL, ViewLevel.MLIL, ViewLevel.LLIL, ViewLevel.ASM):
+        for level in (ViewLevel.HLIL, ViewLevel.MLIL, ViewLevel.LLIL):
             result = self.context_service.get_code_at_level(address, level, context_lines=0)
             if result.get("error"):
                 continue
@@ -433,3 +446,20 @@ class StructureExtractor:
             if parts:
                 return "\n".join(parts).strip()
         return None
+
+    def _get_disassembly(self, address: int) -> Optional[str]:
+        if not address:
+            return None
+        result = self.context_service.get_code_at_level(address, ViewLevel.ASM, context_lines=0)
+        if result.get("error"):
+            return None
+        lines = result.get("lines") or []
+        parts = []
+        for line in lines:
+            if isinstance(line, dict):
+                content = line.get("content")
+            else:
+                content = str(line)
+            if content:
+                parts.append(content.rstrip())
+        return "\n".join(parts).strip() if parts else None

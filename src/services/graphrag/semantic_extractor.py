@@ -114,12 +114,16 @@ class SemanticExtractor:
         # Always skip user-edited nodes (user's manual edits should be preserved)
         if node.user_edited:
             return False
-        if not node.raw_code:
-            node.raw_code = self._get_raw_code(node.address)
-            if node.raw_code:
+        if not node.get_decompiled_code():
+            decompiled_code = self._get_decompiled_code(node.address)
+            if decompiled_code:
+                node.set_decompiled_code(decompiled_code)
+            if not node.disassembly:
+                node.disassembly = self._get_disassembly(node.address)
+            if node.get_primary_code():
                 self.graph_store.upsert_node(node)
 
-        if not node.raw_code:
+        if not node.get_primary_code():
             log.log_warn(f"Skipping summary for {node.name or node.address}: missing raw code")
             return False
 
@@ -177,7 +181,7 @@ class SemanticExtractor:
         callees = self._get_callees(node.id)
         return function_summary_prompt(
             node.name or f"sub_{node.address:x}",
-            node.raw_code,
+            node.get_decompiled_code() or node.disassembly or "",
             callers,
             callees,
         )
@@ -193,7 +197,10 @@ class SemanticExtractor:
             if not function:
                 return
 
-            features = self._security_extractor.extract_features(function, node.raw_code)
+            features = self._security_extractor.extract_features(
+                function,
+                node.get_decompiled_code() or node.disassembly,
+            )
 
             node.network_apis = self._merge_list(node.network_apis, features.network_apis)
             node.file_io_apis = self._merge_list(node.file_io_apis, features.file_io_apis)
@@ -234,11 +241,10 @@ class SemanticExtractor:
             log.log_error(f"Semantic LLM call failed: {exc}")
             return None
 
-    def _get_raw_code(self, address: Optional[int]) -> Optional[str]:
+    def _get_decompiled_code(self, address: Optional[int]) -> Optional[str]:
         if not address or not self._context_service:
             return None
-        # Use HLIL first - fast and reliable (no PSEUDO_C timeouts)
-        for level in (ViewLevel.HLIL, ViewLevel.MLIL, ViewLevel.LLIL, ViewLevel.ASM):
+        for level in (ViewLevel.HLIL, ViewLevel.MLIL, ViewLevel.LLIL):
             result = self._context_service.get_code_at_level(address, level, context_lines=0)
             if result.get("error"):
                 continue
@@ -254,6 +260,22 @@ class SemanticExtractor:
             if parts:
                 return "\n".join(parts).strip()
         return None
+
+    def _get_disassembly(self, address: Optional[int]) -> Optional[str]:
+        if not address or not self._context_service:
+            return None
+        result = self._context_service.get_code_at_level(address, ViewLevel.ASM, context_lines=0)
+        if result.get("error"):
+            return None
+        parts: List[str] = []
+        for line in result.get("lines") or []:
+            if isinstance(line, dict):
+                content = line.get("content")
+            else:
+                content = str(line)
+            if content:
+                parts.append(content.rstrip())
+        return "\n".join(parts).strip() if parts else None
 
     def _get_callers(self, node_id: Optional[int]) -> List[str]:
         if not node_id:

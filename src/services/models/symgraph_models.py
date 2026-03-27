@@ -255,8 +255,16 @@ class GraphNode:
         properties = data.get('properties', {})
 
         # Map API fields to properties if not already present
+        if 'signature' in data and 'signature' not in properties:
+            properties['signature'] = data.get('signature')
+        if 'decompiled_code' in data and 'decompiled_code' not in properties:
+            properties['decompiled_code'] = data.get('decompiled_code')
+        if 'disassembly' in data and 'disassembly' not in properties:
+            properties['disassembly'] = data.get('disassembly')
         if 'raw_content' in data and 'raw_content' not in properties:
             properties['raw_content'] = data.get('raw_content')
+        if 'decompiled_code' not in properties and 'raw_content' in properties:
+            properties['decompiled_code'] = properties.get('raw_content')
         if 'confidence' in data and 'confidence' not in properties:
             properties['confidence'] = data.get('confidence', 0.0)
         if 'security_flags' in data and 'security_flags' not in properties:
@@ -303,6 +311,15 @@ class GraphNode:
             result['name'] = self.name
         if self.summary:
             result['summary'] = self.summary
+            result['llm_summary'] = self.summary
+        if self.properties.get('signature'):
+            result['signature'] = self.properties.get('signature')
+        if self.properties.get('decompiled_code'):
+            result['decompiled_code'] = self.properties.get('decompiled_code')
+        if self.properties.get('disassembly'):
+            result['disassembly'] = self.properties.get('disassembly')
+        if self.properties.get('decompiled_code') or self.properties.get('raw_content'):
+            result['raw_content'] = self.properties.get('decompiled_code') or self.properties.get('raw_content')
         if self.properties:
             result['properties'] = self.properties
         return result
@@ -313,6 +330,8 @@ class GraphEdge:
     """A graph edge from SymGraph."""
     source_address: int
     target_address: int
+    source_name: Optional[str] = None
+    target_name: Optional[str] = None
     edge_type: str = "calls"
     properties: Dict[str, Any] = field(default_factory=dict)
 
@@ -333,6 +352,8 @@ class GraphEdge:
         return cls(
             source_address=_parse_address(data.get('source_address')),
             target_address=_parse_address(data.get('target_address')),
+            source_name=data.get('source_name'),
+            target_name=data.get('target_name'),
             edge_type=data.get('edge_type', 'calls'),
             properties=properties
         )
@@ -344,6 +365,10 @@ class GraphEdge:
             'target_address': self.target_address,
             'edge_type': self.edge_type
         }
+        if self.source_name:
+            result['source_name'] = self.source_name
+        if self.target_name:
+            result['target_name'] = self.target_name
         if self.properties:
             result['properties'] = self.properties
         return result
