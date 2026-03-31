@@ -300,7 +300,7 @@ class DatabaseMigrations:
                 "id", "type", "address", "binary_id", "name", "signature", "decompiled_code", "disassembly", "raw_content",
                 "llm_summary", "confidence", "embedding", "security_flags",
                 "network_apis", "file_io_apis", "ip_addresses", "urls",
-                "file_paths", "domains", "registry_keys", "risk_level",
+                "file_paths", "domains", "registry_keys", "category", "risk_level",
                 "activity_profile", "analysis_depth", "created_at", "updated_at",
                 "is_stale", "user_edited"
             }
@@ -345,6 +345,7 @@ class DatabaseMigrations:
                     file_paths TEXT,
                     domains TEXT,
                     registry_keys TEXT,
+                    category TEXT,
                     risk_level TEXT,
                     activity_profile TEXT,
                     analysis_depth INTEGER DEFAULT 0,
