@@ -21,7 +21,8 @@ from .base_provider import (
 )
 from ..models.llm_models import (
     ChatRequest, ChatResponse, EmbeddingRequest, EmbeddingResponse,
-    ChatMessage, MessageRole, ToolCall, ToolResult, Usage, ProviderCapabilities
+    ChatMessage, MessageRole, ToolCall, ToolResult, Usage, ProviderCapabilities,
+    ProviderModelDiscoveryResult
 )
 from ..models.provider_types import ProviderType
 from ..models.reasoning_models import ReasoningConfig
@@ -68,13 +69,19 @@ class OllamaProvider(BaseLLMProvider):
 
         # Warn if TLS verification is disabled
         if self.disable_tls:
-            import ssl
             log.log_warn(f"TLS verification disabled for Ollama provider '{self.name}'")
-            # Suppress SSL warnings when verification is disabled
             import warnings
             warnings.filterwarnings('ignore', message='Unverified HTTPS request')
 
         log.log_info(f"Ollama provider initialized with URL: {self.url}, model: {self.model}")
+
+    def _create_async_client(self) -> "httpx.AsyncClient":
+        """Create an async HTTP client honoring provider timeout and proxy settings."""
+        return httpx.AsyncClient(
+            timeout=self.timeout,
+            verify=not self.disable_tls,
+            trust_env=not self.bypass_proxy,
+        )
     
     async def chat_completion(self, request: ChatRequest,
                             native_message_callback: Optional[Callable[[Dict[str, Any], ProviderType], None]] = None) -> ChatResponse:
@@ -125,7 +132,7 @@ class OllamaProvider(BaseLLMProvider):
 
             # Make API call
             url = f"{self.url}/api/chat"
-            async with httpx.AsyncClient(timeout=30.0, verify=not self.disable_tls) as client:
+            async with self._create_async_client() as client:
                 response = await client.post(url, json=payload)
                 
                 if response.status_code != 200:
@@ -289,7 +296,7 @@ class OllamaProvider(BaseLLMProvider):
             accumulated_content = ""
             accumulated_tool_calls = []
 
-            async with httpx.AsyncClient(timeout=60.0, verify=not self.disable_tls) as client:
+            async with self._create_async_client() as client:
                 stream_response = client.stream("POST", url, json=payload)
                 response = await stream_response.__aenter__()
                 
@@ -453,7 +460,7 @@ class OllamaProvider(BaseLLMProvider):
                 }
                 
                 url = f"{self.url}/api/embeddings"
-                async with httpx.AsyncClient(timeout=30.0, verify=not self.disable_tls) as client:
+                async with self._create_async_client() as client:
                     response = await client.post(url, json=payload)
                     
                     if response.status_code != 200:
@@ -501,9 +508,47 @@ class OllamaProvider(BaseLLMProvider):
             supports_tools=True,  # Limited support, model-dependent
             supports_embeddings=True,
             supports_vision=False,  # Model-dependent, not implemented yet
+            supports_model_discovery=True,
             max_tokens=self.max_tokens,
             models=[self.model] if self.model else []
         )
+
+    async def discover_available_models(self) -> ProviderModelDiscoveryResult:
+        """Discover models using Ollama's native tags endpoint."""
+        try:
+            url = f"{self.url}/api/tags"
+            async with self._create_async_client() as client:
+                response = await client.get(url)
+
+            if response.status_code != 200:
+                error_msg = response.text or f"HTTP {response.status_code}"
+                return ProviderModelDiscoveryResult.failure_result(
+                    f"Ollama API error: {error_msg}"
+                )
+
+            data = response.json()
+            models = []
+            for entry in data.get('models', []):
+                model_name = entry.get('model') or entry.get('name')
+                if model_name:
+                    models.append(model_name)
+
+            if not models:
+                return ProviderModelDiscoveryResult.failure_result(
+                    "No available models were found."
+                )
+
+            return ProviderModelDiscoveryResult.success_result(models)
+
+        except httpx.HTTPError as e:
+            return ProviderModelDiscoveryResult.failure_result(
+                f"Network error: {str(e)}"
+            )
+        except Exception as e:
+            log.log_error(f"Ollama model discovery failed: {e}")
+            return ProviderModelDiscoveryResult.failure_result(
+                f"Model discovery failed: {str(e)}"
+            )
     
     def get_provider_type(self) -> ProviderType:
         """Get the provider type for this provider"""
@@ -524,13 +569,14 @@ class OllamaProvider(BaseLLMProvider):
         try:
             # Simple test with minimal parameters
             test_request = ChatRequest(
-                messages=[ChatMessage(role=MessageRole.USER, content="Hello")],
+                messages=[ChatMessage(role=MessageRole.USER, content="Test message. Please respond with 'OK'.")],
+                model=self.model,
                 max_tokens=10
             )
-            
-            response = await self.chat_completion(test_request)
-            return bool(response.content)
-            
+
+            await self.chat_completion(test_request)
+            return True
+
         except Exception as e:
             log.log_error(f"Ollama connection test failed: {e}")
             return False

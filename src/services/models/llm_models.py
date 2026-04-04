@@ -138,6 +138,7 @@ class ProviderCapabilities:
     supports_tools: bool = False
     supports_embeddings: bool = False
     supports_vision: bool = False
+    supports_model_discovery: bool = False
     max_tokens: int = 4096
     models: List[str] = field(default_factory=list)
     
@@ -149,6 +150,26 @@ class ProviderCapabilities:
             'supports_tools': self.supports_tools,
             'supports_embeddings': self.supports_embeddings,
             'supports_vision': self.supports_vision,
+            'supports_model_discovery': self.supports_model_discovery,
             'max_tokens': self.max_tokens,
             'models': self.models
         }
+
+
+@dataclass
+class ProviderModelDiscoveryResult:
+    """Normalized result for provider model discovery."""
+    success: bool
+    models: List[str] = field(default_factory=list)
+    source_label: Optional[str] = None
+    error: Optional[str] = None
+
+    @classmethod
+    def success_result(cls, models: List[str], source_label: str = "live") -> 'ProviderModelDiscoveryResult':
+        """Create a successful model discovery result."""
+        return cls(success=True, models=models, source_label=source_label)
+
+    @classmethod
+    def failure_result(cls, error: str) -> 'ProviderModelDiscoveryResult':
+        """Create a failed model discovery result."""
+        return cls(success=False, error=error)

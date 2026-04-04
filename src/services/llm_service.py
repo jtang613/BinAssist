@@ -26,7 +26,7 @@ except ImportError:
 
 from .models.llm_models import (
     ChatRequest, ChatResponse, EmbeddingRequest, EmbeddingResponse,
-    ProviderCapabilities, ChatMessage, MessageRole
+    ProviderCapabilities, ProviderModelDiscoveryResult, ChatMessage, MessageRole
 )
 from .llm_providers.base_provider import (
     BaseLLMProvider, LLMProviderError, APIProviderError,
@@ -296,6 +296,72 @@ class LLMService:
         """
         capabilities = self.get_provider_capabilities(provider_name)
         return capabilities.models if capabilities else []
+
+    async def discover_provider_models(self, provider_config: Dict[str, Any]) -> ProviderModelDiscoveryResult:
+        """
+        Discover models for an arbitrary provider configuration.
+
+        This path is used by the provider dialog so it can operate on unsaved
+        in-memory values instead of persisted settings.
+        """
+        config = dict(provider_config)
+
+        provider_type_value = config.get('provider_type', 'openai_platform')
+        try:
+            provider_type = ProviderType(provider_type_value)
+        except ValueError:
+            return ProviderModelDiscoveryResult.failure_result(
+                f"Unsupported provider type: {provider_type_value}"
+            )
+
+        if not config.get('name'):
+            config['name'] = 'Model Discovery'
+
+        if not config.get('model'):
+            config['model'] = '__model_discovery__'
+
+        try:
+            provider = await self._create_provider(config)
+            if not provider:
+                return ProviderModelDiscoveryResult.failure_result(
+                    f"Failed to create provider '{config['name']}'."
+                )
+
+            result = await provider.discover_available_models()
+            if not result.success:
+                return result
+
+            deduped_models: List[str] = []
+            seen = set()
+            for model in result.models:
+                if not model or model in seen:
+                    continue
+                seen.add(model)
+                deduped_models.append(model)
+
+            if not deduped_models:
+                return ProviderModelDiscoveryResult.failure_result(
+                    "No available models were found."
+                )
+
+            return ProviderModelDiscoveryResult.success_result(
+                deduped_models,
+                source_label=result.source_label or "live"
+            )
+
+        except AuthenticationError as e:
+            return ProviderModelDiscoveryResult.failure_result(
+                f"Authentication failed: {str(e)}"
+            )
+        except APIProviderError as e:
+            return ProviderModelDiscoveryResult.failure_result(str(e))
+        except LLMProviderError as e:
+            return ProviderModelDiscoveryResult.failure_result(str(e))
+        except Exception as e:
+            log.log_error(f"[BinAssist] Model discovery failed: {e}")
+            return ProviderModelDiscoveryResult.failure_result(
+                f"Model discovery failed: {str(e)}"
+            )
     
     def invalidate_provider_cache(self, provider_name: Optional[str] = None):
         """

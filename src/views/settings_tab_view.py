@@ -78,25 +78,16 @@ class SettingsTabView(QWidget):
         
         # LLM Providers table
         self.llm_table = QTableWidget()
-        self.llm_table.setColumnCount(7)
+        self.llm_table.setColumnCount(4)
         self.llm_table.setHorizontalHeaderLabels([
-            "Name", "Model", "Type", "URL", "Max Tokens", "Key", "Disable TLS"
+            "Name", "Model", "Type", "URL"
         ])
         
         # Configure table
         self.llm_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         header = self.llm_table.horizontalHeader()
-        for i in range(7):
-            header.setSectionResizeMode(i, QHeaderView.Interactive)
-        
-        # Set initial column widths
-        self.llm_table.setColumnWidth(0, 120)  # Name
-        self.llm_table.setColumnWidth(1, 120)  # Model
-        self.llm_table.setColumnWidth(2, 100)  # Type
-        self.llm_table.setColumnWidth(3, 200)  # URL
-        self.llm_table.setColumnWidth(4, 80)   # Max Tokens
-        self.llm_table.setColumnWidth(5, 120)  # Key
-        self.llm_table.setColumnWidth(6, 80)   # Disable TLS
+        for i in range(4):
+            header.setSectionResizeMode(i, QHeaderView.ResizeToContents)
         
         layout.addWidget(self.llm_table)
         
@@ -176,13 +167,7 @@ class SettingsTabView(QWidget):
         self.mcp_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         header = self.mcp_table.horizontalHeader()
         for i in range(4):
-            header.setSectionResizeMode(i, QHeaderView.Interactive)
-        
-        # Set initial column widths
-        self.mcp_table.setColumnWidth(0, 120)  # Name
-        self.mcp_table.setColumnWidth(1, 200)  # URL
-        self.mcp_table.setColumnWidth(2, 80)   # Enabled
-        self.mcp_table.setColumnWidth(3, 100)  # Transport
+            header.setSectionResizeMode(i, QHeaderView.ResizeToContents)
         
         layout.addWidget(self.mcp_table)
         
@@ -450,24 +435,12 @@ class SettingsTabView(QWidget):
         """Add an LLM provider to the table"""
         row_count = self.llm_table.rowCount()
         self.llm_table.insertRow(row_count)
-        
+
         self.llm_table.setItem(row_count, 0, QTableWidgetItem(name))
         self.llm_table.setItem(row_count, 1, QTableWidgetItem(model))
         self.llm_table.setItem(row_count, 2, QTableWidgetItem(provider_type))
         self.llm_table.setItem(row_count, 3, QTableWidgetItem(url))
-        self.llm_table.setItem(row_count, 4, QTableWidgetItem(str(max_tokens)))
-        
-        # Redact API key for security (use dots like the modal dialog)
-        if key and len(key) > 0:
-            masked_key = "•" * min(len(key), 20)  # Limit to 20 dots for readability
-        else:
-            masked_key = ""
-        self.llm_table.setItem(row_count, 5, QTableWidgetItem(masked_key))
-        
-        # Add checkbox for disable TLS
-        tls_checkbox = QCheckBox()
-        tls_checkbox.setChecked(disable_tls)
-        self.llm_table.setCellWidget(row_count, 6, tls_checkbox)
+        self.llm_table.resizeColumnsToContents()
         
         # Update active provider combo
         self.active_provider_combo.addItem(name)
@@ -484,8 +457,9 @@ class SettingsTabView(QWidget):
         enabled_checkbox = QCheckBox()
         enabled_checkbox.setChecked(enabled)
         self.mcp_table.setCellWidget(row_count, 2, enabled_checkbox)
-        
+
         self.mcp_table.setItem(row_count, 3, QTableWidgetItem(transport))
+        self.mcp_table.resizeColumnsToContents()
     
     def on_llm_edit_clicked(self):
         current_row = self.llm_table.currentRow()

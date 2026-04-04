@@ -76,7 +76,7 @@ class LiteLLMProvider(OpenAIPlatformApiProvider):
         # Override timeout settings for LiteLLM/Bedrock
         # Bedrock can be significantly slower than direct API calls
         # Only recreate client if TLS is disabled (requires custom httpx client)
-        timeout = 300.0
+        timeout = self.timeout
         log.log_info(f"LiteLLM: Using extended timeout of {timeout}s for reliability")
 
         if self.disable_tls:
@@ -115,6 +115,72 @@ class LiteLLMProvider(OpenAIPlatformApiProvider):
         log.log_info(f"  Model family: {self.model_family}")
         log.log_info(f"  Is Bedrock: {self.is_bedrock}")
         log.log_info(f"  Retry delays: {self.rate_limit_min_delay}s - {self.rate_limit_max_delay}s")
+
+    @staticmethod
+    def _field(obj: Any, name: str, default=None):
+        """Read a field from either an SDK object or a plain dict."""
+        if isinstance(obj, dict):
+            return obj.get(name, default)
+        return getattr(obj, name, default)
+
+    def _normalize_nonstream_response(self, response: Any) -> tuple[str, List[ToolCall], Optional[Usage], str, Optional[Dict[str, Any]]]:
+        """
+        Normalize LiteLLM/OpenRouter non-streaming responses.
+
+        Some backends return SDK objects, others produce plain dicts, and a few
+        edge cases can surface a bare string body. Normalize these into the
+        fields our provider needs.
+        """
+        if isinstance(response, str):
+            return response, [], None, "stop", None
+
+        choices = self._field(response, "choices")
+        if not choices:
+            raise APIProviderError("No choices in LiteLLM response")
+
+        choice = choices[0]
+        message = self._field(choice, "message")
+        if message is None:
+            raise APIProviderError("No message in LiteLLM response choice")
+
+        content = self._field(message, "content", "") or ""
+
+        tool_calls: List[ToolCall] = []
+        raw_tool_calls = self._field(message, "tool_calls") or []
+        for tc in raw_tool_calls:
+            function = self._field(tc, "function") or {}
+            raw_arguments = self._field(function, "arguments", "{}") or "{}"
+            try:
+                arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
+            except json.JSONDecodeError:
+                log.log_warn(f"Failed to parse tool call arguments: {raw_arguments}")
+                arguments = {}
+
+            tool_calls.append(ToolCall(
+                id=self._field(tc, "id", ""),
+                name=self._field(function, "name", ""),
+                arguments=arguments,
+            ))
+
+        usage_obj = self._field(response, "usage")
+        usage = None
+        if usage_obj:
+            usage = Usage(
+                prompt_tokens=self._field(usage_obj, "prompt_tokens", 0),
+                completion_tokens=self._field(usage_obj, "completion_tokens", 0),
+                total_tokens=self._field(usage_obj, "total_tokens", 0),
+            )
+
+        native_content = {}
+        reasoning_content = self._field(message, "reasoning_content")
+        thinking_blocks = self._field(message, "thinking_blocks")
+        if reasoning_content:
+            native_content["reasoning_content"] = reasoning_content
+        if thinking_blocks:
+            native_content["thinking_blocks"] = thinking_blocks
+
+        finish_reason = self._field(choice, "finish_reason", "stop") or "stop"
+        return content, tool_calls, usage, finish_reason, native_content or None
 
     def _detect_model_family(self) -> str:
         """
@@ -349,98 +415,65 @@ class LiteLLMProvider(OpenAIPlatformApiProvider):
             # Make API call
             response = self._client.chat.completions.create(**completion_kwargs)
 
-            if not response.choices:
-                raise APIProviderError("No choices in LiteLLM response")
-
-            message = response.choices[0].message
-            content = message.content or ""
-
-            # Extract tool calls if present
-            tool_calls = []
-            if message.tool_calls:
-                for tc in message.tool_calls:
-                    try:
-                        arguments = json.loads(tc.function.arguments) if tc.function.arguments else {}
-                    except json.JSONDecodeError:
-                        log.log_warn(f"Failed to parse tool call arguments: {tc.function.arguments}")
-                        arguments = {}
-
-                    tool_call = ToolCall(
-                        id=tc.id,
-                        name=tc.function.name,
-                        arguments=arguments
-                    )
-                    tool_calls.append(tool_call)
+            content, tool_calls, usage, finish_reason, native_content_for_response = (
+                self._normalize_nonstream_response(response)
+            )
 
             # Call native message callback with actual response
             if native_message_callback:
-                choice = response.choices[0]
-                native_message = {
-                    "role": "assistant",
-                    "content": choice.message.content,
-                    "model": response.model,
-                    "id": response.id,
-                    "object": response.object,
-                    "created": response.created,
-                    "finish_reason": choice.finish_reason
-                }
-
-                if choice.message.tool_calls:
-                    native_message["tool_calls"] = [
-                        {
-                            "id": tc.id,
-                            "type": tc.type,
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments
-                            }
-                        }
-                        for tc in choice.message.tool_calls
-                    ]
-
-                # Capture thinking blocks from LiteLLM response (Anthropic models)
-                # LiteLLM returns these fields for Anthropic extended thinking
-                if hasattr(choice.message, 'reasoning_content') and choice.message.reasoning_content:
-                    native_message["reasoning_content"] = choice.message.reasoning_content
-                    log.log_info(f"LiteLLM: Captured reasoning_content ({len(choice.message.reasoning_content)} chars)")
-
-                if hasattr(choice.message, 'thinking_blocks') and choice.message.thinking_blocks:
-                    native_message["thinking_blocks"] = choice.message.thinking_blocks
-                    log.log_info(f"LiteLLM: Captured {len(choice.message.thinking_blocks)} thinking_blocks")
-
-                if response.usage:
-                    native_message["usage"] = {
-                        "prompt_tokens": response.usage.prompt_tokens,
-                        "completion_tokens": response.usage.completion_tokens,
-                        "total_tokens": response.usage.total_tokens
+                if isinstance(response, str):
+                    native_message = {
+                        "role": "assistant",
+                        "content": content,
+                        "model": self.model,
+                        "finish_reason": finish_reason,
+                    }
+                else:
+                    choices = self._field(response, "choices") or []
+                    choice = choices[0]
+                    message = self._field(choice, "message") or {}
+                    native_message = {
+                        "role": "assistant",
+                        "content": content,
+                        "model": self._field(response, "model", self.model),
+                        "id": self._field(response, "id"),
+                        "object": self._field(response, "object"),
+                        "created": self._field(response, "created"),
+                        "finish_reason": finish_reason
                     }
 
+                    raw_tool_calls = self._field(message, "tool_calls") or []
+                    if raw_tool_calls:
+                        native_message["tool_calls"] = [
+                            {
+                                "id": self._field(tc, "id"),
+                                "type": self._field(tc, "type"),
+                                "function": {
+                                    "name": self._field(self._field(tc, "function") or {}, "name"),
+                                    "arguments": self._field(self._field(tc, "function") or {}, "arguments")
+                                }
+                            }
+                            for tc in raw_tool_calls
+                        ]
+
+                    if native_content_for_response:
+                        native_message.update(native_content_for_response)
+
+                    if usage:
+                        native_message["usage"] = {
+                            "prompt_tokens": usage.prompt_tokens,
+                            "completion_tokens": usage.completion_tokens,
+                            "total_tokens": usage.total_tokens
+                        }
+
                 native_message_callback(native_message, self.get_provider_type())
-
-            # Calculate usage
-            usage = None
-            if response.usage:
-                usage = Usage(
-                    prompt_tokens=response.usage.prompt_tokens,
-                    completion_tokens=response.usage.completion_tokens,
-                    total_tokens=response.usage.total_tokens
-                )
-
-            # Build native_content with thinking blocks for ReAct to capture
-            # (same data that goes to native_message_callback, but embedded in ChatResponse)
-            native_content_for_response = {}
-            choice = response.choices[0]
-            if hasattr(choice.message, 'reasoning_content') and choice.message.reasoning_content:
-                native_content_for_response["reasoning_content"] = choice.message.reasoning_content
-            if hasattr(choice.message, 'thinking_blocks') and choice.message.thinking_blocks:
-                native_content_for_response["thinking_blocks"] = choice.message.thinking_blocks
 
             return ChatResponse(
                 content=content,
                 model=self.model,
                 usage=usage,
                 tool_calls=tool_calls,
-                finish_reason=response.choices[0].finish_reason or "stop",
+                finish_reason=finish_reason,
                 native_content=native_content_for_response if native_content_for_response else None
             )
 

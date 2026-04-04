@@ -25,6 +25,7 @@ Key Features:
 import json
 import time
 from typing import AsyncGenerator, Dict, Any, List, Optional, Callable
+from urllib.parse import urlencode
 
 from .base_provider import (
     BaseLLMProvider, 
@@ -37,7 +38,7 @@ from .base_provider import (
 from ..models.llm_models import (
     ChatRequest, ChatResponse, ChatMessage, MessageRole,
     EmbeddingRequest, EmbeddingResponse,
-    ProviderCapabilities, ToolCall, Usage
+    ProviderCapabilities, ProviderModelDiscoveryResult, ToolCall, Usage
 )
 from ..models.provider_types import ProviderType
 from . import oauth_codex_utils as oauth
@@ -50,7 +51,10 @@ except ImportError:
 
 
 # API Configuration
-CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
+CODEX_API_BASE_URL = "https://chatgpt.com/backend-api/codex"
+CODEX_API_ENDPOINT = f"{CODEX_API_BASE_URL}/responses"
+CODEX_MODELS_ENDPOINT = f"{CODEX_API_BASE_URL}/models"
+CODEX_MODELS_CLIENT_VERSION = "0.116.0"
 
 # Official Codex CLI instructions (from openai/codex rust-v0.80.0)
 # CRITICAL: The Codex API validates instructions match the official prompt.
@@ -352,6 +356,68 @@ class OpenAIOAuthProvider(BaseLLMProvider):
             headers["chatgpt-account-id"] = self._account_id
         
         return headers
+
+    def _get_model_discovery_headers(self, access_token: str) -> Dict[str, str]:
+        """Build headers for Codex model discovery."""
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+        }
+
+        if self._account_id:
+            headers["ChatGPT-Account-ID"] = self._account_id
+
+        return headers
+
+    def _get_api_base_url(self) -> str:
+        """Resolve the effective Codex API base URL from the provider config."""
+        configured_url = (self.url or "").strip().rstrip("/")
+        if not configured_url:
+            return CODEX_API_BASE_URL
+
+        for suffix in ("/responses", "/models"):
+            if configured_url.endswith(suffix):
+                return configured_url[:-len(suffix)]
+
+        return configured_url
+
+    def _get_responses_endpoint(self) -> str:
+        """Get the effective Responses API endpoint for this provider instance."""
+        return f"{self._get_api_base_url()}/responses"
+
+    def _get_models_endpoint(self) -> str:
+        """Get the effective model discovery endpoint for this provider instance."""
+        return f"{self._get_api_base_url()}/models"
+
+    def _create_client_session(self, timeout: Optional["aiohttp.ClientTimeout"] = None) -> "aiohttp.ClientSession":
+        """Create an aiohttp session honoring the provider's proxy settings."""
+        bypass_proxy = self.config.get("bypass_proxy", False)
+        if timeout is None:
+            timeout = aiohttp.ClientTimeout(total=self.timeout)
+        return aiohttp.ClientSession(timeout=timeout, trust_env=not bypass_proxy)
+
+    def _get_codex_client_version(self) -> Optional[str]:
+        """Load the client version string used for Codex model discovery."""
+        return CODEX_MODELS_CLIENT_VERSION
+
+    def _extract_model_ids(self, payload: Any) -> List[str]:
+        """Extract model slugs from the Codex `/models` payload."""
+        if not isinstance(payload, dict):
+            return []
+
+        models = payload.get("models")
+        if not isinstance(models, list):
+            return []
+
+        ordered = []
+        seen = set()
+        for model in models:
+            if not isinstance(model, dict):
+                continue
+            slug = model.get("slug")
+            if isinstance(slug, str) and slug and slug not in seen:
+                seen.add(slug)
+                ordered.append(slug)
+        return ordered
     
     # ===================================================================
     # Message Translation Methods
@@ -622,9 +688,9 @@ class OpenAIOAuthProvider(BaseLLMProvider):
         log.log_debug(f"Codex request payload: {json.dumps(payload_debug, indent=2)}")
         
         try:
-            async with aiohttp.ClientSession() as session:
+            async with self._create_client_session() as session:
                 async with session.post(
-                    CODEX_API_ENDPOINT,
+                    self._get_responses_endpoint(),
                     headers=headers,
                     json=payload,
                     ssl=not self.disable_tls
@@ -731,9 +797,9 @@ class OpenAIOAuthProvider(BaseLLMProvider):
         final_response_data: Dict[str, Any] = {}
         
         try:
-            async with aiohttp.ClientSession() as session:
+            async with self._create_client_session() as session:
                 async with session.post(
-                    CODEX_API_ENDPOINT,
+                    self._get_responses_endpoint(),
                     headers=headers,
                     json=payload,
                     ssl=not self.disable_tls
@@ -905,7 +971,7 @@ class OpenAIOAuthProvider(BaseLLMProvider):
         try:
             # Try a simple request
             request = ChatRequest(
-                messages=[ChatMessage(role=MessageRole.USER, content="Hi")],
+                messages=[ChatMessage(role=MessageRole.USER, content="Test message. Please respond with 'OK'.")],
                 model=self.model or "gpt-5.1-codex",
                 max_tokens=10
             )
@@ -925,9 +991,63 @@ class OpenAIOAuthProvider(BaseLLMProvider):
             supports_tools=True,
             supports_embeddings=False,
             supports_vision=True,  # Codex supports images
+            supports_model_discovery=True,
             max_tokens=self.max_tokens,
-            models=ProviderType.OPENAI_OAUTH.default_models
+            models=[]
         )
+
+    async def discover_available_models(self) -> ProviderModelDiscoveryResult:
+        """Discover models from the authenticated Codex models endpoint."""
+        if not AIOHTTP_AVAILABLE:
+            return ProviderModelDiscoveryResult.failure_result(
+                "aiohttp package required. Install with: pip install aiohttp"
+            )
+
+        try:
+            access_token = await self._ensure_valid_token()
+            headers = self._get_model_discovery_headers(access_token)
+            client_version = self._get_codex_client_version()
+            endpoint = self._get_models_endpoint()
+            if client_version:
+                endpoint = f"{endpoint}?{urlencode({'client_version': client_version})}"
+
+            async with self._create_client_session() as session:
+                try:
+                    async with session.get(endpoint, headers=headers, ssl=not self.disable_tls) as response:
+                        if response.status == 401:
+                            return ProviderModelDiscoveryResult.failure_result(
+                                "Authentication failed. Please re-authenticate."
+                            )
+                        if response.status == 404:
+                            return ProviderModelDiscoveryResult.failure_result(
+                                "Codex model discovery endpoint not found."
+                            )
+                        if not response.ok:
+                            text = await response.text()
+                            return ProviderModelDiscoveryResult.failure_result(
+                                f"API error {response.status}: {text}"
+                            )
+                        payload = await response.json(content_type=None)
+                except aiohttp.ClientError as e:
+                    return ProviderModelDiscoveryResult.failure_result(
+                        f"Network error: {str(e)}"
+                    )
+
+            models = self._extract_model_ids(payload)
+            if not models:
+                return ProviderModelDiscoveryResult.failure_result(
+                    "No available models were found."
+                )
+
+            return ProviderModelDiscoveryResult.success_result(models)
+
+        except AuthenticationError as e:
+            return ProviderModelDiscoveryResult.failure_result(str(e))
+        except Exception as e:
+            log.log_error(f"OpenAI OAuth model discovery failed: {e}")
+            return ProviderModelDiscoveryResult.failure_result(
+                f"Model discovery failed: {str(e)}"
+            )
     
     def get_provider_type(self) -> ProviderType:
         """Get the provider type."""

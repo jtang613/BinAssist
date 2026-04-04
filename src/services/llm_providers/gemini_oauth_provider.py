@@ -37,7 +37,8 @@ from .base_provider import (
 )
 from ..models.llm_models import (
     ChatRequest, ChatResponse, EmbeddingRequest, EmbeddingResponse,
-    ChatMessage, MessageRole, ToolCall, ToolResult, Usage, ProviderCapabilities
+    ChatMessage, MessageRole, ToolCall, ToolResult, Usage, ProviderCapabilities,
+    ProviderModelDiscoveryResult
 )
 from ..models.provider_types import ProviderType
 
@@ -73,6 +74,26 @@ MAX_RATE_LIMIT_BACKOFF_S = 60.0
 INITIAL_RATE_LIMIT_BACKOFF_S = 5.0
 
 DEFAULT_MODEL = "gemini-2.5-flash"
+
+_CLI_VISIBLE_AUTO_MODELS = [
+    "auto-gemini-3",
+    "auto-gemini-2.5",
+]
+
+_CLI_VISIBLE_PREVIEW_MODELS = [
+    "gemini-3.1-flash-lite-preview",
+    "gemini-3.1-pro-preview",
+    "gemini-3-pro-preview",
+    "gemini-3-flash-preview",
+]
+
+_CLI_VISIBLE_STABLE_MODELS = [
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+]
+
+_CLI_PREVIEW_MODELS = set(_CLI_VISIBLE_PREVIEW_MODELS + ["auto-gemini-3"])
 
 
 class GeminiOAuthProvider(BaseLLMProvider):
@@ -370,6 +391,52 @@ class GeminiOAuthProvider(BaseLLMProvider):
             return data["response"]
         return data
 
+    def _create_client_session(
+        self,
+        timeout: Optional["aiohttp.ClientTimeout"] = None,
+    ) -> "aiohttp.ClientSession":
+        """Create an aiohttp session honoring provider timeout and proxy settings."""
+        bypass_proxy = self.config.get("bypass_proxy", False)
+        if timeout is None:
+            timeout = aiohttp.ClientTimeout(total=self.timeout)
+        return aiohttp.ClientSession(timeout=timeout, trust_env=not bypass_proxy)
+
+    def _get_project_id(self) -> str:
+        """Get the Code Assist project ID discovered during OAuth setup."""
+        if not self._credentials:
+            return ""
+        project_id = self._credentials.get("project_id", "")
+        return project_id.strip() if isinstance(project_id, str) else ""
+
+    def _get_method_url(self, method: str) -> str:
+        """Build a Code Assist RPC URL."""
+        return f"{CODE_ASSIST_ENDPOINT}/{CODE_ASSIST_API_VERSION}:{method}"
+
+    @staticmethod
+    def _is_preview_model(model_id: str) -> bool:
+        """Check whether a model ID is part of the preview catalog."""
+        return model_id in _CLI_PREVIEW_MODELS or model_id.endswith("-preview")
+
+    @classmethod
+    def _has_preview_access_from_buckets(cls, buckets: List[Dict[str, Any]]) -> bool:
+        """Infer preview access from Code Assist quota buckets."""
+        for bucket in buckets:
+            if not isinstance(bucket, dict):
+                continue
+            model_id = bucket.get("modelId")
+            if isinstance(model_id, str) and cls._is_preview_model(model_id):
+                return True
+        return False
+
+    @classmethod
+    def _build_visible_catalog(cls, has_preview_access: bool) -> List[str]:
+        """Build the user-visible Gemini CLI-style catalog."""
+        models = list(_CLI_VISIBLE_AUTO_MODELS)
+        if has_preview_access:
+            models.extend(_CLI_VISIBLE_PREVIEW_MODELS)
+        models.extend(_CLI_VISIBLE_STABLE_MODELS)
+        return models
+
     # =========================================================================
     # Response Parsing
     # =========================================================================
@@ -442,10 +509,10 @@ class GeminiOAuthProvider(BaseLLMProvider):
         payload = self._build_request_payload(request)
         wrapped = self._wrap_request(payload)
 
-        url = f"{CODE_ASSIST_ENDPOINT}/{CODE_ASSIST_API_VERSION}:generateContent"
+        url = self._get_method_url("generateContent")
 
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as session:
-            async with session.post(url, json=wrapped, headers=headers) as response:
+        async with self._create_client_session() as session:
+            async with session.post(url, json=wrapped, headers=headers, ssl=not self.disable_tls) as response:
                 if response.status == 401:
                     raise AuthenticationError("Authentication failed. Please re-authenticate.")
                 if response.status == 429:
@@ -496,13 +563,13 @@ class GeminiOAuthProvider(BaseLLMProvider):
         wrapped = self._wrap_request(payload)
 
         # Streaming via ?alt=sse
-        url = f"{CODE_ASSIST_ENDPOINT}/{CODE_ASSIST_API_VERSION}:streamGenerateContent?alt=sse"
+        url = f"{self._get_method_url('streamGenerateContent')}?alt=sse"
 
         accumulated_content = ""
         tool_calls = []
 
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as session:
-            async with session.post(url, json=wrapped, headers=headers) as response:
+        async with self._create_client_session() as session:
+            async with session.post(url, json=wrapped, headers=headers, ssl=not self.disable_tls) as response:
                 if response.status == 401:
                     raise AuthenticationError("Authentication failed. Please re-authenticate.")
                 if response.status == 429:
@@ -621,15 +688,15 @@ class GeminiOAuthProvider(BaseLLMProvider):
             headers = await self._get_headers()
 
             payload = {
-                "contents": [{"role": "user", "parts": [{"text": "test"}]}],
+                "contents": [{"role": "user", "parts": [{"text": "Test message. Please respond with 'OK'."}]}],
                 "generationConfig": {"maxOutputTokens": 1}
             }
             wrapped = self._wrap_request(payload)
 
-            url = f"{CODE_ASSIST_ENDPOINT}/{CODE_ASSIST_API_VERSION}:generateContent"
+            url = self._get_method_url("generateContent")
 
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-                async with session.post(url, json=wrapped, headers=headers) as response:
+            async with self._create_client_session() as session:
+                async with session.post(url, json=wrapped, headers=headers, ssl=not self.disable_tls) as response:
                     if response.status == 401:
                         return False
                     return response.ok
@@ -646,14 +713,62 @@ class GeminiOAuthProvider(BaseLLMProvider):
             supports_tools=True,
             supports_embeddings=False,
             supports_vision=False,
+            supports_model_discovery=True,
             max_tokens=self.max_tokens,
-            models=[
-                "gemini-2.5-flash",
-                "gemini-2.5-pro",
-                "gemini-2.0-flash",
-                "gemini-2.0-flash-lite",
-            ]
+            models=[]
         )
+
+    async def discover_available_models(self) -> ProviderModelDiscoveryResult:
+        """Discover Gemini OAuth models via Code Assist quota and CLI catalog rules."""
+        try:
+            headers = await self._get_headers()
+            project_id = self._get_project_id()
+            if not project_id:
+                return ProviderModelDiscoveryResult.failure_result(
+                    "Gemini OAuth is missing its Code Assist project ID. Please re-authenticate."
+                )
+
+            request_body = {"project": project_id}
+            quota_endpoint = self._get_method_url("retrieveUserQuota")
+
+            async with self._create_client_session() as session:
+                async with session.post(
+                    quota_endpoint,
+                    json=request_body,
+                    headers=headers,
+                    ssl=not self.disable_tls,
+                ) as response:
+                    if response.status == 401:
+                        return ProviderModelDiscoveryResult.failure_result(
+                            "Authentication failed. Please re-authenticate."
+                        )
+                    if not response.ok:
+                        text = await response.text()
+                        return ProviderModelDiscoveryResult.failure_result(
+                            f"API error {response.status}: {text}"
+                        )
+                    payload = await response.json(content_type=None)
+
+            buckets = payload.get("buckets")
+            if not isinstance(buckets, list) or not buckets:
+                return ProviderModelDiscoveryResult.failure_result(
+                    "No available Gemini Code Assist models were found for this account."
+                )
+
+            has_preview_access = self._has_preview_access_from_buckets(buckets)
+            models = self._build_visible_catalog(has_preview_access)
+            return ProviderModelDiscoveryResult.success_result(
+                models,
+                source_label="quota+catalog",
+            )
+
+        except AuthenticationError as e:
+            return ProviderModelDiscoveryResult.failure_result(str(e))
+        except Exception as e:
+            log.log_error(f"Gemini OAuth model discovery failed: {e}")
+            return ProviderModelDiscoveryResult.failure_result(
+                f"Model discovery failed: {str(e)}"
+            )
 
     def get_provider_type(self) -> ProviderType:
         """Get the provider type"""

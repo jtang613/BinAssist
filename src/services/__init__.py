@@ -17,7 +17,7 @@ from .service_registry import get_service_registry, reset_service_registry, Serv
 from .models.provider_types import ProviderType
 from .models.llm_models import (
     ChatMessage, MessageRole, ChatRequest, ChatResponse,
-    EmbeddingRequest, EmbeddingResponse, ProviderCapabilities,
+    EmbeddingRequest, EmbeddingResponse, ProviderCapabilities, ProviderModelDiscoveryResult,
     ToolCall, Usage
 )
 
@@ -61,6 +61,7 @@ __all__ = [
     'EmbeddingRequest',
     'EmbeddingResponse',
     'ProviderCapabilities',
+    'ProviderModelDiscoveryResult',
     'ToolCall',
     'Usage',
     

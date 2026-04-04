@@ -28,7 +28,8 @@ from .base_provider import (
 )
 from ..models.llm_models import (
     ChatRequest, ChatResponse, EmbeddingRequest, EmbeddingResponse,
-    ChatMessage, MessageRole, ToolCall, ToolResult, Usage, ProviderCapabilities
+    ChatMessage, MessageRole, ToolCall, ToolResult, Usage, ProviderCapabilities,
+    ProviderModelDiscoveryResult
 )
 from ..models.provider_types import ProviderType
 from ..models.reasoning_models import ReasoningConfig
@@ -75,31 +76,31 @@ class AnthropicPlatformApiProvider(BaseLLMProvider):
 
             # Handle TLS verification settings and create client
             if self.disable_tls:
-                import httpx
-                import ssl
                 log.log_warn(f"TLS verification disabled for Anthropic provider '{self.name}'")
 
-                # Create SSL context that doesn't verify certificates
-                ssl_context = ssl.create_default_context()
-                ssl_context.check_hostname = False
-                ssl_context.verify_mode = ssl.CERT_NONE
-
                 # Create httpx client with disabled verification
-                http_client = httpx.Client(verify=False, timeout=30.0)
+                http_client = httpx.Client(verify=False, timeout=self.timeout)
 
                 self._client = anthropic.Anthropic(
                     api_key=self.api_key,
                     base_url=base_url,
-                    timeout=30.0,
+                    timeout=self.timeout,
                     max_retries=0,  # We handle retries ourselves
                     http_client=http_client
                 )
             else:
+                client_kwargs = {}
+                if httpx is not None:
+                    client_kwargs["http_client"] = httpx.Client(
+                        trust_env=not self.bypass_proxy,
+                        timeout=self.timeout,
+                    )
                 self._client = anthropic.Anthropic(
                     api_key=self.api_key,
                     base_url=base_url,
-                    timeout=30.0,
-                    max_retries=0  # We handle retries ourselves
+                    timeout=self.timeout,
+                    max_retries=0,
+                    **client_kwargs
                 )
             
         except Exception as e:
@@ -654,9 +655,10 @@ class AnthropicPlatformApiProvider(BaseLLMProvider):
             )
             
             response = await self.chat_completion(test_request)
-            return bool(response.content)
-            
-        except Exception:
+            return bool(response.content or response.tool_calls or response.native_content)
+
+        except Exception as e:
+            log.log_error(f"Anthropic connection test failed: {e}")
             return False
     
     def get_capabilities(self) -> ProviderCapabilities:
@@ -667,15 +669,159 @@ class AnthropicPlatformApiProvider(BaseLLMProvider):
             supports_tools=True,
             supports_embeddings=True,  # Via TF-IDF fallback
             supports_vision=False,  # Not implemented yet
+            supports_model_discovery=True,
             max_tokens=self.max_tokens,
-            models=[
-                "claude-3-5-sonnet-20241022",
-                "claude-3-5-haiku-20241022", 
-                "claude-3-opus-20240229",
-                "claude-3-sonnet-20240229",
-                "claude-3-haiku-20240307"
-            ]
+            models=[]
         )
+
+    async def discover_available_models(self) -> ProviderModelDiscoveryResult:
+        """Discover models from Anthropic's models API."""
+        try:
+            response = await asyncio.to_thread(self._client.models.list, limit=1000)
+
+            model_entries = getattr(response, "data", None)
+            if model_entries is None and isinstance(response, dict):
+                model_entries = response.get("data", [])
+
+            models: List[str] = []
+            seen = set()
+            for entry in model_entries or []:
+                model_id = getattr(entry, "id", None)
+                if model_id is None and isinstance(entry, dict):
+                    model_id = entry.get("id")
+                if isinstance(model_id, str) and model_id and model_id not in seen:
+                    seen.add(model_id)
+                    models.append(model_id)
+
+            if models:
+                return ProviderModelDiscoveryResult.success_result(models)
+
+            return ProviderModelDiscoveryResult.failure_result(
+                "No available models were found."
+            )
+
+        except anthropic.AuthenticationError as e:
+            return ProviderModelDiscoveryResult.failure_result(
+                f"Authentication failed: {str(e)}"
+            )
+        except anthropic.APIConnectionError as e:
+            return ProviderModelDiscoveryResult.failure_result(
+                f"Network error: {str(e)}"
+            )
+        except anthropic.APIError as e:
+            return ProviderModelDiscoveryResult.failure_result(
+                f"Provider error: {str(e)}"
+            )
+        except Exception as e:
+            log.log_warn(
+                f"Anthropic SDK model discovery failed for '{self.name}': {e}. "
+                "Falling back to raw HTTP /v1/models fetch."
+            )
+            return await self._discover_available_models_via_http(str(e))
+
+    def _get_model_discovery_headers(self) -> Dict[str, str]:
+        """Build headers for a raw Anthropic models request."""
+        return {
+            "Accept": "application/json",
+            "anthropic-version": "2023-06-01",
+            "x-api-key": self.api_key,
+        }
+
+    def _get_models_endpoint_candidates(self) -> List[str]:
+        """Resolve plausible Anthropic models endpoints from the configured base URL."""
+        base_url = (self.url or "https://api.anthropic.com").strip().rstrip("/")
+        candidates: List[str] = []
+
+        def add(candidate: str):
+            if candidate and candidate not in candidates:
+                candidates.append(candidate)
+
+        if base_url.endswith("/v1/models"):
+            add(base_url)
+            return candidates
+
+        if base_url.endswith("/v1"):
+            add(f"{base_url}/models")
+            return candidates
+
+        add(f"{base_url}/v1/models")
+        add(f"{base_url}/models")
+        return candidates
+
+    async def _discover_available_models_via_http(
+        self,
+        sdk_error_message: Optional[str] = None,
+    ) -> ProviderModelDiscoveryResult:
+        """Fallback model discovery via raw HTTP GET /v1/models."""
+        if httpx is None:
+            detail = "httpx package is not available for HTTP fallback."
+            if sdk_error_message:
+                detail = f"{detail} SDK failure: {sdk_error_message}"
+            return ProviderModelDiscoveryResult.failure_result(detail)
+
+        bypass_proxy = self.config.get("bypass_proxy", False)
+        last_error: Optional[str] = None
+
+        try:
+            async with httpx.AsyncClient(
+                verify=not self.disable_tls,
+                trust_env=not bypass_proxy,
+                timeout=self.timeout,
+            ) as client:
+                for endpoint in self._get_models_endpoint_candidates():
+                    try:
+                        response = await client.get(
+                            endpoint,
+                            headers=self._get_model_discovery_headers(),
+                        )
+                    except httpx.HTTPError as e:
+                        last_error = f"Network error for {endpoint}: {str(e)}"
+                        continue
+
+                    if response.status_code in (401, 403):
+                        return ProviderModelDiscoveryResult.failure_result(
+                            "Authentication failed while fetching models."
+                        )
+
+                    if response.status_code >= 400:
+                        body = response.text.strip()
+                        last_error = body or f"HTTP {response.status_code} from {endpoint}"
+                        continue
+
+                    try:
+                        payload = response.json()
+                    except ValueError:
+                        snippet = response.text.strip().replace("\n", " ")[:160]
+                        last_error = (
+                            f"Non-JSON response from {endpoint}: {snippet or 'empty body'}"
+                        )
+                        continue
+
+                    model_entries = payload.get("data", []) if isinstance(payload, dict) else []
+                    models: List[str] = []
+                    seen = set()
+                    for entry in model_entries:
+                        model_id = entry.get("id") if isinstance(entry, dict) else None
+                        if isinstance(model_id, str) and model_id and model_id not in seen:
+                            seen.add(model_id)
+                            models.append(model_id)
+
+                    if models:
+                        return ProviderModelDiscoveryResult.success_result(models)
+
+                    last_error = f"No available models were found at {endpoint}."
+
+            detail = last_error or "No available models were found."
+            if sdk_error_message:
+                detail = f"{detail} (SDK fallback triggered after: {sdk_error_message})"
+            return ProviderModelDiscoveryResult.failure_result(detail)
+
+        except Exception as e:
+            log.log_error(f"Anthropic HTTP model discovery fallback failed: {e}")
+            detail = f"Model discovery failed: {str(e)}"
+            if sdk_error_message:
+                detail = f"{detail} (SDK fallback triggered after: {sdk_error_message})"
+            return ProviderModelDiscoveryResult.failure_result(detail)
     
     def get_provider_type(self) -> ProviderType:
         """Get the provider type for this provider"""

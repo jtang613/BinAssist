@@ -531,7 +531,7 @@ class AnthropicClaudeCliProvider(BaseLLMProvider):
 
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(),
-                timeout=10
+                timeout=self.timeout
             )
 
             if process.returncode == 0:

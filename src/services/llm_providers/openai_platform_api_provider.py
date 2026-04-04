@@ -21,7 +21,8 @@ from .base_provider import (
 )
 from ..models.llm_models import (
     ChatRequest, ChatResponse, EmbeddingRequest, EmbeddingResponse,
-    ChatMessage, MessageRole, ToolCall, ToolResult, Usage, ProviderCapabilities
+    ChatMessage, MessageRole, ToolCall, ToolResult, Usage, ProviderCapabilities,
+    ProviderModelDiscoveryResult
 )
 from ..models.provider_types import ProviderType
 from ..models.reasoning_models import ReasoningConfig
@@ -67,9 +68,9 @@ class OpenAIPlatformApiProvider(BaseLLMProvider):
         # Initialize OpenAI client
         try:
             # o* models need longer timeouts due to reasoning time
-            timeout = 30.0
+            timeout = self.timeout
             if self._is_reasoning_model():
-                timeout = max(timeout, 180.0)  # At least 3 minutes for o* models
+                timeout = max(timeout, self.timeout)
                 log.log_info(f"Using extended timeout of {timeout}s for o* model: {self.model}")
 
             # Handle base_url - use default if not specified or standard OpenAI URL
@@ -83,13 +84,7 @@ class OpenAIPlatformApiProvider(BaseLLMProvider):
             # Handle TLS verification settings and create client
             if self.disable_tls:
                 import httpx
-                import ssl
                 log.log_warn(f"TLS verification disabled for OpenAI provider '{self.name}'")
-
-                # Create SSL context that doesn't verify certificates
-                ssl_context = ssl.create_default_context()
-                ssl_context.check_hostname = False
-                ssl_context.verify_mode = ssl.CERT_NONE
 
                 # Create httpx client with disabled verification
                 http_client = httpx.Client(verify=False, timeout=timeout)
@@ -102,11 +97,18 @@ class OpenAIPlatformApiProvider(BaseLLMProvider):
                     http_client=http_client
                 )
             else:
+                # Respect bypass_proxy setting (default False: use system proxy)
+                import httpx
+                _bypass_proxy = self.config.get('bypass_proxy', False)
+                _http_client = httpx.Client(trust_env=not _bypass_proxy, timeout=timeout)
+                if _bypass_proxy:
+                    log.log_info(f"Bypassing system proxy for OpenAI provider '{self.name}'")
                 self._client = OpenAI(
                     api_key=api_key,
                     base_url=base_url,
                     timeout=timeout,
-                    max_retries=0  # We handle retries ourselves
+                    max_retries=0,
+                    http_client=_http_client
                 )
             
         except Exception as e:
@@ -559,6 +561,7 @@ class OpenAIPlatformApiProvider(BaseLLMProvider):
             supports_tools=True,
             supports_embeddings=True,
             supports_vision=False,
+            supports_model_discovery=True,
             max_tokens=self.max_tokens,
             models=[self.model] if self.model else []
         )
@@ -584,7 +587,8 @@ class OpenAIPlatformApiProvider(BaseLLMProvider):
         try:
             # Simple test with minimal parameters
             test_request = ChatRequest(
-                messages=[ChatMessage(role=MessageRole.USER, content="Hi")],
+                messages=[ChatMessage(role=MessageRole.USER, content="Test message. Please respond with 'OK'.")],
+                model=self.model,
                 max_tokens=10,
                 temperature=0.1
             )
@@ -595,6 +599,146 @@ class OpenAIPlatformApiProvider(BaseLLMProvider):
         except Exception as e:
             log.log_error(f"OpenAI connection test failed: {e}")
             return False
+
+    async def discover_available_models(self) -> ProviderModelDiscoveryResult:
+        """Discover models using the provider's OpenAI-compatible models endpoint."""
+        try:
+            response = await asyncio.to_thread(self._client.models.list)
+            model_entries = getattr(response, 'data', None)
+            if model_entries is None and isinstance(response, dict):
+                model_entries = response.get('data', [])
+
+            models = []
+            for entry in model_entries or []:
+                model_id = getattr(entry, 'id', None)
+                if model_id is None and isinstance(entry, dict):
+                    model_id = entry.get('id')
+                if model_id:
+                    models.append(model_id)
+
+            if not models:
+                return ProviderModelDiscoveryResult.failure_result(
+                    "No available models were found."
+                )
+
+            return ProviderModelDiscoveryResult.success_result(models)
+
+        except openai.AuthenticationError as e:
+            return ProviderModelDiscoveryResult.failure_result(
+                f"Authentication failed: {str(e)}"
+            )
+        except openai.APIConnectionError as e:
+            return ProviderModelDiscoveryResult.failure_result(
+                f"Network error: {str(e)}"
+            )
+        except openai.APIError as e:
+            return ProviderModelDiscoveryResult.failure_result(
+                f"Provider error: {str(e)}"
+            )
+        except Exception as e:
+            log.log_warn(
+                f"OpenAI SDK model discovery failed for '{self.name}': {e}. "
+                "Falling back to raw HTTP /models fetch."
+            )
+            return await self._discover_available_models_via_http(str(e))
+
+    def _get_models_endpoint_candidates(self) -> List[str]:
+        """Resolve plausible OpenAI-compatible models endpoints from the configured base URL."""
+        base_url = (self.url or "https://api.openai.com/v1").strip().rstrip("/")
+        candidates: List[str] = []
+
+        def add(candidate: str):
+            if candidate and candidate not in candidates:
+                candidates.append(candidate)
+
+        if base_url.endswith("/models"):
+            add(base_url)
+            return candidates
+
+        add(f"{base_url}/models")
+        if not base_url.endswith("/v1"):
+            add(f"{base_url}/v1/models")
+
+        return candidates
+
+    def _get_model_discovery_headers(self) -> Dict[str, str]:
+        """Build headers for a raw OpenAI-compatible /models request."""
+        headers = {"Accept": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+    async def _discover_available_models_via_http(
+        self,
+        sdk_error_message: Optional[str] = None
+    ) -> ProviderModelDiscoveryResult:
+        """Fallback model discovery for providers whose /models payload breaks the SDK parser."""
+        import httpx
+
+        bypass_proxy = self.config.get('bypass_proxy', False)
+        last_error: Optional[str] = None
+
+        try:
+            async with httpx.AsyncClient(
+                verify=not self.disable_tls,
+                trust_env=not bypass_proxy,
+                timeout=self.timeout,
+            ) as client:
+                for endpoint in self._get_models_endpoint_candidates():
+                    try:
+                        response = await client.get(
+                            endpoint,
+                            headers=self._get_model_discovery_headers(),
+                        )
+                    except httpx.HTTPError as e:
+                        last_error = f"Network error for {endpoint}: {str(e)}"
+                        continue
+
+                    if response.status_code in (401, 403):
+                        return ProviderModelDiscoveryResult.failure_result(
+                            "Authentication failed while fetching models."
+                        )
+
+                    if response.status_code >= 400:
+                        body = response.text.strip()
+                        last_error = body or f"HTTP {response.status_code} from {endpoint}"
+                        continue
+
+                    try:
+                        payload = response.json()
+                    except ValueError:
+                        snippet = response.text.strip().replace("\n", " ")[:160]
+                        last_error = (
+                            f"Non-JSON response from {endpoint}: {snippet or 'empty body'}"
+                        )
+                        continue
+
+                    model_entries = payload.get("data", []) if isinstance(payload, dict) else []
+
+                    models: List[str] = []
+                    seen = set()
+                    for entry in model_entries:
+                        model_id = entry.get("id") if isinstance(entry, dict) else None
+                        if isinstance(model_id, str) and model_id and model_id not in seen:
+                            seen.add(model_id)
+                            models.append(model_id)
+
+                    if models:
+                        return ProviderModelDiscoveryResult.success_result(models)
+
+                    last_error = f"No available models were found at {endpoint}."
+
+            detail = last_error or "No available models were found."
+            if sdk_error_message:
+                detail = f"{detail} (SDK fallback triggered after: {sdk_error_message})"
+            return ProviderModelDiscoveryResult.failure_result(detail)
+
+        except Exception as e:
+            log.log_error(f"OpenAI HTTP model discovery fallback failed: {e}")
+            detail = f"Model discovery failed: {str(e)}"
+            if sdk_error_message:
+                detail = f"{detail} (SDK fallback triggered after: {sdk_error_message})"
+            return ProviderModelDiscoveryResult.failure_result(detail)
     
 # Factory for OpenAI provider
 from ..llm_providers.provider_factory import ProviderFactory

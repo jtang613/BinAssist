@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from typing import AsyncGenerator, List, Dict, Any, Optional, Callable
 from ..models.llm_models import (
     ChatRequest, ChatResponse, EmbeddingRequest, EmbeddingResponse,
-    ProviderCapabilities, ToolCall, ToolResult
+    ProviderCapabilities, ProviderModelDiscoveryResult, ToolCall, ToolResult
 )
 from ..models.provider_types import ProviderType
 
@@ -31,6 +31,9 @@ except ImportError:
         @staticmethod
         def log_debug(msg): print(f"[BinAssist] DEBUG: {msg}")
     log = MockLog()
+
+
+DEFAULT_PROVIDER_TIMEOUT_SECONDS = 90.0
 
 
 class BaseLLMProvider(ABC):
@@ -59,13 +62,28 @@ class BaseLLMProvider(ABC):
         self.url = config.get('url', '')
         self.api_key = config.get('api_key', '')
         self.max_tokens = config.get('max_tokens', 4096)
+        self.timeout = self._normalize_timeout_seconds(
+            config.get('timeout', DEFAULT_PROVIDER_TIMEOUT_SECONDS)
+        )
         self.disable_tls = config.get('disable_tls', False)
+        self.bypass_proxy = config.get('bypass_proxy', False)
         self.provider_type = config.get('provider_type', 'openai_platform')
 
         # Rate limit retry configuration
         self.rate_limit_max_retries = config.get('rate_limit_max_retries', 50)
         self.rate_limit_min_delay = config.get('rate_limit_min_delay', 10.0)  # seconds
         self.rate_limit_max_delay = config.get('rate_limit_max_delay', 30.0)  # seconds
+
+    @staticmethod
+    def _normalize_timeout_seconds(value: Any) -> float:
+        """Normalize provider timeout configuration to a positive float."""
+        try:
+            timeout = float(value)
+            if timeout > 0:
+                return timeout
+        except (TypeError, ValueError):
+            pass
+        return DEFAULT_PROVIDER_TIMEOUT_SECONDS
 
     # ===================================================================
     # Rate Limit Retry Mechanism
@@ -262,6 +280,17 @@ class BaseLLMProvider(ABC):
             True if connection successful, False otherwise
         """
         pass
+
+    async def discover_available_models(self) -> ProviderModelDiscoveryResult:
+        """
+        Discover available models for this provider.
+
+        Providers with live model discovery support should override this method.
+        """
+        provider_type = self.get_provider_type()
+        return ProviderModelDiscoveryResult.failure_result(
+            f"Live model discovery is not supported for {provider_type.display_name}."
+        )
     
     @abstractmethod
     def get_capabilities(self) -> ProviderCapabilities:

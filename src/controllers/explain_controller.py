@@ -291,7 +291,11 @@ class ExplainController:
             llm_query = self._generate_llm_query(context, code_data, rag_enabled, mcp_enabled)
             
             # Track RLHF context for this query
-            self._track_rlhf_context(active_provider['name'], llm_query, "Function analysis system")
+            self._track_rlhf_context(
+                active_provider['name'],
+                llm_query,
+                self._get_explain_system_prompt()
+            )
             
             # Send to LLM and stream response
             self._query_llm_async(llm_query, active_provider)
@@ -396,7 +400,11 @@ class ExplainController:
             llm_query = self._generate_line_explanation_prompt(context, line_with_context, rag_enabled, mcp_enabled)
 
             # Track RLHF context for this query
-            self._track_rlhf_context(active_provider['name'], llm_query, "Line analysis system")
+            self._track_rlhf_context(
+                active_provider['name'],
+                llm_query,
+                self._get_explain_system_prompt()
+            )
 
             # Store line context for saving after completion
             self._pending_line_context = {
@@ -793,8 +801,8 @@ Analyze the specific instruction/line of code below. Provide a detailed explanat
         self._streaming_renderer.reset()
         self.view.explain_browser.reset_streaming()
 
-        # Initialize conversation history with the user query
-        self._conversation_history = [{"role": "user", "content": query}]
+        # Initialize conversation history with system and user messages.
+        self._conversation_history = self._build_explain_messages(query)
 
         # Show LLM processing state
         self.view.set_explanation_content("*Generating AI explanation...*")
@@ -804,7 +812,7 @@ Analyze the specific instruction/line of code below. Provide a detailed explanat
         
         if mcp_tools or self.mcp_enabled:
             # Use enhanced thread with MCP support
-            messages = [{"role": "user", "content": query}]
+            messages = self._conversation_history.copy()
             self.llm_thread = ExplainLLMThread(messages, provider_config, self.llm_factory, mcp_tools)
             self.llm_thread.response_chunk.connect(self._on_llm_response_chunk)
             self.llm_thread.response_complete.connect(self._on_llm_response_complete)
@@ -815,11 +823,28 @@ Analyze the specific instruction/line of code below. Provide a detailed explanat
             self.llm_thread.start()
         else:
             # Use original thread for backward compatibility
-            self.llm_thread = LLMQueryThread(query, provider_config, self.llm_factory)
+            self.llm_thread = LLMQueryThread(self._conversation_history.copy(), provider_config, self.llm_factory)
             self.llm_thread.response_chunk.connect(self._on_llm_response_chunk)
             self.llm_thread.response_complete.connect(self._on_llm_response_complete)
             self.llm_thread.response_error.connect(self._on_llm_response_error)
             self.llm_thread.start()
+
+    def _get_explain_system_prompt(self) -> str:
+        """Get the configured system prompt for Explain queries."""
+        try:
+            return (self.settings_service.get_system_prompt() or "").strip()
+        except Exception as e:
+            log.log_warn(f"Failed to load Explain system prompt: {e}")
+            return ""
+
+    def _build_explain_messages(self, query: str) -> List[Dict[str, str]]:
+        """Build the initial message list for Explain queries."""
+        messages: List[Dict[str, str]] = []
+        system_prompt = self._get_explain_system_prompt()
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": query})
+        return messages
 
     def _on_streaming_update(self, update) -> None:
         """Handle streaming renderer updates."""
@@ -1551,14 +1576,14 @@ Analyze the specific instruction/line of code below. Provide a detailed explanat
 
         # Get MCP tools if enabled
         mcp_tools = self._get_current_mcp_tools()
+        messages = self._build_explain_messages(query)
 
         if mcp_tools or self.mcp_enabled:
             # Use enhanced thread with MCP support
-            messages = [{"role": "user", "content": query}]
             self.line_llm_thread = ExplainLLMThread(messages, provider_config, self.llm_factory, mcp_tools)
         else:
             # Use original thread
-            self.line_llm_thread = LLMQueryThread(query, provider_config, self.llm_factory)
+            self.line_llm_thread = LLMQueryThread(messages, provider_config, self.llm_factory)
 
         # Connect signals for line-specific handling
         self.line_llm_thread.response_chunk.connect(self._on_line_llm_response_chunk)
@@ -1849,18 +1874,18 @@ class LLMQueryThread(QThread):
     response_chunk = Signal(str)
     response_complete = Signal()
     response_error = Signal(str)
-    
-    def __init__(self, query: str, provider_config: dict, llm_factory):
+
+    def __init__(self, messages: List[Dict[str, Any]], provider_config: dict, llm_factory):
         super().__init__()
-        self.query = query
+        self.messages = messages
         self.provider_config = provider_config
         self.llm_factory = llm_factory
         self.cancelled = False
-    
+
     def cancel(self):
         """Cancel the running query"""
         self.cancelled = True
-    
+
     def run(self):
         """Execute LLM query in background thread"""
         try:
@@ -1869,44 +1894,60 @@ class LLMQueryThread(QThread):
         except Exception as e:
             if not self.cancelled:  # Don't emit error if cancelled
                 self.response_error.emit(str(e))
-    
+
     async def _async_query(self):
         """Execute async LLM query"""
         try:
             # Check for cancellation before starting
             if self.cancelled:
                 return
-            
+
             # Import required models
             from ..services.models.llm_models import ChatRequest, ChatMessage, MessageRole
-            
+
             # Create provider instance
             provider = self.llm_factory.create_provider(self.provider_config)
-            
+
             # Check for cancellation after provider creation
             if self.cancelled:
                 return
-            
-            # Create chat request
-            messages = [ChatMessage(role=MessageRole.USER, content=self.query)]
+
+            chat_messages = []
+            for msg in self.messages:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if role == "system":
+                    chat_messages.append(ChatMessage(role=MessageRole.SYSTEM, content=content))
+                elif role == "assistant":
+                    chat_messages.append(ChatMessage(role=MessageRole.ASSISTANT, content=content))
+                elif role == "tool":
+                    chat_messages.append(ChatMessage(
+                        role=MessageRole.TOOL,
+                        content=content,
+                        tool_call_id=msg.get("tool_call_id"),
+                        name=msg.get("name")
+                    ))
+                else:
+                    chat_messages.append(ChatMessage(role=MessageRole.USER, content=content))
+
             request = ChatRequest(
-                messages=messages, 
+                messages=chat_messages,
                 model=self.provider_config.get('model', ''),
                 stream=True,
                 max_tokens=self.provider_config.get('max_tokens', 4096)
             )
-            
+
             # Execute streaming query with cancellation checks
             async for response in provider.chat_completion_stream(request):
                 if self.cancelled:
                     break
                 if response.content:
                     self.response_chunk.emit(response.content)
-            
+
             # Only emit completion if not cancelled
             if not self.cancelled:
                 self.response_complete.emit()
-            
+
         except Exception as e:
             if not self.cancelled:
                 self.response_error.emit(str(e))
