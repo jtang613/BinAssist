@@ -145,7 +145,7 @@ Configure connection to the SymGraph cloud service for sharing symbols and graph
 ### Getting an API Key
 
 To use push/pull features:
-1. Register at [symgraph.io](https://symgraph.io)
+1. Register at [symgraph.ai](https://symgraph.ai)
 2. Generate an API key in your account settings
 3. Enter the key in the API Key field
 4. Click **Test** to verify connectivity
