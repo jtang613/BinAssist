@@ -8,6 +8,7 @@ querying, pushing, and pulling symbols and graph data.
 
 import asyncio
 import json
+import os
 from typing import Dict, List, Optional, Any, Callable
 from PySide6.QtWidgets import QMessageBox
 from PySide6.QtCore import QThread, Signal, QObject, QUrl
@@ -16,6 +17,7 @@ from PySide6.QtGui import QDesktopServices
 from ..services.analysis_db_service import analysis_db_service
 from ..services.graphrag.graph_store import GraphStore
 from ..services.graphrag.models import GraphNode as LocalGraphNode, GraphEdge as LocalGraphEdge, NodeType, EdgeType
+from ..services.settings_service import settings_service
 
 from ..services.symgraph_service import (
     symgraph_service, SymGraphServiceError, SymGraphAuthError,
@@ -111,7 +113,8 @@ class PushWorker(QThread):
         documents: Optional[List[Dict]] = None,
         graph_data: Optional[Dict] = None,
         visibility: str = "public",
-        fingerprints: Optional[List[Dict[str, str]]] = None
+        fingerprints: Optional[List[Dict[str, str]]] = None,
+        binary_metadata: Optional[Dict[str, Any]] = None
     ):
         super().__init__()
         self.sha256 = sha256
@@ -120,6 +123,7 @@ class PushWorker(QThread):
         self.graph_data = graph_data
         self.visibility = visibility
         self.fingerprints = fingerprints or []  # List of {'type': str, 'value': str}
+        self.binary_metadata = dict(binary_metadata or {})
 
     def run(self):
         try:
@@ -137,6 +141,14 @@ class PushWorker(QThread):
                         )
                     )
                     total_result.binary_revision = target_revision
+
+                    if self.binary_metadata:
+                        loop.run_until_complete(
+                            symgraph_service.update_binary_metadata(
+                                self.sha256,
+                                self.binary_metadata
+                            )
+                        )
 
                 # Push symbols in chunks if provided
                 if self.symbols:
@@ -693,8 +705,11 @@ class SymGraphController(QObject):
         self._pending_push_documents: List[Dict[str, Any]] = []
         self._pending_apply_documents: List[Dict[str, Any]] = []
         self._pending_apply_summary: Dict[str, int] = {}
+        self._last_binary_sha: Optional[str] = None
+        self._active_query_sha: Optional[str] = None
 
         # Connect view signals
+        self.view.set_auto_refresh_enabled(settings_service.is_symgraph_auto_refresh_enabled())
         self._connect_signals()
 
         # Update binary info if available
@@ -703,6 +718,7 @@ class SymGraphController(QObject):
     def _connect_signals(self):
         """Connect view signals to controller methods."""
         self.view.query_requested.connect(self.handle_query)
+        self.view.auto_refresh_changed.connect(self._set_auto_refresh_enabled)
         self.view.open_binary_requested.connect(self.handle_open_binary)
         self.view.push_preview_requested.connect(self.handle_push_preview)
         self.view.push_execute_requested.connect(self.handle_push)
@@ -715,23 +731,24 @@ class SymGraphController(QObject):
         self.bv = bv
         self._update_binary_info()
 
+    def _is_auto_refresh_enabled(self) -> bool:
+        return settings_service.is_symgraph_auto_refresh_enabled()
+
+    def _set_auto_refresh_enabled(self, enabled: bool):
+        settings_service.set_symgraph_auto_refresh_enabled(enabled)
+
     def _update_binary_info(self):
         """Update binary info display from current binary view."""
+        previous_sha = self._last_binary_sha
         if self.bv:
             try:
-                # Get the original filename (not the bndb path)
-                name = "Unknown"
-                if self.bv.file:
-                    # original_filename gives the path to the actual binary
-                    if hasattr(self.bv.file, 'original_filename') and self.bv.file.original_filename:
-                        name = self.bv.file.original_filename
-                    else:
-                        name = self.bv.file.filename
-                    name = name.split('/')[-1].split('\\')[-1]  # Get filename only
-                    # Remove .bndb extension if present
-                    if name.endswith('.bndb'):
-                        name = name[:-5]
-
+                binary_metadata = self._get_original_binary_metadata()
+                name = binary_metadata.get('file_name')
+                if not name and getattr(self.bv, 'file', None):
+                    fallback_name = self._basename_only(getattr(self.bv.file, 'filename', None))
+                    if fallback_name and self._is_analysis_container_name(fallback_name):
+                        fallback_name = fallback_name[:-5]
+                    name = fallback_name or "Unknown"
                 sha256 = self._get_sha256()
                 local_metadata: Dict[str, Any] = {}
                 try:
@@ -752,11 +769,26 @@ class SymGraphController(QObject):
                 except Exception:
                     pass
                 self.view.set_binary_info(name, sha256, local_metadata=local_metadata or None)
+                if sha256 != previous_sha:
+                    self._last_binary_sha = sha256
+                    self.view.hide_stats()
+                    self.view.reset_query_status()
+                    self.view.set_open_binary_url(None)
+                    self.view.clear_conflicts()
+                    self.view.clear_push_preview()
+                    if sha256 and self._is_auto_refresh_enabled():
+                        self.handle_query()
             except Exception as e:
                 log.log_error(f"Error getting binary info: {e}")
                 self.view.set_binary_info("<error>", None, local_metadata=None)
         else:
+            self._last_binary_sha = None
             self.view.set_binary_info("<no binary loaded>", None, local_metadata=None)
+            self.view.hide_stats()
+            self.view.reset_query_status()
+            self.view.set_open_binary_url(None)
+            self.view.clear_conflicts()
+            self.view.clear_push_preview()
 
     def _get_symbol_provenance(self, is_auto: bool, address: int, symbol_type: str) -> str:
         """Determine symbol provenance: decompiler, llm, or user."""
@@ -772,6 +804,224 @@ class SymGraphController(QObject):
         except Exception:
             pass
         return 'user'
+
+    @staticmethod
+    def _basename_only(path: Optional[str]) -> Optional[str]:
+        if not path:
+            return None
+        return path.split('/')[-1].split('\\')[-1] or None
+
+    @staticmethod
+    def _is_analysis_container_name(filename: Optional[str]) -> bool:
+        if not filename:
+            return False
+        lower_name = filename.lower()
+        return lower_name.endswith('.bndb')
+
+    @staticmethod
+    def _normalize_file_format(raw_value: Optional[str]) -> Optional[str]:
+        if not raw_value:
+            return None
+        value = str(raw_value).strip().lower()
+        if "portable executable" in value or value == "pe":
+            return "pe"
+        if value == "pe32":
+            return "pe32"
+        if value in {"pe64", "pe32+"}:
+            return "pe64"
+        if "mach-o" in value or value == "macho":
+            return "macho"
+        if value == "macho32":
+            return "macho32"
+        if value == "macho64":
+            return "macho64"
+        if "elf" in value:
+            return "elf"
+        if "coff" in value:
+            return "coff"
+        if value in {"raw", "bin", "mapped"} or "binary" in value:
+            return "bin"
+        return value or None
+
+    @staticmethod
+    def _infer_bitness(raw_value: Optional[str], address_size: Optional[int] = None) -> Optional[int]:
+        if isinstance(address_size, int) and address_size > 0:
+            return address_size * 8
+        if not raw_value:
+            return None
+        value = str(raw_value).strip().lower()
+        if "64" in value:
+            return 64
+        if "32" in value:
+            return 32
+        return None
+
+    @classmethod
+    def _normalize_architecture(cls, raw_value: Optional[str], bitness: Optional[int] = None) -> Optional[str]:
+        if not raw_value:
+            return None
+        value = str(raw_value).strip().lower()
+        if ':' in value:
+            value = value.split(':', 1)[0]
+        mapped = cls._normalize_architecture_token(value, bitness)
+        if mapped:
+            return mapped
+        for token in value.replace('-', ' ').replace('/', ' ').split():
+            mapped = cls._normalize_architecture_token(token, bitness)
+            if mapped:
+                return mapped
+        return None
+
+    @staticmethod
+    def _normalize_architecture_token(value: str, bitness: Optional[int]) -> Optional[str]:
+        if value in {"x86", "i386", "i486", "i586", "i686", "80386"}:
+            return "x86"
+        if value in {"x86_64", "amd64", "x64"}:
+            return "x86_64"
+        if value in {"arm64", "aarch64"}:
+            return "arm64"
+        if value.startswith("armv8") and bitness == 64:
+            return "arm64"
+        if value.startswith("arm") or value in {"thumb", "thumb2"}:
+            return "arm64" if bitness == 64 else "arm"
+        if value in {"mips", "mips32", "mipsel", "mipseb"}:
+            return "mips"
+        if value in {"mips64", "mips64el", "mips64eb"}:
+            return "mips64"
+        if value in {"ppc", "powerpc"}:
+            return "ppc"
+        if value in {"ppc64", "powerpc64", "ppc64le"}:
+            return "ppc64"
+        if value in {"riscv", "riscv32"}:
+            return "riscv"
+        if value == "riscv64":
+            return "riscv64"
+        if value == "sparc":
+            return "sparc"
+        if value == "sparc64":
+            return "sparc64"
+        return None
+
+    @staticmethod
+    def _normalize_platform(raw_value: Optional[str], file_format: Optional[str] = None) -> Optional[str]:
+        value = str(raw_value).strip().lower() if raw_value else ""
+        if "windows" in value or value in {"win", "win32", "win64"}:
+            return "windows"
+        if "linux" in value:
+            return "linux"
+        if any(token in value for token in ("darwin", "macos", "mac os", "mac-")) or value in {"mac", "osx"}:
+            return "macos"
+        if any(token in value for token in ("ios", "iphone", "tvos", "watchos")):
+            return "ios"
+        if "android" in value:
+            return "android"
+        if "freebsd" in value:
+            return "freebsd"
+        if "netbsd" in value:
+            return "netbsd"
+        if "openbsd" in value:
+            return "openbsd"
+        if "solaris" in value:
+            return "solaris"
+        if "uefi" in value or value == "efi":
+            return "uefi"
+        if any(token in value for token in ("raw", "firmware", "bare")):
+            return "raw"
+        if file_format == "bin":
+            return "raw"
+        if file_format in {"pe", "pe32", "pe64", "coff"}:
+            return "windows"
+        if file_format == "elf":
+            return "linux"
+        if file_format in {"macho", "macho32", "macho64"}:
+            return "macos"
+        return None
+
+    @staticmethod
+    def _normalize_endianness(raw_value: Any) -> Optional[str]:
+        if raw_value is None:
+            return None
+        value = str(raw_value).strip().lower()
+        if value in {"little", "le", "littleendian", "little_endian"} or "little" in value:
+            return "little"
+        if value in {"big", "be", "bigendian", "big_endian"} or "big" in value:
+            return "big"
+        return None
+
+    def _get_original_binary_metadata(self) -> Dict[str, Any]:
+        """Build metadata for the original input binary, not the BNDB container."""
+        metadata: Dict[str, Any] = {}
+        if not self.bv:
+            return metadata
+
+        original_path = None
+        fallback_path = None
+        file_ref = getattr(self.bv, 'file', None)
+        if file_ref:
+            original_path = getattr(file_ref, 'original_filename', None) or None
+            fallback_path = getattr(file_ref, 'filename', None) or None
+
+        file_name = self._basename_only(original_path)
+        if not file_name:
+            candidate_name = self._basename_only(fallback_path)
+            if candidate_name and not self._is_analysis_container_name(candidate_name):
+                file_name = candidate_name
+        if file_name and not self._is_analysis_container_name(file_name):
+            metadata['file_name'] = file_name
+
+        raw_view = getattr(file_ref, 'raw', None) if file_ref else None
+        size = None
+        if raw_view is not None:
+            try:
+                raw_end = getattr(raw_view, 'end', None)
+                if raw_end is not None:
+                    size = int(raw_end)
+            except Exception:
+                size = None
+        if size is None and original_path and os.path.exists(original_path):
+            try:
+                size = os.path.getsize(original_path)
+            except OSError:
+                size = None
+        if size is not None and size >= 0:
+            metadata['file_size'] = int(size)
+
+        try:
+            file_format = self._normalize_file_format(
+                str(self.bv.view_type) if hasattr(self.bv, 'view_type') else None
+            )
+            if file_format:
+                metadata['file_format'] = file_format
+        except Exception:
+            file_format = None
+
+        try:
+            address_size = getattr(getattr(self.bv, 'arch', None), 'address_size', None)
+            raw_arch = str(self.bv.arch) if getattr(self.bv, 'arch', None) else None
+            arch = self._normalize_architecture(raw_arch, self._infer_bitness(raw_arch, address_size))
+            if arch:
+                metadata['architecture'] = arch
+        except Exception:
+            pass
+
+        try:
+            platform = self._normalize_platform(
+                str(self.bv.platform) if getattr(self.bv, 'platform', None) else None,
+                file_format
+            )
+            if platform:
+                metadata['platform'] = platform
+        except Exception:
+            pass
+
+        try:
+            endian = self._normalize_endianness(getattr(self.bv, 'endianness', None))
+            if endian:
+                metadata['endianness'] = endian
+        except Exception:
+            pass
+
+        return metadata
 
     def _get_sha256(self) -> Optional[str]:
         """Get SHA256 hash of the original binary (not the bndb file)."""
@@ -819,17 +1069,23 @@ class SymGraphController(QObject):
         self.view.hide_stats()
         self.view.set_open_binary_url(None)
         self.view.set_buttons_enabled(False)
+        self._active_query_sha = sha256
 
         # Start query worker
         self.query_worker = QueryWorker(sha256)
-        self.query_worker.query_complete.connect(self._on_query_complete)
-        self.query_worker.query_error.connect(self._on_query_error)
-        self.query_worker.finished.connect(lambda: self.view.set_buttons_enabled(True))
+        self.query_worker.query_complete.connect(
+            lambda result, expected_sha=sha256: self._on_query_complete(expected_sha, result)
+        )
+        self.query_worker.query_error.connect(
+            lambda error_msg, expected_sha=sha256: self._on_query_error(expected_sha, error_msg)
+        )
+        self.query_worker.finished.connect(lambda expected_sha=sha256: self._on_query_finished(expected_sha))
         self.query_worker.start()
 
-    def _on_query_complete(self, result: QueryResult):
+    def _on_query_complete(self, expected_sha: str, result: QueryResult):
         """Handle query completion."""
-        self.view.set_buttons_enabled(True)
+        if expected_sha != self._active_query_sha or expected_sha != self._get_sha256():
+            return
 
         if result.error:
             self.view.set_query_status(f"Error: {result.error}", found=False)
@@ -844,6 +1100,7 @@ class SymGraphController(QObject):
                     symbols=result.stats.symbol_count,
                     functions=result.stats.function_count,
                     nodes=result.stats.graph_node_count,
+                    edges=result.stats.graph_edge_count,
                     last_updated=result.stats.last_queried_at,
                     revisions=result.revisions,
                     latest_revision=result.latest_revision,
@@ -854,12 +1111,18 @@ class SymGraphController(QObject):
             self.view.set_open_binary_url(None)
             self.view.hide_stats()
 
-    def _on_query_error(self, error_msg: str):
+    def _on_query_error(self, expected_sha: str, error_msg: str):
         """Handle query error."""
-        self.view.set_buttons_enabled(True)
+        if expected_sha != self._active_query_sha or expected_sha != self._get_sha256():
+            return
         self.view.set_query_status(f"Error: {error_msg}", found=False)
         self.view.set_open_binary_url(None)
         log.log_error(f"Query error: {error_msg}")
+
+    def _on_query_finished(self, expected_sha: str):
+        if expected_sha != self._active_query_sha:
+            return
+        self.view.set_buttons_enabled(True)
 
     def handle_open_binary(self):
         """Open the current binary in the SymGraph web UI."""
@@ -979,6 +1242,7 @@ class SymGraphController(QObject):
             'visibility': visibility
         }
         self._pending_push_documents = list(selected_documents)
+        binary_metadata = self._get_original_binary_metadata()
 
         # Start push worker
         self.push_worker = PushWorker(
@@ -987,7 +1251,8 @@ class SymGraphController(QObject):
             document_payloads,
             graph_data,
             visibility=visibility,
-            fingerprints=fingerprints
+            fingerprints=fingerprints,
+            binary_metadata=binary_metadata
         )
         self.push_worker.push_complete.connect(self._on_push_complete)
         self.push_worker.push_error.connect(self._on_push_error)
@@ -1172,7 +1437,7 @@ class SymGraphController(QObject):
     def _on_pull_preview_finished(self):
         """Handle pull preview worker finished (cleanup)."""
         self.view.set_buttons_enabled(True)
-        self.view.set_pull_button_text("Preview Fetch")
+        self.view.set_pull_button_text("Preview Import")
 
     def _on_pull_preview_error(self, error_msg: str):
         """Handle pull preview error."""
