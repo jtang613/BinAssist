@@ -317,7 +317,10 @@ class SymGraphService:
 
         try:
             async with httpx.AsyncClient(**self._client_kwargs(30.0)) as client:
-                response = await client.get(url, headers=self._get_headers())
+                response = await client.get(
+                    url,
+                    headers=self._get_headers(authenticated=self.has_api_key)
+                )
 
                 if response.status_code == 200:
                     data = response.json()
@@ -397,6 +400,11 @@ class SymGraphService:
 
             effective_version = version if version is not None else latest_revision
             stats = await self.get_binary_stats(sha256, version=effective_version)
+            if stats is None and effective_version is not None:
+                log.log_warn(
+                    f"No stats returned for version {effective_version}; retrying without an explicit version"
+                )
+                stats = await self.get_binary_stats(sha256, version=None)
             return QueryResult.found(
                 stats=stats,
                 revisions=revisions,
