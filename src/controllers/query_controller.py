@@ -3,6 +3,7 @@
 from typing import Optional, Dict, Any, List, Callable
 import asyncio
 import json
+import uuid
 import binaryninja as bn
 from PySide6.QtCore import QDateTime, QThread, QTimer, Signal, Qt
 from ..services.binary_context_service import BinaryContextService, ViewLevel
@@ -581,6 +582,9 @@ class QueryController:
         self._react_streaming_final_answer = False
         self._last_todo_snapshot = ""
         self._last_react_tasks: List[Dict[str, str]] = []
+        self._current_react_run_id: Optional[str] = None
+        self._current_react_objective: Optional[str] = None
+        self._current_react_final_status: Optional[str] = None
 
         # Connect view signals
         self._connect_signals()
@@ -1386,6 +1390,9 @@ class QueryController:
             self._react_thread.cancel()
             self._cleanup_react_thread()
             self._react_active = False
+            self._current_react_run_id = None
+            self._current_react_objective = None
+            self._current_react_final_status = None
 
         # Cancel standard query if active
         if self._query_active and hasattr(self, 'llm_thread') and self.llm_thread:
@@ -2569,6 +2576,34 @@ Current context:
         messages.append({"role": "user", "content": enhanced_query})
         
         return messages
+
+    def _build_react_continuation_bridge(self) -> Optional[Dict[str, Any]]:
+        binary_hash = self._get_current_binary_hash()
+        if not binary_hash or not self.current_chat_id:
+            return None
+        try:
+            bridge = self.transcript_service.build_react_continuation_bridge(
+                binary_hash, str(self.current_chat_id)
+            )
+            if bridge and bridge.get("markdown"):
+                log.log_info(
+                    f"Injecting ReAct continuation bridge for chat {self.current_chat_id} "
+                    f"(run={bridge.get('react_run_id')}, findings={bridge.get('finding_count')}, "
+                    f"pending={bridge.get('pending_count')})"
+                )
+                return bridge
+        except Exception as exc:
+            log.log_warn(f"Failed to build ReAct continuation bridge: {exc}")
+        return None
+
+    @staticmethod
+    def _inject_react_bridge_message(messages: List[Dict[str, Any]], bridge: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not bridge or not bridge.get("markdown"):
+            return messages
+        bridged = list(messages)
+        insert_index = 1 if bridged and bridged[0].get("role") == "system" else 0
+        bridged.insert(insert_index, {"role": "assistant", "content": bridge["markdown"]})
+        return bridged
     
     def _prepare_native_messages(self, query_text: str, context: Dict[str, Any], 
                                rag_enabled: bool, mcp_enabled: bool, provider_type: str) -> List[Dict[str, Any]]:
@@ -2583,11 +2618,13 @@ Current context:
         
         format_service = get_message_format_service()
         messages = []
+        react_bridge = self._build_react_continuation_bridge()
         
         # Add system message in provider's native format
         system_content = self._build_system_message(context, rag_enabled, mcp_enabled)
         system_message = format_service.create_system_message(system_content, provider_enum)
         messages.append(system_message)
+        messages = self._inject_react_bridge_message(messages, react_bridge)
         
         # Add conversation history from native storage
         # Note: This should already include the current user query if it was saved via _save_user_message_native()
@@ -3257,11 +3294,13 @@ Tool Usage Guidelines:
             
             # Prepare conversation history up to this point
             conversation_messages = []
+            react_bridge = self._build_react_continuation_bridge()
             
             # Add system message
             context = self.context_service.get_current_context()
             system_content = self._build_system_message(context, self.view.is_rag_enabled(), self.view.is_mcp_enabled())
             conversation_messages.append({"role": "system", "content": system_content})
+            conversation_messages = self._inject_react_bridge_message(conversation_messages, react_bridge)
             
             # Add chat history from native storage
             try:
@@ -3494,11 +3533,19 @@ Tool Usage Guidelines:
                     else:
                         log.log_warn("No binary hash available for persisting assistant message")
                     if binary_hash and not self._is_document_chat():
+                        transcript_metadata = {"provider_type": provider_type if active_provider else None}
+                        if final_update and self._current_react_run_id:
+                            transcript_metadata.update({
+                                "react_run_id": self._current_react_run_id,
+                                "react_final": True,
+                                "react_status": self._current_react_final_status or "SUCCESS",
+                                "react_objective": self._current_react_objective,
+                            })
                         self.transcript_service.append_assistant_message(
                             binary_hash,
                             str(self.current_chat_id),
                             content,
-                            metadata={"provider_type": provider_type if active_provider else None},
+                            metadata=transcript_metadata,
                         )
                 except Exception as e:
                     log.log_error(f"Failed to persist updated assistant message: {e}")
@@ -3595,6 +3642,7 @@ Tool Usage Guidelines:
     def _submit_agentic_query(self, query_text: str):
         """Handle agentic (ReAct) query submission"""
         log.log_info(f"Agentic query submitted: {query_text[:50]}...")
+        react_run_id = str(uuid.uuid4())
 
         # Check if query is already active
         if self._query_active or self._react_active:
@@ -3614,6 +3662,8 @@ Tool Usage Guidelines:
 
             # Set active state
             self._react_active = True
+            self._current_react_run_id = react_run_id
+            self._current_react_objective = query_text
             self._current_query_binary_hash = self._get_current_binary_hash()
             self.view.set_query_running(True)
             self._active_stream_markdown = ""
@@ -3641,6 +3691,10 @@ Tool Usage Guidelines:
                     str(self.current_chat_id),
                     f"Planning investigation steps for: {query_text}",
                     metadata={"category": "react_start"},
+                    metadata_extra={
+                        "react_run_id": react_run_id,
+                        "react_objective": query_text,
+                    },
                 )
 
             # Update display to show the initial user query and planning notice cards.
@@ -3650,6 +3704,14 @@ Tool Usage Guidelines:
             # Get context and MCP tools
             context = self.context_service.get_current_context()
             initial_context = self._format_initial_context_for_react(context)
+            react_bridge = self._build_react_continuation_bridge()
+            if react_bridge and react_bridge.get("markdown"):
+                initial_context = (
+                    "## Prior Investigation Context\n"
+                    + react_bridge["markdown"]
+                    + "\n\n## Current Binary Context\n"
+                    + initial_context
+                )
 
             # MCP tools are required for agentic mode
             mcp_tools = []
@@ -3747,6 +3809,10 @@ Current Offset: {context.get('offset_hex', 'N/A')}"""
                 tasks,
                 iteration=iteration,
                 counts=counts,
+                metadata_extra={
+                    "react_run_id": self._current_react_run_id,
+                    "react_objective": self._current_react_objective,
+                },
             )
 
     def _on_react_todos_updated(self, todo_payload):
@@ -3763,6 +3829,10 @@ Current Offset: {context.get('offset_hex', 'N/A')}"""
                 tasks,
                 iteration=iteration,
                 counts=counts,
+                metadata_extra={
+                    "react_run_id": self._current_react_run_id,
+                    "react_objective": self._current_react_objective,
+                },
             )
 
     def _on_react_iteration_started(self, iteration: int, current_todo: str):
@@ -3774,6 +3844,10 @@ Current Offset: {context.get('offset_hex', 'N/A')}"""
                 str(self.current_chat_id),
                 f"Working on: {current_todo}" if current_todo else "Continuing investigation",
                 metadata={"iteration": iteration, "category": "iteration_start"},
+                metadata_extra={
+                    "react_run_id": self._current_react_run_id,
+                    "react_objective": self._current_react_objective,
+                },
             )
 
     def _on_react_iteration_complete(self, iteration: int, summary: str):
@@ -3785,6 +3859,10 @@ Current Offset: {context.get('offset_hex', 'N/A')}"""
                 str(self.current_chat_id),
                 summary or f"Iteration {iteration} complete",
                 metadata={"iteration": iteration, "category": "iteration_complete"},
+                metadata_extra={
+                    "react_run_id": self._current_react_run_id,
+                    "react_objective": self._current_react_objective,
+                },
             )
 
     def _on_react_finding(self, finding_payload):
@@ -3802,6 +3880,7 @@ Current Offset: {context.get('offset_hex', 'N/A')}"""
                 str(self.current_chat_id),
                 finding,
                 iteration=iteration,
+                metadata_extra={"react_run_id": self._current_react_run_id},
             )
 
     def _on_react_progress(self, message: str, iteration: int):
@@ -3842,6 +3921,10 @@ Current Offset: {context.get('offset_hex', 'N/A')}"""
                 tool_name,
                 tool_source,
                 event.get("arguments") or {},
+                metadata_extra={
+                    "react_run_id": self._current_react_run_id,
+                    "react_objective": self._current_react_objective,
+                },
             )
         elif phase == "started":
             self.transcript_service.append_tool_started(
@@ -3850,6 +3933,10 @@ Current Offset: {context.get('offset_hex', 'N/A')}"""
                 correlation_id,
                 tool_name,
                 tool_source,
+                metadata_extra={
+                    "react_run_id": self._current_react_run_id,
+                    "react_objective": self._current_react_objective,
+                },
             )
         elif phase in ("completed", "failed"):
             self.transcript_service.append_tool_completed(
@@ -3860,6 +3947,10 @@ Current Offset: {context.get('offset_hex', 'N/A')}"""
                 tool_source,
                 event.get("content") or event.get("error") or "",
                 success=phase == "completed",
+                metadata_extra={
+                    "react_run_id": self._current_react_run_id,
+                    "react_objective": self._current_react_objective,
+                },
             )
 
     def _on_react_complete(self, result: ReActResult):
@@ -3872,11 +3963,10 @@ Current Offset: {context.get('offset_hex', 'N/A')}"""
         self._reasoning_filter.reset()
         self._streaming_renderer.reset()
 
-        # Format final response with statistics
-        status_emoji = "✅" if result.status == ReActStatus.SUCCESS else "⚠️"
         final_content = result.answer or self._llm_response_buffer
 
         # Persist the final synthesis as its own assistant turn.
+        self._current_react_final_status = result.status.value
         self._finalize_react_assistant_message(final_content)
         self._active_stream_markdown = ""
         self._stream_base_html = ""
@@ -3886,6 +3976,9 @@ Current Offset: {context.get('offset_hex', 'N/A')}"""
         # Cleanup
         self._cleanup_react_thread()
         self._react_active = False
+        self._current_react_run_id = None
+        self._current_react_objective = None
+        self._current_react_final_status = None
         self._current_query_binary_hash = None
         self.view.set_query_running(False)
 
@@ -3902,6 +3995,7 @@ Current Offset: {context.get('offset_hex', 'N/A')}"""
         self._streaming_renderer.reset()
 
         error_response = f"**Agentic Investigation Error:** {error}"
+        self._current_react_final_status = ReActStatus.ERROR.value
         self._finalize_react_assistant_message(error_response)
         self._active_stream_markdown = ""
         self._stream_base_html = ""
@@ -3911,6 +4005,9 @@ Current Offset: {context.get('offset_hex', 'N/A')}"""
         # Cleanup
         self._cleanup_react_thread()
         self._react_active = False
+        self._current_react_run_id = None
+        self._current_react_objective = None
+        self._current_react_final_status = None
         self._current_query_binary_hash = None
         self.view.set_query_running(False)
 
