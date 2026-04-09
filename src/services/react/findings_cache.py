@@ -67,46 +67,54 @@ class FindingsCache:
         self.iteration_summaries.append(summary)
         log.log_debug(f"FindingsCache: Added iteration summary #{len(self.iteration_summaries)}")
 
-    def extract_from_tool_output(self, tool_name: str, output: str, iteration: int = 0):
+    def extract_from_tool_output(self, tool_name: str, output: str, iteration: int = 0) -> List[str]:
         """
         Extract findings from tool output using heuristics.
 
         Assigns relevance score based on keyword presence.
         """
         if not output or not output.strip():
-            return
+            return []
 
-        # Calculate relevance based on keywords
-        output_lower = output.lower()
-        relevance = 3  # Default low relevance
+        added_facts: List[str] = []
+        seen = {finding.fact for finding in self.findings}
+        for raw_line in output.splitlines():
+            line = raw_line.strip().strip(",")
+            if not line or len(line) < 20 or len(line) > 300:
+                continue
+            if line.startswith(("{", "}", "[", "]", '"', "'")):
+                continue
+            if ":" not in line and len(line.split()) < 4:
+                continue
+            relevance = self._calculate_relevance(line)
+            if relevance <= 3:
+                continue
+            if line in seen:
+                continue
+            self.add_finding(
+                fact=line,
+                evidence=output,
+                tool_used=tool_name,
+                relevance=relevance,
+                iteration=iteration
+            )
+            added_facts.append(line)
+            seen.add(line)
+            if len(added_facts) >= 3:
+                break
+        return added_facts
 
-        # Check for high relevance content
+    def _calculate_relevance(self, text: str) -> int:
+        """Return relevance score for a candidate finding line."""
+        output_lower = text.lower()
+        relevance = 3
         for keyword in self.HIGH_RELEVANCE_KEYWORDS:
             if keyword in output_lower:
-                relevance = 9
-                log.log_debug(f"FindingsCache: High relevance keyword found: {keyword}")
-                break
-
-        # Check for medium relevance if not already high
-        if relevance < 9:
-            for keyword in self.MEDIUM_RELEVANCE_KEYWORDS:
-                if keyword in output_lower:
-                    relevance = 6
-                    break
-
-        # Store more of the output for better context (increased from 200 to 1000)
-        if len(output) > 1000:
-            fact = f"Tool {tool_name} returned: {output[:1000]}..."
-        else:
-            fact = f"Tool {tool_name} returned: {output}"
-
-        self.add_finding(
-            fact=fact,
-            evidence=output,  # Full output stored in evidence
-            tool_used=tool_name,
-            relevance=relevance,
-            iteration=iteration
-        )
+                return 9
+        for keyword in self.MEDIUM_RELEVANCE_KEYWORDS:
+            if keyword in output_lower:
+                return 6
+        return relevance
 
     def format_for_prompt(self, max_findings: int = 50) -> str:
         """

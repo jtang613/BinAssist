@@ -122,6 +122,40 @@ class TodoListManager:
         """Get count of completed todos"""
         return sum(1 for t in self.todos if t.status == TodoStatus.COMPLETE)
 
+    def get_in_progress_count(self) -> int:
+        """Get count of in-progress todos"""
+        return sum(1 for t in self.todos if t.status == TodoStatus.IN_PROGRESS)
+
+    def get_total_count(self) -> int:
+        """Get total todo count"""
+        return len(self.todos)
+
+    def get_progress_summary(self) -> str:
+        """Get compact progress summary matching GhidrAssist."""
+        return f"{self.get_complete_count()}/{self.get_total_count()} tasks complete"
+
+    def to_transcript_snapshot(self, iteration: Optional[int] = None) -> dict:
+        """Build structured transcript metadata for task cards."""
+        todos = []
+        for index, todo in enumerate(self.todos, start=1):
+            item = {
+                "task": todo.task,
+                "status": todo.status.name,
+                "priority": index,
+            }
+            if todo.evidence:
+                item["evidence"] = todo.evidence
+            todos.append(item)
+        return {
+            "summary": self.get_progress_summary(),
+            "iteration": iteration,
+            "todos": todos,
+            "pending_count": self.get_pending_count(),
+            "in_progress_count": self.get_in_progress_count(),
+            "complete_count": self.get_complete_count(),
+            "total_count": self.get_total_count(),
+        }
+
     def format_for_prompt(self) -> str:
         """
         Format todo list for prompt injection.

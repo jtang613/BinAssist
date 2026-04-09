@@ -265,12 +265,20 @@ class TranscriptService:
                                  metadata={"request_id": request_id, "tool_name": tool_name, "tool_source": tool_source,
                                            "risk_tier": risk_tier, "scope": scope})
 
-    def append_todo_snapshot(self, binary_hash: str, chat_id: str, summary: str, tasks: list):
+    def append_todo_snapshot(self, binary_hash: str, chat_id: str, summary: str, todos: list,
+                             iteration: Optional[int] = None, counts: Optional[Dict] = None):
+        metadata = {"summary": summary, "todos": todos, "tasks": todos}
+        if iteration is not None:
+            metadata["iteration"] = iteration
+        if counts:
+            metadata.update(counts)
         return self.append_event(binary_hash, chat_id, TranscriptEventKind.TODO_UPDATED, "agent", summary,
-                                 metadata={"tasks": tasks})
+                                 metadata=metadata)
 
-    def append_finding(self, binary_hash: str, chat_id: str, finding: str):
-        return self.append_event(binary_hash, chat_id, TranscriptEventKind.FINDING_ADDED, "agent", finding)
+    def append_finding(self, binary_hash: str, chat_id: str, finding: str, iteration: Optional[int] = None):
+        metadata = {"iteration": iteration} if iteration is not None else None
+        return self.append_event(binary_hash, chat_id, TranscriptEventKind.FINDING_ADDED, "agent", finding,
+                                 metadata=metadata)
 
     def append_iteration_notice(self, binary_hash: str, chat_id: str, content: str, metadata: Optional[Dict] = None):
         return self.append_event(binary_hash, chat_id, TranscriptEventKind.ITERATION_NOTICE, "agent", content,

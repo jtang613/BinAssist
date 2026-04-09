@@ -7,6 +7,33 @@ from ..services.streaming.render_update import RenderUpdate, UpdateType
 from ..services.streaming.streaming_renderer import MARKDOWN_CSS
 
 _BOTTOM_THRESHOLD = 50
+_DEFAULT_STREAMING_STYLESHEET = (
+    MARKDOWN_CSS.replace("<style>", "").replace("</style>", "")
+    + """
+    body { font-family: sans-serif; background: #31363b; color: #d8dee9; margin: 0; padding: 8px; }
+    a { color: #64b5f6; text-decoration: none; }
+    .ga-chat-title { font-size: 13px; font-weight: 600; margin: 0 0 6px 0; color: #d7dde4; }
+    .ga-empty { color: #9aa5b1; font-size: 12px; padding: 16px; border: 1px dashed #546e7a; }
+    .ga-card { width: 100%; border: 1px solid #5a636c; background: #3a4046; margin: 0 0 8px 0; border-collapse: collapse; table-layout: fixed; }
+    .ga-accent { width: 4px; min-width: 4px; padding: 0; }
+    .ga-body { padding: 5px 8px 6px 8px; vertical-align: top; }
+    .ga-heading { font-size: 11px; font-weight: 600; color: #eef2f6; margin-bottom: 1px; }
+    .ga-subheading { font-weight: 400; color: #d7dde4; }
+    .ga-meta { font-size: 10px; color: #9fb0bf; margin-bottom: 4px; }
+    .ga-compact, .ga-tool-preview { font-size: 11px; color: #d8dee9; white-space: pre-wrap; word-wrap: break-word; line-height: 1.25; }
+    .ga-markdown { font-size: 12px; line-height: 1.25; white-space: normal; overflow-wrap: anywhere; }
+    .ga-markdown p { font-size: inherit; line-height: inherit; margin: 0 0 8px 0; }
+    .ga-markdown ul, .ga-markdown ol { margin: 6px 0 6px 18px; padding: 0; }
+    .ga-markdown li { margin: 2px 0; }
+    .ga-markdown h1 { font-size: 18px; margin: 12px 0 8px 0; }
+    .ga-markdown h2 { font-size: 16px; margin: 10px 0 6px 0; }
+    .ga-markdown h3 { font-size: 14px; margin: 8px 0 4px 0; }
+    .ga-markdown h4, .ga-markdown h5, .ga-markdown h6 { font-size: 12px; margin: 6px 0 4px 0; }
+    .ga-markdown pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #2b3035; padding: 6px; margin: 5px 0; border: 1px solid #4c565f; font-size: 11px; }
+    .ga-markdown code { font-size: 11px; }
+    .ga-code { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; background: #2b3035; padding: 6px; margin: 4px 0; border: 1px solid #4c565f; }
+    """
+)
 
 
 class ScrollPositionTracker:
@@ -47,6 +74,11 @@ class StreamingMarkdownBrowser(QTextBrowser):
         self._last_rendered_html = ""
         self._committed_html = MARKDOWN_CSS  # Track committed HTML separately for RenderUpdate
         self._pending_start = 0  # Track character position where pending content starts
+
+        # QTextCursor.insertHtml() does not reliably inherit styles declared in
+        # the previous setHtml() document. Install a default stylesheet so
+        # streaming fragments render like the final transcript cards.
+        self.document().setDefaultStyleSheet(_DEFAULT_STREAMING_STYLESHEET)
 
         # Initialize with CSS so content is styled from the start
         self.setHtml(MARKDOWN_CSS)

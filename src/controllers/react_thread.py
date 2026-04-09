@@ -37,11 +37,11 @@ class ReActOrchestratorThread(QThread):
     """
 
     # Signals for UI communication
-    planning_complete = Signal(str)          # Todo list formatted
+    planning_complete = Signal(object)       # Structured planning snapshot
     iteration_started = Signal(int, str)     # Iteration number, current todo
     iteration_complete = Signal(int, str)    # Iteration number, summary
-    todos_updated = Signal(str)              # Formatted todo list
-    finding_discovered = Signal(str)         # New finding text
+    todos_updated = Signal(object)           # Structured todo snapshot
+    finding_discovered = Signal(object)      # Structured finding payload
     progress_update = Signal(str, int)       # Status message, iteration
     content_chunk = Signal(str)              # Content update for display
     tool_event = Signal(object)              # Structured tool lifecycle event
@@ -144,12 +144,12 @@ class ReActOrchestratorThread(QThread):
         if not self.cancelled:
             self.progress_update.emit(message, iteration)
 
-    def _on_todos_updated(self, todos_formatted: str):
+    def _on_todos_updated(self, todo_snapshot: dict):
         """Callback for todo list updates"""
         if not self.cancelled:
-            self.todos_updated.emit(todos_formatted)
+            self.todos_updated.emit(todo_snapshot)
 
-    def _on_finding(self, finding: str):
+    def _on_finding(self, finding: dict):
         """Callback for new finding discovered"""
         if not self.cancelled:
             self.finding_discovered.emit(finding)

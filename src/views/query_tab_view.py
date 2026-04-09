@@ -84,6 +84,7 @@ class QueryTabView(QWidget):
     accept_all_tools_changed = Signal(bool)
     approval_decision_requested = Signal(str)
     transcript_link_clicked = Signal(str)
+    history_entry_upsert_requested = Signal(int, str, str, str)
     # RLHF feedback signals
     rlhf_feedback_requested = Signal(bool)  # True for upvote, False for downvote
     
@@ -95,6 +96,7 @@ class QueryTabView(QWidget):
         self.chat_counter = 0
         self.current_chat_id = None
         self.query_running = False
+        self.history_entry_upsert_requested.connect(self.upsert_chat_in_history)
         self.setup_ui()
     
     def setup_ui(self):
@@ -478,6 +480,40 @@ class QueryTabView(QWidget):
         self._select_chat_by_id(chat_id)
         self.current_chat_id = chat_id
         self._update_history_table_layout()
+
+    def upsert_chat_in_history(self, chat_id, description, timestamp=None, chat_type="chat"):
+        """Insert or update a chat entry in the history table by chat ID."""
+        if timestamp is None:
+            timestamp = QDateTime.currentDateTime().toString("yyyy-MM-dd hh:mm:ss")
+        for row in range(self.history_table.rowCount()):
+            item = self.history_table.item(row, 0)
+            if item and item.data(Qt.UserRole) == chat_id:
+                was_sorting_enabled = self.history_table.isSortingEnabled()
+                self.history_table.setSortingEnabled(False)
+                try:
+                    try:
+                        self.history_table.itemChanged.disconnect()
+                        signals_disconnected = True
+                    except Exception:
+                        signals_disconnected = False
+                    item.setText(description)
+                    timestamp_item = self.history_table.item(row, 1)
+                    if timestamp_item is None:
+                        timestamp_item = QTableWidgetItem(timestamp)
+                        timestamp_item.setFlags(timestamp_item.flags() & ~Qt.ItemIsEditable)
+                        self.history_table.setItem(row, 1, timestamp_item)
+                    else:
+                        timestamp_item.setText(timestamp)
+                    self.set_chat_type_cell(row, chat_id, chat_type)
+                finally:
+                    if signals_disconnected:
+                        self.history_table.itemChanged.connect(self.on_history_item_changed)
+                    if was_sorting_enabled:
+                        self.history_table.setSortingEnabled(True)
+                        self.history_table.sortByColumn(1, Qt.DescendingOrder)
+                    self._update_history_table_layout()
+                return
+        self.add_chat_to_history(chat_id, description, timestamp, chat_type)
     
     def _select_chat_by_id(self, chat_id):
         """Find and select a chat by its ID in the history table"""

@@ -86,8 +86,8 @@ class ReActOrchestrator:
 
         # Callbacks for progress updates
         self.on_progress: Optional[Callable[[str, int], None]] = None
-        self.on_todos_updated: Optional[Callable[[str], None]] = None
-        self.on_finding: Optional[Callable[[str], None]] = None
+        self.on_todos_updated: Optional[Callable[[dict], None]] = None
+        self.on_finding: Optional[Callable[[dict], None]] = None
         self.on_iteration_start: Optional[Callable[[int, str], None]] = None
         self.on_iteration_complete: Optional[Callable[[int, str], None]] = None
         self.on_content: Optional[Callable[[str], None]] = None
@@ -184,7 +184,7 @@ class ReActOrchestrator:
                     break
 
                 if self.on_todos_updated:
-                    self.on_todos_updated(self.todo_manager.format_for_prompt())
+                    self.on_todos_updated(self.todo_manager.to_transcript_snapshot(self.iteration_count))
 
                 if self.on_iteration_start:
                     self.on_iteration_start(self.iteration_count, current_todo.task)
@@ -264,7 +264,7 @@ class ReActOrchestrator:
         log.log_info(f"ReAct: Created {len(self.todo_manager.todos)} investigation steps")
 
         if self.on_todos_updated:
-            self.on_todos_updated(self.todo_manager.format_for_prompt())
+            self.on_todos_updated(self.todo_manager.to_transcript_snapshot())
 
     async def _run_investigation_iteration(self, objective: str, iteration: int) -> str:
         """
@@ -359,10 +359,13 @@ class ReActOrchestrator:
 
                 result = result_id_map.get(tc.id)
                 if result and not result.error:
-                    self.findings.extract_from_tool_output(tc.name, result.content, iteration)
+                    new_findings = self.findings.extract_from_tool_output(tc.name, result.content, iteration)
                     if self.on_finding:
-                        preview = result.content[:100] + "..." if len(result.content) > 100 else result.content
-                        self.on_finding(f"Found via {tc.name}: {preview}")
+                        for finding_text in new_findings:
+                            self.on_finding({
+                                "finding": finding_text,
+                                "iteration": iteration,
+                            })
 
             # Continue the conversation - LLM can now make more tool calls or provide final response
             # No explicit prompt needed - LLM sees tool results in history and continues
@@ -418,16 +421,39 @@ class ReActOrchestrator:
                     extra_iterations = len(new_tasks) * 2
                     self.config.max_iterations += extra_iterations
                     log.log_info(f"ReAct: Extended max_iterations by {extra_iterations} for {len(new_tasks)} new task(s)")
+                    if self.on_finding:
+                        self.on_finding({
+                            "finding": f"Extended investigation budget: +{extra_iterations} iterations (new limit: {self.config.max_iterations})",
+                            "iteration": self.iteration_count,
+                        })
 
                 # Emit updated todo list
                 if self.on_todos_updated:
-                    self.on_todos_updated(self.todo_manager.format_for_prompt())
+                    self.on_todos_updated(self.todo_manager.to_transcript_snapshot(self.iteration_count))
 
         if is_ready:
             log.log_info("ReAct: Self-reflection says READY to synthesize")
+            if self.on_finding:
+                self.on_finding({
+                    "finding": f"Self-Reflection: {self._compact_text(response, 220)}",
+                    "iteration": self.iteration_count,
+                })
+                self.on_finding({
+                    "finding": "Decision: READY - Sufficient information gathered, synthesizing final answer",
+                    "iteration": self.iteration_count,
+                })
             return True
         else:
             log.log_info("ReAct: Self-reflection says CONTINUE investigating")
+            if self.on_finding:
+                self.on_finding({
+                    "finding": f"Self-Reflection: {self._compact_text(response, 220)}",
+                    "iteration": self.iteration_count,
+                })
+                self.on_finding({
+                    "finding": "Decision: CONTINUE - Continue investigating with updated task list",
+                    "iteration": self.iteration_count,
+                })
             return False
 
     def _parse_reflection_response(self, response: str) -> tuple[list[str], list[str], bool]:
@@ -585,6 +611,12 @@ class ReActOrchestrator:
 
         # Should not reach here, but just in case
         raise last_error
+
+    def _compact_text(self, text: str, limit: int) -> str:
+        normalized = " ".join((text or "").split())
+        if len(normalized) <= limit:
+            return normalized
+        return normalized[: limit - 3].rstrip() + "..."
 
     async def _call_llm_with_tools(self, prompt: str = "", emit_content: bool = True) -> tuple:
         """
