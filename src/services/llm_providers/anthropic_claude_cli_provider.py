@@ -96,7 +96,7 @@ class AnthropicClaudeCliProvider(BaseLLMProvider):
                 log.log_debug("No MCP providers configured")
                 return None
 
-            # Filter to enabled SSE/HTTP providers only
+            # Filter to enabled providers only
             enabled_providers = [p for p in mcp_providers if p.get('enabled', True)]
             if not enabled_providers:
                 log.log_debug("No enabled MCP providers")
@@ -107,13 +107,23 @@ class AnthropicClaudeCliProvider(BaseLLMProvider):
             for provider in enabled_providers:
                 name = provider.get('name', 'unknown')
                 url = provider.get('url', '')
+                command = provider.get('command', '')
+                args = provider.get('args', [])
+                env = provider.get('env', {})
                 transport = provider.get('transport', 'sse')
 
-                if not url:
-                    continue
-
-                # Claude CLI expects 'type' field for SSE/HTTP transports
-                if transport in ('sse', 'streamablehttp'):
+                if transport == 'stdio':
+                    if not command:
+                        continue
+                    mcp_servers[name] = {
+                        "command": command,
+                        "args": args or [],
+                        "env": env or {},
+                    }
+                    log.log_debug(f"Added stdio MCP server to config: {name} -> {command}")
+                elif transport in ('sse', 'streamablehttp'):
+                    if not url:
+                        continue
                     mcp_servers[name] = {
                         "type": "sse" if transport == "sse" else "http",
                         "url": url

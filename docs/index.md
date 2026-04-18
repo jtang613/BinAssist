@@ -36,6 +36,8 @@ BinAssist supports the Model Context Protocol (MCP), allowing LLMs to directly i
 - Access the semantic graph
 - And more through connected MCP servers
 
+BinAssist can connect to MCP servers over remote transports (`SSE` and `Streamable HTTP`) or launch local MCP tools directly over `stdio`.
+
 See the [Query Workflow](workflows/query-workflow.md) for details on using MCP tools.
 
 ### ReAct Autonomous Agent

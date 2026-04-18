@@ -45,11 +45,14 @@ Open a terminal in the BinAssist plugin directory and run:
 pip install -r requirements.txt
 ```
 
+On Windows, `requirements.txt` now also installs `pywin32`, which the MCP SDK needs for local `stdio` MCP servers.
+
 This installs the required Python packages:
 - `openai` - OpenAI and compatible API client
 - `anthropic` - Anthropic Claude API client
 - `httpx` - HTTP client for API calls
 - `mcp` - Model Context Protocol client
+- `pywin32` - Windows support for MCP stdio transports
 - `whoosh` - Full-text search for RAG
 
 ## Initial Configuration

@@ -118,13 +118,26 @@ class MCPClientService:
             server_configs = []
             for server_data in servers_data:
                 try:
-                    # Convert settings format to MCPServerConfig format
+                    raw_transport = server_data.get('transport', 'streamablehttp').lower().strip()
+                    transport_map = {
+                        'http': 'streamablehttp',
+                        'streamablehttp': 'streamablehttp',
+                        'streamable_http': 'streamablehttp',
+                        'sse': 'sse',
+                        'stdio': 'stdio',
+                    }
+                    transport_type = transport_map.get(raw_transport, 'streamablehttp')
+
                     config_dict = {
                         'name': server_data['name'],
-                        'transport_type': server_data.get('transport', 'sse').lower(),
+                        'transport_type': transport_type,
                         'enabled': server_data.get('enabled', True),
                         'url': server_data.get('url'),
-                        'timeout': server_data.get('timeout', 30.0)
+                        'timeout': server_data.get('timeout', 30.0),
+                        'command': server_data.get('command'),
+                        'args': server_data.get('args'),
+                        'env': server_data.get('env'),
+                        'cwd': server_data.get('cwd')
                     }
 
                     config = MCPServerConfig.from_dict(config_dict)

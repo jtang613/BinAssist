@@ -96,9 +96,9 @@ This section manages Model Context Protocol (MCP) servers that provide tools for
 | Column | Description |
 |--------|-------------|
 | **Name** | Display name for the server |
-| **URL** | Server endpoint URL |
+| **Target** | Remote URL for HTTP/SSE servers, or the command for stdio servers |
 | **Enabled** | Whether the server is active |
-| **Transport** | Connection protocol (HTTP, SSE, Stdio) |
+| **Transport** | Connection protocol (Streamable HTTP, SSE, or Stdio) |
 
 ### MCP Management Buttons
 
@@ -111,9 +111,23 @@ This section manages Model Context Protocol (MCP) servers that provide tools for
 
 | Transport | Description | Use Case |
 |-----------|-------------|----------|
-| **HTTP** | Standard HTTP requests | Simple tool servers |
+| **Streamable HTTP** | Modern bidirectional HTTP MCP transport | Remote MCP servers exposing `/mcp` |
 | **SSE** | Server-Sent Events | Streaming responses, real-time updates |
 | **Stdio** | Standard I/O | Local command-line tools |
+
+### Add/Edit MCP Server Dialog
+
+The dialog adapts to the selected transport:
+
+- **SSE / Streamable HTTP**: Configure a server URL.
+- **Stdio**: Configure the executable command, optional arguments, working directory, and environment JSON.
+
+For stdio servers:
+
+- **Command**: Executable to launch, such as `python`, `uvx`, or `npx`
+- **Arguments**: Shell-style arguments or a JSON array of strings
+- **Working Directory**: Optional directory to launch the server from
+- **Environment JSON**: Optional JSON object of string key/value pairs passed to the process
 
 ### Recommended MCP Server
 

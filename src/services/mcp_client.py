@@ -7,12 +7,12 @@ for connecting to and interacting with MCP servers using the official MCP Python
 """
 
 import asyncio
-from typing import Dict, List, Optional, Any, Union
-from dataclasses import dataclass
-import json
+import os
+import sys
+from typing import Dict, List, Optional, Any
 
 from .models.mcp_models import MCPServerConfig, MCPTool, MCPResource
-from .mcp_exceptions import MCPError, MCPConnectionError, MCPTimeoutError, MCPToolError, MCPResourceError
+from .mcp_exceptions import MCPError, MCPConnectionError, MCPToolError, MCPResourceError
 
 try:
     import binaryninja
@@ -30,34 +30,45 @@ except ImportError:
         def log_debug(msg): print(f"[BinAssist] DEBUG: {msg}")
     log = MockLog()
 
-# Import MCP SDK
+MCP_SDK_IMPORT_ERROR = None
+STDIO_IMPORT_ERROR = None
+
 try:
-    from mcp import ClientSession, types
-    # Check if SSE client is available
-    try:
-        from mcp.client.sse import sse_client
-        SSE_CLIENT_AVAILABLE = True
-    except ImportError as e:
-        log.log_warn(f"MCP SSE client not available: {e}")
-        sse_client = None
-        SSE_CLIENT_AVAILABLE = False
-    # Check if Streamable HTTP client is available
-    try:
-        from mcp.client.streamable_http import streamablehttp_client
-        STREAMABLEHTTP_CLIENT_AVAILABLE = True
-    except ImportError as e:
-        log.log_warn(f"MCP Streamable HTTP client not available: {e}")
-        streamablehttp_client = None
-        STREAMABLEHTTP_CLIENT_AVAILABLE = False
+    from mcp.client.session import ClientSession
+    import mcp.types as types
     MCP_SDK_AVAILABLE = True
-except ImportError:
-    log.log_warn("MCP SDK not available. Install with: pip install mcp")
+except Exception as e:
+    MCP_SDK_IMPORT_ERROR = e
+    log.log_warn(f"MCP SDK core imports unavailable: {e}")
     MCP_SDK_AVAILABLE = False
     ClientSession = None
+    types = None
+
+try:
+    from mcp.client.sse import sse_client
+    SSE_CLIENT_AVAILABLE = True
+except Exception as e:
+    log.log_warn(f"MCP SSE client not available: {e}")
     sse_client = None
     SSE_CLIENT_AVAILABLE = False
+
+try:
+    from mcp.client.streamable_http import streamablehttp_client
+    STREAMABLEHTTP_CLIENT_AVAILABLE = True
+except Exception as e:
+    log.log_warn(f"MCP Streamable HTTP client not available: {e}")
     streamablehttp_client = None
     STREAMABLEHTTP_CLIENT_AVAILABLE = False
+
+try:
+    from mcp.client.stdio import stdio_client, StdioServerParameters
+    STDIO_CLIENT_AVAILABLE = True
+except Exception as e:
+    STDIO_IMPORT_ERROR = e
+    log.log_warn(f"MCP stdio client not available: {e}")
+    stdio_client = None
+    StdioServerParameters = None
+    STDIO_CLIENT_AVAILABLE = False
 
 
 class MCPConnection:
@@ -73,17 +84,24 @@ class MCPConnection:
         self.resources: Dict[str, MCPResource] = {}
         self._sse_context = None
         self._streamablehttp_context = None
+        self._stdio_context = None
+        self._stdio_errlog = None
         
     async def connect(self) -> bool:
         """Connect to the MCP server."""
         if not MCP_SDK_AVAILABLE:
-            raise MCPError("MCP SDK not available. Please install with: pip install mcp")
+            detail = f" ({MCP_SDK_IMPORT_ERROR})" if MCP_SDK_IMPORT_ERROR else ""
+            raise MCPError(
+                f"MCP SDK core imports unavailable{detail}. Ensure 'mcp' is installed in Binary Ninja's Python environment."
+            )
             
         try:
             if self.config.transport_type == "sse":
                 await self._connect_sse()
             elif self.config.transport_type == "streamablehttp":
                 await self._connect_streamablehttp()
+            elif self.config.transport_type == "stdio":
+                await self._connect_stdio()
             else:
                 raise MCPError(f"Unsupported transport type: {self.config.transport_type}")
                 
@@ -92,8 +110,63 @@ class MCPConnection:
             return True
             
         except Exception as e:
+            await self._cleanup_contexts()
             log.log_error(f"Failed to connect to MCP server {self.config.name}: {e}")
             raise MCPConnectionError(f"Connection failed: {e}")
+
+    async def _cleanup_contexts(self):
+        """Exit any entered context managers safely."""
+        if self.session:
+            try:
+                await self.session.__aexit__(None, None, None)
+            except Exception:
+                pass
+            self.session = None
+
+        if self._sse_context:
+            try:
+                await self._sse_context.__aexit__(None, None, None)
+            except Exception:
+                pass
+            self._sse_context = None
+
+        if self._streamablehttp_context:
+            try:
+                await self._streamablehttp_context.__aexit__(None, None, None)
+            except Exception:
+                pass
+            self._streamablehttp_context = None
+
+        if self._stdio_context:
+            try:
+                await self._stdio_context.__aexit__(None, None, None)
+            except Exception:
+                pass
+            self._stdio_context = None
+
+        if self._stdio_errlog:
+            try:
+                self._stdio_errlog.close()
+            except Exception:
+                pass
+            self._stdio_errlog = None
+
+        self.read = None
+        self.write = None
+
+    def _get_stdio_errlog(self):
+        """Get a real file handle for stdio server stderr under Binary Ninja/Windows."""
+        candidates = [getattr(sys, "__stderr__", None), getattr(sys, "stderr", None)]
+        for candidate in candidates:
+            if candidate and hasattr(candidate, "fileno"):
+                try:
+                    candidate.fileno()
+                    return candidate
+                except Exception:
+                    pass
+
+        self._stdio_errlog = open(os.devnull, "w", encoding="utf-8")
+        return self._stdio_errlog
     
     async def _connect_sse(self):
         """Connect using SSE transport."""
@@ -171,6 +244,35 @@ class MCPConnection:
                 raise MCPError(f"Connection timeout to {self.config.url}. Server may be slow or unreachable.")
             else:
                 raise MCPError(f"Failed to connect to Streamable HTTP server: {e}")
+
+    async def _connect_stdio(self):
+        """Connect using stdio transport."""
+        if not self.config.command:
+            raise MCPError("Command not specified for stdio transport")
+
+        if not STDIO_CLIENT_AVAILABLE:
+            detail = f": {STDIO_IMPORT_ERROR}" if STDIO_IMPORT_ERROR else ""
+            raise MCPError(
+                "Stdio client not available in MCP SDK"
+                f"{detail}. On Windows, install 'pywin32' in the same Python environment as Binary Ninja."
+            )
+
+        server_params = StdioServerParameters(
+            command=self.config.command,
+            args=self.config.args or [],
+            env=self.config.env,
+            cwd=self.config.cwd or None,
+        )
+        self._stdio_context = stdio_client(server_params, errlog=self._get_stdio_errlog())
+        self.read, self.write = await self._stdio_context.__aenter__()
+
+        self.session = ClientSession(self.read, self.write)
+        await self.session.__aenter__()
+
+        try:
+            await asyncio.wait_for(self.session.initialize(), timeout=self.config.timeout)
+        except asyncio.TimeoutError:
+            raise MCPError(f"Session initialization timed out after {self.config.timeout} seconds")
 
     async def _discover_capabilities(self):
         """Discover server capabilities."""
@@ -283,29 +385,13 @@ class MCPConnection:
             raise MCPResourceError(f"Resource access failed: {e}")
     
     async def disconnect(self):
-        """Disconnect from the server."""
-        if self.connected:
-            try:
-                if self.session:
-                    await self.session.__aexit__(None, None, None)
-                    self.session = None
-                
-                # Clean up transport contexts
-                if self._sse_context:
-                    await self._sse_context.__aexit__(None, None, None)
-                    self._sse_context = None
-
-                if self._streamablehttp_context:
-                    await self._streamablehttp_context.__aexit__(None, None, None)
-                    self._streamablehttp_context = None
-
-                self.read = None
-                self.write = None
-                    
-            except Exception as e:
-                log.log_warn(f"Error during disconnect: {e}")
-            finally:
-                self.connected = False
+        """Disconnect from the server and clean up all contexts."""
+        try:
+            await self._cleanup_contexts()
+        except Exception as e:
+            log.log_warn(f"Error during disconnect: {e}")
+        finally:
+            self.connected = False
 
 
 class MCPClient:
