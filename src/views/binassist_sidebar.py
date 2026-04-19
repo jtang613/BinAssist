@@ -21,7 +21,6 @@ from ..controllers.query_controller import QueryController
 from ..controllers.rag_controller import RAGController
 from ..controllers.actions_controller import ActionsController
 from ..controllers.semantic_graph_controller import SemanticGraphController
-from ..services.service_registry import get_service_registry
 
 
 class BinAssistSidebarWidget(SidebarWidget):
@@ -47,10 +46,7 @@ class BinAssistSidebarWidget(SidebarWidget):
         self.create_query_tab()
         self.create_actions_tab()
         self.create_semantic_graph_tab()
-        registry = get_service_registry()
-        settings = registry.get_settings_service()
-        if settings.is_symgraph_enabled():
-            self.create_symgraph_tab()
+        self.create_symgraph_tab()
         self.create_rag_tab()
         self.create_settings_tab()
         

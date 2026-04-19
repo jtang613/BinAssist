@@ -5,7 +5,6 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushB
                               QLineEdit, QCheckBox, QHeaderView, QAbstractItemView,
                               QGroupBox, QScrollArea, QFileDialog)
 from PySide6.QtCore import Signal, Qt
-from ..services.service_registry import get_service_registry
 
 
 class SettingsTabView(QWidget):
@@ -52,10 +51,7 @@ class SettingsTabView(QWidget):
         # Create all sections
         self.create_llm_provider_section(scroll_layout)
         self.create_mcp_provider_section(scroll_layout)
-        registry = get_service_registry()
-        settings = registry.get_settings_service()
-        if settings.is_symgraph_enabled():
-            self.create_symgraph_section(scroll_layout)
+        self.create_symgraph_section(scroll_layout)
         self.create_system_prompt_section(scroll_layout)
         self.create_database_paths_section(scroll_layout)
         
