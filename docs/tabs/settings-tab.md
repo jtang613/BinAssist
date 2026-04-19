@@ -164,7 +164,7 @@ To use push/pull features:
 3. Enter the key in the API Key field
 4. Click **Test** to verify connectivity
 
-For more details, see the [SymGraph Tab](symgraph-tab.md) and [SymGraph Workflow](../workflows/symgraph-workflow.md) documentation.
+For more details, see the [SymGraph Tab](symgraph-tab.md) documentation.
 
 ## System Prompt Section
 
@@ -201,4 +201,5 @@ These databases are SQLite files that persist across sessions. Analysis results 
 
 - [Getting Started](../getting-started.md) - Initial configuration walkthrough
 - [Query Tab](query-tab.md) - Using MCP tools in queries
+- [SymGraph Tab](symgraph-tab.md) - Sharing and syncing through SymGraph
 - [RAG Tab](rag-tab.md) - Managing documents for RAG
